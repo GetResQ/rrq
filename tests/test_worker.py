@@ -10,17 +10,14 @@ import pytest_asyncio
 from rrq.client import RRQClient
 from rrq.constants import (
     DEFAULT_QUEUE_NAME,
-    QUEUE_KEY_PREFIX,
     UNIQUE_JOB_LOCK_PREFIX,
 )
 from rrq.exc import RetryJob
-from rrq.job import JobStatus
+from rrq.job import Job, JobStatus
 from rrq.registry import JobRegistry
 from rrq.settings import RRQSettings
 from rrq.store import JobStore
-from rrq.worker import RRQWorker  # Actual import
-
-# --- RRQWorker Placeholder REMOVED ---
+from rrq.worker import RRQWorker
 
 # --- Test Job Handlers ---
 job_results: dict[str, Any] = {}
@@ -108,16 +105,11 @@ async def long_sleep_handler(ctx, *args, **kwargs):
     }
     job_run_counts[job_id] = job_run_counts.get(job_id, 0) + 1
     try:
-        # print(
-        #     f"Job {job_id} (long_sleep_handler) starting to sleep for {sleep_duration}s"
-        # )
         await asyncio.sleep(sleep_duration)
         job_results[job_id]["status"] = "finished_sleep"
-        # print(f"Job {job_id} (long_sleep_handler) finished sleep")
         return "Slept peacefully"
     except asyncio.CancelledError:
         job_results[job_id]["status"] = "cancelled_during_sleep"
-        # print(f"Job {job_id} (long_sleep_handler) cancelled during sleep")
         raise
 
 
@@ -289,7 +281,7 @@ async def test_worker_handles_job_failure_and_retry(
     assert job_run_counts.get(job_id) == 1
 
     # Check if it's back in the queue with a future score
-    queue_key = f"{QUEUE_KEY_PREFIX}{DEFAULT_QUEUE_NAME}"
+    queue_key = DEFAULT_QUEUE_NAME
     score = await job_store.redis.zscore(queue_key, job_id.encode("utf-8"))
     assert score is not None
     # Default retry backoff is 5 * (2**(retry-1)) seconds = 5 seconds for first retry
@@ -320,8 +312,8 @@ async def test_worker_handles_job_failure_max_retries_dlq(
     max_tries = rrq_settings.default_max_retries
     assert max_tries == 3  # Double check fixture setting
 
-    queue_key = f"{QUEUE_KEY_PREFIX}{DEFAULT_QUEUE_NAME}"
-    dlq_key = f"{QUEUE_KEY_PREFIX}{rrq_settings.default_dlq_name}"
+    queue_key = DEFAULT_QUEUE_NAME
+    dlq_key = rrq_settings.default_dlq_name
 
     # Loop through attempts (1 to max_tries)
     for attempt in range(1, max_tries + 1):  # Attempts 1, 2, 3
@@ -390,8 +382,8 @@ async def test_worker_handles_explicit_retry_job(
     job = await rrq_client.enqueue("retry_task", "retry_arg")
     assert job is not None
     job_id = job.id
-    queue_key = f"{QUEUE_KEY_PREFIX}{DEFAULT_QUEUE_NAME}"
-    dlq_key = f"{QUEUE_KEY_PREFIX}{worker.settings.default_dlq_name}"
+    queue_key = DEFAULT_QUEUE_NAME
+    dlq_key = worker.settings.default_dlq_name
     explicit_defer_seconds = 0.05
 
     # --- Attempt 1: Should raise RetryJob ---
@@ -491,13 +483,12 @@ async def test_worker_handles_job_timeout(
     assert job is not None
     job_id = job.id
 
-    queue_key = f"{QUEUE_KEY_PREFIX}{DEFAULT_QUEUE_NAME}"
-    dlq_key = f"{QUEUE_KEY_PREFIX}{rrq_settings.default_dlq_name}"
+    queue_key = DEFAULT_QUEUE_NAME
+    dlq_key = rrq_settings.default_dlq_name
 
     # Clear previous results for this job_id if any
     job_results.pop(job_id, None)
     job_run_counts.pop(job_id, None)
-
 
     # We'll use manual polling similar to the explicit retry test to ensure control
     worker._running_tasks.clear()
@@ -513,7 +504,6 @@ async def test_worker_handles_job_timeout(
     # Check job state after timeout
     final_job_state = await job_store.get_job_definition(job_id)
     assert final_job_state is not None
-
 
     assert final_job_state.status == JobStatus.FAILED
     assert final_job_state.last_error is not None
@@ -578,7 +568,7 @@ async def test_worker_graceful_shutdown_releases_active_jobs(
     assert active_job_state is not None, "Job state not found after starting worker"
     if active_job_state.status != JobStatus.ACTIVE:
         # Add more diagnostic info if this fails
-        queue_content = await job_store.get_queued_job_ids(DEFAULT_QUEUE_NAME, 0, -1)
+        await job_store.get_queued_job_ids(DEFAULT_QUEUE_NAME, 0, -1)
         if worker._running_tasks:
             for t in worker._running_tasks:
                 pass
@@ -617,7 +607,7 @@ async def test_worker_graceful_shutdown_releases_active_jobs(
         "Retries should not increment for shutdown interruption"
     )
 
-    queue_key = f"{QUEUE_KEY_PREFIX}{DEFAULT_QUEUE_NAME}"
+    queue_key = DEFAULT_QUEUE_NAME
     job_score = await job_store.redis.zscore(queue_key, job_id.encode("utf-8"))
     assert job_score is not None, f"Job {job_id} not found back in queue {queue_key}"
     assert job_score > (time.time() - 10) * 1000  # Re-queued recently (within 10s)
@@ -809,7 +799,7 @@ async def test_worker_releases_unique_lock_on_dlq(
     assert failed_job.status == JobStatus.FAILED
     assert failed_job.last_error is not None
 
-    dlq_key = f"{QUEUE_KEY_PREFIX}{rrq_settings.default_dlq_name}"
+    dlq_key = rrq_settings.default_dlq_name
     dlq_jobs = await job_store.redis.lrange(dlq_key, 0, -1)
     assert job_id.encode() in dlq_jobs
 
@@ -865,4 +855,110 @@ async def test_unique_lock_prevents_duplicate_then_allows_after_release(
     assert await job_store.redis.exists(lock_key) == 0
 
 
+# --- RRQWorker 'queues' parameter tests ---
+def test_rrqworker_default_queues(rrq_settings, job_registry):
+    """RRQWorker without explicit queues uses the default queue from settings."""
+    w = RRQWorker(settings=rrq_settings, job_registry=job_registry)
+    assert w.queues == [rrq_settings.default_queue_name]
 
+
+def test_rrqworker_custom_queues(rrq_settings, job_registry):
+    """RRQWorker accepts a custom list of queues to poll."""
+    custom = ["alpha", "beta"]
+    w = RRQWorker(settings=rrq_settings, job_registry=job_registry, queues=custom)
+    assert w.queues == custom
+
+
+def test_rrqworker_empty_queues_raises(rrq_settings, job_registry):
+    """RRQWorker must have at least one queue; empty list should raise ValueError."""
+    with pytest.raises(ValueError):
+        RRQWorker(settings=rrq_settings, job_registry=job_registry, queues=[])
+
+
+def test_worker_init_no_queues():
+    settings = RRQSettings()
+    registry = JobRegistry()
+    # empty list should raise
+    with pytest.raises(ValueError):
+        RRQWorker(settings, registry, queues=[])
+
+
+def test_calculate_backoff_ms():
+    settings = RRQSettings()
+    # set base and max for predictable values
+    settings.base_retry_delay_seconds = 1
+    settings.max_retry_delay_seconds = 5
+    registry = JobRegistry()
+    worker = RRQWorker(settings, registry, queues=["q1"])
+    # attempt 1 => 1 * 2^(1-1) =1s -> 1000ms
+    job = Job(id="1", function_name="fn", current_retries=1, max_retries=3)
+    assert worker._calculate_backoff_ms(job) == 1000
+    # attempt high => capped at max
+    job.current_retries = 10
+    assert worker._calculate_backoff_ms(job) == 5000
+
+
+def test_request_shutdown_and_status():
+    settings = RRQSettings()
+    registry = JobRegistry()
+    worker = RRQWorker(settings, registry, queues=["q"])
+    # initially not shutting down
+    assert not worker._shutdown_event.is_set()
+    worker._request_shutdown()
+    assert worker._shutdown_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_drain_tasks_no_tasks(monkeypatch):
+    settings = RRQSettings()
+    registry = JobRegistry()
+    worker = RRQWorker(settings, registry, queues=["q"])
+    # No tasks => returns immediately
+    # Should not raise
+    await worker._drain_tasks()
+
+
+@pytest.mark.asyncio
+async def test_task_cleanup_and_semaphore(monkeypatch):
+    settings = RRQSettings()
+    registry = JobRegistry()
+    worker = RRQWorker(settings, registry, queues=["q"])
+    # create a semaphore with value 0 (acquired)
+    sem = asyncio.Semaphore(0)
+    # create a dummy completed task
+    fut = asyncio.get_event_loop().create_future()
+    fut.set_result(None)
+    # add to running tasks
+    worker._running_tasks.add(fut)
+    # cleanup
+    worker._task_cleanup(fut, sem)
+    # semaphore should be released => value > 0
+    assert sem._value == 1
+    # task removed
+    assert fut not in worker._running_tasks
+
+
+@pytest.mark.asyncio
+async def test_worker_close_calls_job_store_aclose():
+    # Ensure RRQWorker.close calls aclose on its job_store
+    settings = RRQSettings()
+    registry = JobRegistry()
+    worker = RRQWorker(settings, registry)
+
+    # Prepare dummy job_store
+    class DummyStore:
+        def __init__(self):
+            self.aclose_called = False
+
+        async def aclose(self):
+            self.aclose_called = True
+
+    store = DummyStore()
+    # Inject dummy store into worker and client
+    worker.job_store = store
+    worker.client.job_store = store
+    # Prevent client.close from closing store
+    worker.client._created_store_internally = False
+    # Call close
+    await worker.close()
+    assert store.aclose_called, "JobStore.aclose was not called by worker.close"

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rrq"
-version = "0.2.5"
+version = "0.3.0"
 authors = [
     { name = "Mazdak Rezvani", email = "mazdak@me.com" },
 ]
@@ -33,6 +33,7 @@ dependencies = [
 dev = [
     "pytest>=8.3.5",
     "pytest-asyncio>=0.26.0",
+    "pytest-cov>=6.0.0",
 ]
 
 [project.urls]
@@ -40,7 +41,7 @@ dev = [
 "Bug Tracker" = "https://github.com/getresq/rrq/issues"
 
 [project.scripts]
-rrq = "rrq.rrq:rrq" # Assumes rrq.py is at the root of your source directory
+rrq = "rrq.cli:rrq"
 
 [tool.pytest.ini_options]
 asyncio_default_fixture_loop_scope = "function"

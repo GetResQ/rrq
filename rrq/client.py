@@ -77,26 +77,44 @@ class RRQClient:
             The created Job object if successfully enqueued, or None if enqueueing was denied
             (e.g., due to a unique key conflict).
         """
-        # print(
-        #     f"DEBUG RRQClient.enqueue: function_name='{function_name}', args={args}, kwargs={kwargs}"
-        # )  # DEBUG
-
+        # Determine job ID and enqueue timestamp
         job_id_to_use = _job_id or str(uuid.uuid4())
+        enqueue_time_utc = datetime.now(UTC)
 
+        # Compute unique lock TTL: cover deferral window if any
+        lock_ttl_seconds = self.settings.default_unique_job_lock_ttl_seconds
+        if _defer_by is not None:
+            # Defer relative to now
+            defer_secs = max(0, int(_defer_by.total_seconds()))
+            lock_ttl_seconds = max(lock_ttl_seconds, defer_secs + 1)
+        elif _defer_until is not None:
+            # Defer until specific datetime
+            dt = _defer_until
+            # Normalize to UTC
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+            elif dt.tzinfo != UTC:
+                dt = dt.astimezone(UTC)
+            diff = (dt - enqueue_time_utc).total_seconds()
+            if diff > 0:
+                lock_ttl_seconds = max(lock_ttl_seconds, int(diff) + 1)
+
+        unique_acquired = False
+        # Acquire unique lock if requested, with TTL covering defer window
         if _unique_key:
             lock_acquired = await self.job_store.acquire_unique_job_lock(
                 unique_key=_unique_key,
-                job_id=job_id_to_use,  # Store current job_id in lock for traceability
-                lock_ttl_seconds=self.settings.default_unique_job_lock_ttl_seconds,
+                job_id=job_id_to_use,
+                lock_ttl_seconds=lock_ttl_seconds,
             )
             if not lock_acquired:
                 logger.info(
                     f"Job with unique key '{_unique_key}' already active or recently run. Enqueue denied."
                 )
                 return None
+            unique_acquired = True
 
         queue_name_to_use = _queue_name or self.settings.default_queue_name
-        enqueue_time_utc = datetime.now(UTC)
 
         # Create the Job instance with all provided details and defaults
         job = Job(
@@ -126,9 +144,6 @@ class RRQClient:
             queue_name=queue_name_to_use,  # Store the target queue name
         )
 
-        # Save the full job definition
-        await self.job_store.save_job_definition(job)
-
         # Determine the score for the sorted set (queue)
         # Score is a millisecond timestamp for when the job should be processed.
         score_dt = enqueue_time_utc  # Default to immediate processing
@@ -145,13 +160,21 @@ class RRQClient:
             score_dt = score_dt.astimezone(UTC)
 
         score_timestamp_ms = int(score_dt.timestamp() * 1000)
+        # Record when the job is next scheduled to run (for deferred execution)
+        job.next_scheduled_run_time = score_dt
 
-        # Add the job ID to the processing queue
-        await self.job_store.add_job_to_queue(
-            queue_name_to_use,
-            job.id,
-            float(score_timestamp_ms),  # Redis ZADD score must be float
-        )
+        # Save the full job definition and add to queue (ensure unique lock is released on error)
+        try:
+            await self.job_store.save_job_definition(job)
+            await self.job_store.add_job_to_queue(
+                queue_name_to_use,
+                job.id,
+                float(score_timestamp_ms),
+            )
+        except Exception:
+            if unique_acquired:
+                await self.job_store.release_unique_job_lock(_unique_key)
+            raise
 
         logger.debug(
             f"Enqueued job {job.id} ('{job.function_name}') to queue '{queue_name_to_use}' with score {score_timestamp_ms}"

@@ -38,6 +38,23 @@ class JobStore:
         self.redis = AsyncRedis.from_url(
             settings.redis_dsn, decode_responses=False
         )  # Work with bytes initially
+        
+    def _format_queue_key(self, queue_name: str) -> str:
+        """Normalize a queue name or key into a Redis key for ZSET queues."""
+
+        # If already a full key, use it directly
+        if queue_name.startswith(QUEUE_KEY_PREFIX):
+            return queue_name
+        return f"{QUEUE_KEY_PREFIX}{queue_name}"
+
+    def _format_dlq_key(self, dlq_name: str) -> str:
+        """Normalize a DLQ name or key into a Redis key for DLQ lists."""
+        from .constants import DLQ_KEY_PREFIX
+
+        # If already a full key, use it directly
+        if dlq_name.startswith(DLQ_KEY_PREFIX):
+            return dlq_name
+        return f"{DLQ_KEY_PREFIX}{dlq_name}"
 
     async def aclose(self):
         """Closes the Redis connection pool associated with this store."""
@@ -83,9 +100,6 @@ class JobStore:
             job: The Job object to save.
         """
         job_key = f"{JOB_KEY_PREFIX}{job.id}"
-        # print(
-        #     f"DEBUG JobStore.save_job_definition (ENTRY): job.id={job.id}, job.job_args={job.job_args}, job.job_kwargs={job.job_kwargs}, type(job.job_args)={type(job.job_args)}"
-        # )
 
         # Dump model excluding fields handled manually
         job_data_dict = job.model_dump(
@@ -111,9 +125,6 @@ class JobStore:
         if "id" not in final_mapping_for_hset:
             final_mapping_for_hset["id"] = job.id
 
-        # print(
-        #     f"!!! RRQ_JOB_STORE_SAVE (PRINT) (JobID:{job.id}) -> Mapping for HSET: { {k: str(v)[:50] + '...' if isinstance(v, str) and len(v) > 50 else v for k, v in final_mapping_for_hset.items()} }"
-        # )
         if final_mapping_for_hset:  # Avoid HSET with empty mapping
             await self.redis.hset(job_key, mapping=final_mapping_for_hset)
             logger.debug(f"Saved job definition for {job.id} to Redis hash {job_key}.")
@@ -153,7 +164,6 @@ class JobStore:
         if job_args_str and job_args_str.lower() != "null":
             try:
                 job_args_list = json.loads(job_args_str)
-                # print(f"DEBUG get_job_def: Parsed job_args_list = {job_args_list}")
             except json.JSONDecodeError:
                 logger.error(
                     f"Failed to JSON decode 'job_args' for job {job_id} from string: '{job_args_str}'",
@@ -163,7 +173,6 @@ class JobStore:
         if job_kwargs_str and job_kwargs_str.lower() != "null":
             try:
                 job_kwargs_dict = json.loads(job_kwargs_str)
-                # print(f"DEBUG get_job_def: Parsed job_kwargs_dict = {job_kwargs_dict}")
             except json.JSONDecodeError:
                 logger.error(
                     f"Failed to JSON decode 'job_kwargs' for job {job_id} from string: '{job_kwargs_str}'",
@@ -196,12 +205,6 @@ class JobStore:
             )
             validated_job.result = result_obj
 
-            # print(
-            #     f"DEBUG get_job_def (POST-MANUAL-ASSIGN): job_id={job_id}, job.job_args='{validated_job.job_args}', type={type(validated_job.job_args)}"
-            # )
-            # print(
-            #     f"!!! RRQ_JOB_STORE_GET (POST_CREATE_VALIDATED) -> JobID:{validated_job.id}, Status:{validated_job.status.value if validated_job.status else None}, Retries:{validated_job.current_retries}"
-            # )
             logger.debug(f"Successfully retrieved and parsed job {validated_job.id}")
             return validated_job
         except Exception as e_val:
@@ -224,7 +227,7 @@ class JobStore:
             job_id: The ID of the job to add.
             score: The score (float) determining the job's position/priority in the queue.
         """
-        queue_key = f"{QUEUE_KEY_PREFIX}{queue_name}"
+        queue_key = self._format_queue_key(queue_name)
         await self.redis.zadd(
             queue_key, {job_id.encode("utf-8"): score}
         )  # Store job_id as bytes
@@ -243,7 +246,7 @@ class JobStore:
         Returns:
             A list of job IDs as strings.
         """
-        queue_key = f"{QUEUE_KEY_PREFIX}{queue_name}"
+        queue_key = self._format_queue_key(queue_name)
         job_ids_bytes = await self.redis.zrange(queue_key, start, end)
         return [job_id.decode("utf-8") for job_id in job_ids_bytes]
 
@@ -259,7 +262,7 @@ class JobStore:
         """
         if count <= 0:
             return []
-        queue_key = f"{QUEUE_KEY_PREFIX}{queue_name}"
+        queue_key = self._format_queue_key(queue_name)
         now_ms = int(datetime.now(UTC).timestamp() * 1000)
         # Fetch jobs with score from -inf up to current time, limit by count
         job_ids_bytes = await self.redis.zrangebyscore(
@@ -348,7 +351,7 @@ class JobStore:
             completion_time: The timestamp when the job failed permanently.
         """
         job_key = f"{JOB_KEY_PREFIX}{job_id}"
-        dlq_redis_key = f"{QUEUE_KEY_PREFIX}{dlq_name}"
+        dlq_redis_key = self._format_dlq_key(dlq_name)
 
         # Ensure complex fields are properly handled if needed (error could be complex)
         # For now, assuming simple string error message
@@ -365,6 +368,42 @@ class JobStore:
             pipe.expire(job_key, DEFAULT_DLQ_RESULT_TTL_SECONDS)
             results = await pipe.execute()
         logger.info(f"Moved job {job_id} to DLQ '{dlq_redis_key}'. Results: {results}")
+    
+    async def requeue_dlq(
+        self,
+        dlq_name: str,
+        target_queue: str,
+        limit: int | None = None,
+    ) -> int:
+        """Requeue jobs from the Dead Letter Queue back into a live queue.
+
+        Pops jobs from the DLQ list and adds them to the target queue with current timestamp.
+
+        Args:
+            dlq_name: Name of the DLQ (without prefix).
+            target_queue: Name of the target queue (without prefix).
+            limit: Maximum number of jobs to requeue; all if None.
+
+        Returns:
+            Number of jobs requeued.
+        """
+        jobs_requeued = 0
+        dlq_key = self._format_dlq_key(dlq_name)
+        # Continue popping until limit is reached or DLQ is empty
+        while limit is None or jobs_requeued < limit:
+            job_id_bytes = await self.redis.rpop(dlq_key)
+            if not job_id_bytes:
+                break
+            job_id = job_id_bytes.decode("utf-8")
+            # Use current time for re-enqueue score
+            now_ms = int(datetime.now(UTC).timestamp() * 1000)
+            await self.add_job_to_queue(
+                self._format_queue_key(target_queue),
+                job_id,
+                now_ms,
+            )
+            jobs_requeued += 1
+        return jobs_requeued
 
     async def get_job_lock_owner(self, job_id: str) -> Optional[str]:
         """Gets the current owner (worker ID) of a job's processing lock, if held.
@@ -389,7 +428,7 @@ class JobStore:
         Returns:
             The number of elements removed (0 or 1).
         """
-        queue_key = f"{QUEUE_KEY_PREFIX}{queue_name}"
+        queue_key = self._format_queue_key(queue_name)
         removed_count = await self.redis.zrem(queue_key, job_id.encode("utf-8"))
         count = int(removed_count)  # Ensure int
         if count > 0:
@@ -469,16 +508,12 @@ class JobStore:
 
         # Serialize result to JSON string
         try:
-            # Use pydantic-core for robust serialization if available, else standard json
+            # Use pydantic JSON serialization if available, else standard JSON dump
             if hasattr(result, "model_dump_json"):
                 result_str = result.model_dump_json()
-            elif isinstance(result, str):
-                result_str = result  # Store plain strings directly if not JSON-like?
-                # Let's stick to JSON encoding everything for consistency in save/load.
-                # If it's already a string, json.dumps adds quotes.
-                result_str = json.dumps(result)
             else:
-                result_str = json.dumps(result, default=str)  # Handle datetimes etc.
+                # Always JSON-encode the result, converting unknown types to strings
+                result_str = json.dumps(result, default=str)
         except TypeError as e:
             logger.error(
                 f"Failed to serialize result for job {job_id}: {e}", exc_info=True

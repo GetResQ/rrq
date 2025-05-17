@@ -16,9 +16,6 @@ def sync_handler(ctx):
     return "sync"
 
 
-# ----------------------------------------
-
-
 @pytest.fixture
 def registry():
     """Provides a clean JobRegistry instance for each test."""

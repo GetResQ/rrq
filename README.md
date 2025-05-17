@@ -26,10 +26,20 @@ RRQ is a Python library for creating reliable job queues using Redis and `asynci
 *   **Worker Health Checks**: Workers periodically update a health key in Redis with a TTL, allowing monitoring systems to track active workers.
 *   **Deferred Execution**: Jobs can be scheduled to run at a future time using `_defer_by` or `_defer_until`.
     *Note: Using deferral with a specific `_job_id` will effectively reschedule the job associated with that ID to the new time, overwriting its previous definition and score. It does not create multiple distinct scheduled jobs with the same ID.*
+    *To batch multiple enqueue calls into a single deferred job (and prevent duplicates within the defer window), combine `_unique_key` with `_defer_by`. For example:*
+
+      ```python
+      await client.enqueue(
+          "process_updates",
+          item_id=123,
+          _unique_key="update:123",
+          _defer_by=10,
+      )
+      ```
 
 ## Basic Usage
 
-*(See [`rrq_example.py`](https://github.com/GetResQ/rrq/examples/rrq_example.py) in the project root for a runnable example)*
+*(See [`rrq_example.py`](https://github.com/GetResQ/rrq/tree/master/example) in the project root for a runnable example)*
 
 **1. Define Handlers:**
 
@@ -133,10 +143,9 @@ rrq <command> [options]
 
 - **`worker run`**: Run an RRQ worker process to process jobs from queues.
   ```bash
-  rrq worker run [--burst] [--detach] --settings <settings_path>
+  rrq worker run [--burst] --settings <settings_path>
   ```
   - `--burst`: Run in burst mode (process one job/batch then exit).
-  - `--detach`: Run the worker in the background.
   - `--settings`: Python settings path for application worker settings (e.g., `myapp.worker_config.rrq_settings`).
 
 - **`worker watch`**: Run an RRQ worker with auto-restart on file changes in a specified directory.
