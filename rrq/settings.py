@@ -5,7 +5,6 @@ Settings can be loaded from environment variables (with a prefix of `RRQ_`) or
 from a .env file. Sensible defaults are provided for most settings.
 """
 
-# Import Callable and Awaitable for type hinting hooks
 from typing import Awaitable, Callable, Optional
 
 from pydantic import Field
@@ -95,7 +94,8 @@ class RRQSettings(BaseSettings):
         description="Grace period (in seconds) for active job tasks to finish during worker shutdown.",
     )
     job_registry: Optional[JobRegistry] = Field(
-        default=None, description="Job registry instance, typically provided by the application."
+        default=None,
+        description="Job registry instance, typically provided by the application.",
     )
     model_config = SettingsConfigDict(
         env_prefix="RRQ_",
@@ -104,4 +104,3 @@ class RRQSettings(BaseSettings):
         # env_file=".env",
         # env_file_encoding='utf-8'
     )
-

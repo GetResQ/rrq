@@ -53,8 +53,6 @@ class Job(BaseModel):
         default_factory=lambda: datetime.now(UTC),
         description="Timestamp (UTC) when the job was initially enqueued.",
     )
-    # score: Optional[float] = None # The score in the ZSET, derived from defer_until/defer_by
-    # Not stored in the job hash directly, but used for queueing.
 
     status: JobStatus = Field(
         default=JobStatus.PENDING, description="Current status of the job."
@@ -107,27 +105,3 @@ class Job(BaseModel):
         default=None,
         description="The name of the Dead Letter Queue this job will be moved to if it fails permanently.",
     )
-
-    # For model_config to allow arbitrary types if result is complex and not Pydantic model
-    # class Config:
-    #     arbitrary_types_allowed = True
-
-    # def to_redis_hash(self) -> dict[str, Any]:
-    #     """Prepares the job model for storage as a Redis hash.
-    #     Pydantic's model_dump is good, but we might want to ensure all values are easily
-    #     storable as strings or simple types for Redis, or handle serialization here.
-    #     For now, model_dump with json_encoders should suffice with a good serializer.
-    #     """
-    #     # Using model_dump ensures that Pydantic models are properly serialized (e.g., datetimes to ISO strings)
-    #     # We will use a JSON serializer in JobStore that handles Pydantic models correctly.
-    #     return self.model_dump(exclude_none=True)
-
-    # @classmethod
-    # def from_redis_hash(cls, data: dict[str, Any]) -> "Job":
-    #     """Reconstructs a Job instance from data retrieved from a Redis hash."""""""""
-    #     # Pydantic will handle parsing basic types. Datetimes are expected to be ISO strings.
-    #     # Handle potential None values for args/kwargs if they were excluded from dump
-    #     # data.setdefault("args", None) # Removed
-    #     # data.setdefault("kwargs", None) # Removed
-    #     return cls(**data)
-    pass  # Add pass if class body becomes empty after removing methods, or remove if not needed

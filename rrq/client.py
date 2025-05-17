@@ -77,10 +77,6 @@ class RRQClient:
             The created Job object if successfully enqueued, or None if enqueueing was denied
             (e.g., due to a unique key conflict).
         """
-        # print(
-        #     f"DEBUG RRQClient.enqueue: function_name='{function_name}', args={args}, kwargs={kwargs}"
-        # )  # DEBUG
-
         job_id_to_use = _job_id or str(uuid.uuid4())
 
         if _unique_key:

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 import uuid
 from datetime import UTC, datetime
@@ -11,7 +12,6 @@ from rrq.constants import (
     DEFAULT_DLQ_NAME,
     JOB_KEY_PREFIX,
     LOCK_KEY_PREFIX,
-    QUEUE_KEY_PREFIX,
     UNIQUE_JOB_LOCK_PREFIX,
 )
 from rrq.job import Job, JobStatus
@@ -278,7 +278,7 @@ async def test_move_job_to_dlq(job_store: JobStore):
     assert abs((retrieved_job.completion_time - completion_time).total_seconds()) < 1
 
     # Verify job ID is in the DLQ list
-    dlq_key = f"{QUEUE_KEY_PREFIX}{dlq_name_to_use}"  # Assuming DLQ uses QUEUE prefix
+    dlq_key = dlq_name_to_use  # DLQ uses its own prefix
     dlq_content_bytes = await job_store.redis.lrange(dlq_key, 0, -1)
     dlq_content = [item.decode("utf-8") for item in dlq_content_bytes]
     assert job.id in dlq_content
@@ -360,3 +360,39 @@ async def test_acquire_unique_job_lock_expires(job_store: JobStore):
 
     # Cleanup
     await job_store.release_unique_job_lock(unique_key)
+
+
+
+
+def test_format_keys():
+    store = JobStore(RRQSettings())
+    # queue key formatting
+    assert store._format_queue_key("foo") == "rrq:queue:foo"
+    already = "rrq:queue:bar"
+    assert store._format_queue_key(already) == already
+    # dlq key formatting
+    from rrq.constants import DLQ_KEY_PREFIX
+
+    assert store._format_dlq_key("baz") == f"{DLQ_KEY_PREFIX}baz"
+    full = f"{DLQ_KEY_PREFIX}qux"
+    assert store._format_dlq_key(full) == full
+
+
+@pytest.mark.asyncio
+async def test_serialize_deserialize():
+    store = JobStore(RRQSettings())
+    # simple types
+    b = await store._serialize_job_field(123)
+    assert b == b"123"
+    b2 = await store._serialize_job_field("abc")
+    assert b2 == b"abc"
+    # complex types
+    obj = {"x": 1}
+    b3 = await store._serialize_job_field(obj)
+    assert json.loads(b3.decode()) == obj
+    # deserialize valid JSON
+    v = await store._deserialize_job_field(b'{"a":2}')
+    assert v == {"a": 2}
+    # deserialize non-JSON
+    v2 = await store._deserialize_job_field(b"xyz")
+    assert v2 == "xyz"

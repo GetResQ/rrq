@@ -15,6 +15,7 @@ DEFAULT_DLQ_NAME: str = "rrq:dlq:default"
 # Redis key prefixes
 JOB_KEY_PREFIX: str = "rrq:job:"
 QUEUE_KEY_PREFIX: str = "rrq:queue:"  # For ZSETs holding job IDs
+DLQ_KEY_PREFIX: str = "rrq:dlq:"  # For lists holding Dead Letter Queue job IDs
 ACTIVE_JOBS_PREFIX: str = (
     "rrq:active:"  # For lists of active jobs per worker (optional, for recovery)
 )

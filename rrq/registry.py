@@ -2,8 +2,6 @@
 
 from typing import Any, Callable, Optional
 
-# Potentially: from collections.abc import Callable if more specific async callable needed
-
 
 class JobRegistry:
     """Manages the registration and retrieval of job handler functions.
@@ -74,4 +72,3 @@ class JobRegistry:
 
 
 # Global instance for convenience, though applications might manage their own.
-# job_registry = JobRegistry()

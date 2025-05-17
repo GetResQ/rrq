@@ -133,10 +133,9 @@ rrq <command> [options]
 
 - **`worker run`**: Run an RRQ worker process to process jobs from queues.
   ```bash
-  rrq worker run [--burst] [--detach] --settings <settings_path>
+  rrq worker run [--burst] --settings <settings_path>
   ```
   - `--burst`: Run in burst mode (process one job/batch then exit).
-  - `--detach`: Run the worker in the background.
   - `--settings`: Python settings path for application worker settings (e.g., `myapp.worker_config.rrq_settings`).
 
 - **`worker watch`**: Run an RRQ worker with auto-restart on file changes in a specified directory.

@@ -48,6 +48,7 @@ class RRQWorker:
         job_registry: JobRegistry,
         queues: Optional[list[str]] = None,
         worker_id: Optional[str] = None,
+        burst: bool = False,
     ):
         """Initializes the RRQWorker.
 
@@ -73,6 +74,8 @@ class RRQWorker:
             worker_id
             or f"{DEFAULT_WORKER_ID_PREFIX}{os.getpid()}_{uuid.uuid4().hex[:6]}"
         )
+        # Burst mode: process existing jobs then exit
+        self.burst = burst
 
         self._semaphore = asyncio.Semaphore(self.settings.worker_concurrency)
         self._running_tasks: set[asyncio.Task] = set()
@@ -144,7 +147,14 @@ class RRQWorker:
                             f"Worker {self.worker_id} polling for up to {jobs_to_fetch} jobs..."
                         )
                         self.status = "polling"
-                    await self._poll_for_jobs(jobs_to_fetch)
+                    # Poll for jobs and get count of jobs started
+                    fetched_count = await self._poll_for_jobs(jobs_to_fetch)
+                    # In burst mode, exit when no new jobs and no tasks running
+                    if self.burst and fetched_count == 0 and not self._running_tasks:
+                        logger.info(
+                            f"Worker {self.worker_id} burst mode complete: no more jobs."
+                        )
+                        break
                 else:
                     if self.status != "idle (concurrency limit)":
                         logger.debug(
@@ -224,6 +234,8 @@ class RRQWorker:
                     exc_info=True,
                 )
                 await asyncio.sleep(1)  # Avoid tight loop on polling error
+        # For burst mode, return number of jobs fetched in this poll
+        return fetched_count
 
     async def _try_process_job(self, job_id: str, queue_name: str) -> bool:
         """Attempts to lock, fetch definition, and start the execution task for a specific job.
