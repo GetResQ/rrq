@@ -29,7 +29,7 @@ RRQ is a Python library for creating reliable job queues using Redis and `asynci
 
 ## Basic Usage
 
-*(See [`rrq_example.py`](https://github.com/GetResQ/rrq/examples/rrq_example.py) in the project root for a runnable example)*
+*(See [`rrq_example.py`](https://github.com/GetResQ/rrq/tree/master/example) in the project root for a runnable example)*
 
 **1. Define Handlers:**
 
