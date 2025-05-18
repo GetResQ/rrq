@@ -936,3 +936,29 @@ async def test_task_cleanup_and_semaphore(monkeypatch):
     assert sem._value == 1
     # task removed
     assert fut not in worker._running_tasks
+
+
+@pytest.mark.asyncio
+async def test_worker_close_calls_job_store_aclose():
+    # Ensure RRQWorker.close calls aclose on its job_store
+    settings = RRQSettings()
+    registry = JobRegistry()
+    worker = RRQWorker(settings, registry)
+
+    # Prepare dummy job_store
+    class DummyStore:
+        def __init__(self):
+            self.aclose_called = False
+
+        async def aclose(self):
+            self.aclose_called = True
+
+    store = DummyStore()
+    # Inject dummy store into worker and client
+    worker.job_store = store
+    worker.client.job_store = store
+    # Prevent client.close from closing store
+    worker.client._created_store_internally = False
+    # Call close
+    await worker.close()
+    assert store.aclose_called, "JobStore.aclose was not called by worker.close"
