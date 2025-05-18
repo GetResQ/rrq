@@ -817,7 +817,8 @@ class RRQWorker:
         delay_seconds = min(max_delay, base_delay * (2 ** (retry_attempt - 1)))
         delay_ms = int(delay_seconds * 1000)
         logger.debug(
-            f"Calculated backoff for job {job.id} (attempt {retry_attempt}): {delay_ms}ms"
+            f"Calculated backoff for job {job.id} (attempt {retry_attempt}): "
+            f"base_delay={base_delay}s, max_delay={max_delay}s -> {delay_ms}ms"
         )
         return delay_ms
 
@@ -905,5 +906,6 @@ class RRQWorker:
         if self.client:  # Check if client exists before closing
             await self.client.close()
         if self.job_store:
-            await self.job_store.close()
+            # Close the Redis connection pool
+            await self.job_store.aclose()
         logger.info(f"[{self.worker_id}] RRQ worker closed.")

@@ -309,3 +309,48 @@ async def test_enqueue_with_defer_by_and_until():
     _, _, score2 = store.queued[-1]
     # score around future
     assert abs(score2 - future.replace(tzinfo=timezone.utc).timestamp() * 1000) < 100
+
+@pytest.mark.asyncio
+async def test_unique_lock_ttl_respects_defer_by_override():
+    # Override default unique TTL to small value for testing
+    settings = RRQSettings(default_unique_job_lock_ttl_seconds=2)
+    store = DummyStore()
+    client = RRQClient(settings=settings, job_store=store)
+    defer = timedelta(seconds=5)
+    # Enqueue with defer_by greater than default TTL
+    await client.enqueue("func", _unique_key="key1", _defer_by=defer)
+    # acquire_unique_job_lock should have been called once
+    assert store.locks, "Unique lock was not acquired"
+    key, job_id, ttl = store.locks[-1]
+    assert key == "key1"
+    # TTL should be at least defer seconds + 1 (i.e., 6)
+    assert ttl == 6, f"Expected TTL 6, got {ttl}"
+
+@pytest.mark.asyncio
+async def test_unique_lock_ttl_default_no_defer():
+    # When no defer, TTL should equal default
+    settings = RRQSettings(default_unique_job_lock_ttl_seconds=3)
+    store = DummyStore()
+    client = RRQClient(settings=settings, job_store=store)
+    await client.enqueue("func", _unique_key="key2")
+    assert store.locks, "Unique lock was not acquired"
+    _, _, ttl = store.locks[-1]
+    assert ttl == 3, f"Expected TTL 3, got {ttl}"
+
+@pytest.mark.asyncio
+async def test_next_scheduled_run_time_set_correctly():
+    settings = RRQSettings()
+    store = DummyStore()
+    client = RRQClient(settings=settings, job_store=store)
+    # Immediate enqueue: next_scheduled_run_time == enqueue_time
+    job = await client.enqueue("f0")
+    assert job.next_scheduled_run_time == job.enqueue_time
+    # Defer_by enqueue: next_scheduled_run_time == enqueue_time + defer_by
+    d = timedelta(seconds=10)
+    job2 = await client.enqueue("f1", _defer_by=d)
+    expected = job2.enqueue_time + d
+    assert job2.next_scheduled_run_time == expected
+    # Defer_until enqueue: next_scheduled_run_time == provided datetime (UTC)
+    dt = datetime.now(UTC) + timedelta(seconds=15)
+    job3 = await client.enqueue("f2", _defer_until=dt)
+    assert job3.next_scheduled_run_time == dt

@@ -508,16 +508,12 @@ class JobStore:
 
         # Serialize result to JSON string
         try:
-            # Use pydantic-core for robust serialization if available, else standard json
+            # Use pydantic JSON serialization if available, else standard JSON dump
             if hasattr(result, "model_dump_json"):
                 result_str = result.model_dump_json()
-            elif isinstance(result, str):
-                result_str = result  # Store plain strings directly if not JSON-like?
-                # Let's stick to JSON encoding everything for consistency in save/load.
-                # If it's already a string, json.dumps adds quotes.
-                result_str = json.dumps(result)
             else:
-                result_str = json.dumps(result, default=str)  # Handle datetimes etc.
+                # Always JSON-encode the result, converting unknown types to strings
+                result_str = json.dumps(result, default=str)
         except TypeError as e:
             logger.error(
                 f"Failed to serialize result for job {job_id}: {e}", exc_info=True

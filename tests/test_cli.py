@@ -129,7 +129,7 @@ def test_load_app_settings_fallback_to_default():
         )
 
 
-@mock.patch("rrq.rrq.RRQWorker")
+@mock.patch("rrq.cli.RRQWorker")
 def test_worker_run_command_foreground(
     mock_worker_class, cli_runner, mock_app_settings_path
 ):
@@ -153,7 +153,7 @@ def test_worker_run_command_foreground(
     mock_worker_instance.run.assert_called_once()
 
 
-@mock.patch("rrq.rrq.RRQWorker")
+@mock.patch("rrq.cli.RRQWorker")
 def test_worker_run_command_burst_mode(
     mock_worker_class, cli_runner, mock_app_settings_path
 ):
@@ -174,7 +174,7 @@ def test_worker_run_command_burst_mode(
     mock_worker_instance.run.assert_called_once()
 
 
-@mock.patch("rrq.rrq.RRQWorker")
+@mock.patch("rrq.cli.RRQWorker")
 def test_worker_run_command_with_queues(
     mock_worker_class, cli_runner, mock_app_settings_path
 ):
@@ -212,7 +212,7 @@ def test_worker_run_command_missing_settings(cli_runner):
     )
 
 
-@mock.patch("rrq.rrq.watch_rrq_worker_impl")
+@mock.patch("rrq.cli.watch_rrq_worker_impl")
 def test_worker_watch_command(mock_watch_impl, cli_runner, mock_app_settings_path):
     """Test 'rrq worker watch' command."""
 
@@ -237,7 +237,7 @@ def test_worker_watch_command(mock_watch_impl, cli_runner, mock_app_settings_pat
     assert kwargs.get("queues") is None
 
 
-@mock.patch("rrq.rrq.watch_rrq_worker_impl")
+@mock.patch("rrq.cli.watch_rrq_worker_impl")
 def test_worker_watch_command_with_queues(
     mock_watch_impl, cli_runner, mock_app_settings_path
 ):
@@ -300,7 +300,7 @@ def test_worker_watch_command_invalid_path(cli_runner, mock_app_settings_path):
     )  # Part of Click's error message for Path(exists=True)
 
 
-@mock.patch("rrq.rrq.check_health_async_impl")
+@mock.patch("rrq.cli.check_health_async_impl")
 def test_check_command_healthy(mock_check_health, cli_runner, mock_app_settings_path):
     """Test 'rrq check' command when health check is successful."""
 
@@ -318,7 +318,7 @@ def test_check_command_healthy(mock_check_health, cli_runner, mock_app_settings_
     assert "Health check PASSED" in result.output
 
 
-@mock.patch("rrq.rrq.check_health_async_impl")
+@mock.patch("rrq.cli.check_health_async_impl")
 def test_check_command_unhealthy(mock_check_health, cli_runner, mock_app_settings_path):
     """Test 'rrq check' command when health check fails."""
 
@@ -368,7 +368,7 @@ def test_stats_command_missing_settings(cli_runner):
     assert "No such command 'stats'" in result.output
 
 
-@mock.patch("rrq.rrq.JobStore.requeue_dlq")
+@mock.patch("rrq.cli.JobStore.requeue_dlq")
 def test_dlq_requeue_command(mock_requeue, cli_runner, mock_app_settings_path):
     """Test 'rrq dlq requeue' command with default options."""
 
@@ -395,7 +395,7 @@ def test_dlq_requeue_command(mock_requeue, cli_runner, mock_app_settings_path):
     assert "Requeued 5 job(s) from DLQ" in result.output
 
 
-@mock.patch("rrq.rrq.JobStore.requeue_dlq")
+@mock.patch("rrq.cli.JobStore.requeue_dlq")
 def test_dlq_requeue_with_options(mock_requeue, cli_runner, mock_app_settings_path):
     """Test 'rrq dlq requeue' with explicit dlq-name, queue, and limit."""
 

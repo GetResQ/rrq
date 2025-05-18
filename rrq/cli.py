@@ -326,7 +326,11 @@ def worker_cli():
     type=str,
     required=False,
     default=None,
-    help="Python settings path for application worker settings (e.g., myapp.worker_config.rrq_settings).",
+    help=(
+        "Python settings path for application worker settings "
+        "(e.g., myapp.worker_config.rrq_settings). "
+        "The specified settings object must include a `job_registry: JobRegistry`."
+    ),
 )
 def worker_run_command(
     burst: bool,
@@ -396,7 +400,11 @@ def worker_run_command(
     type=str,
     required=False,
     default=None,
-    help="Python settings path for application worker settings (e.g., myapp.worker_config.rrq_settings).",
+    help=(
+        "Python settings path for application worker settings "
+        "(e.g., myapp.worker_config.rrq_settings). "
+        "The specified settings object must define a `job_registry: JobRegistry`."
+    ),
 )
 @click.option(
     "--queue",
@@ -431,7 +439,11 @@ def worker_watch_command(
     type=str,
     required=False,
     default=None,
-    help="Python settings path for application worker settings (e.g., myapp.worker_config.rrq_settings).",
+    help=(
+        "Python settings path for application worker settings "
+        "(e.g., myapp.worker_config.rrq_settings). "
+        "Must include `job_registry: JobRegistry` to identify workers."
+    ),
 )
 def check_command(settings_object_path: str):
     """Perform a health check on active RRQ worker(s). Requires --settings."""
@@ -459,7 +471,11 @@ def dlq_cli():
     type=str,
     required=False,
     default=None,
-    help="Python settings path for application worker settings (e.g., myapp.worker_config.rrq_settings).",
+    help=(
+        "Python settings path for application worker settings "
+        "(e.g., myapp.worker_config.rrq_settings). "
+        "Must include `job_registry: JobRegistry` if requeueing requires handler resolution."
+    ),
 )
 @click.option(
     "--dlq-name",
