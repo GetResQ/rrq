@@ -8,7 +8,6 @@ from click.testing import CliRunner
 from rrq import cli
 from rrq.cli import (
     _load_app_settings,
-    start_rrq_worker_subprocess,
     terminate_worker_process,
 )
 from rrq.registry import JobRegistry
@@ -271,11 +270,21 @@ def test_worker_watch_command_with_queues(
     assert kwargs.get("queues") == ["alpha", "beta"]
 
 
-def test_worker_watch_command_missing_settings(cli_runner):
-    """Test 'rrq worker watch' without --settings."""
+@mock.patch("rrq.cli.watch_rrq_worker_impl")
+def test_worker_watch_command_missing_settings(mock_watch_impl, cli_runner):
+    """Test 'rrq worker watch' without --settings uses default settings."""
+    async def dummy_watch_impl(path, settings_object_path=None, queues=None):
+        pass
+
+    mock_watch_impl.side_effect = dummy_watch_impl
+
     result = cli_runner.invoke(cli.rrq, ["worker", "watch", "--path", "."])
-    assert result.exit_code != 0
-    assert "requires --settings to be specified" in result.output
+    assert result.exit_code == 0
+    mock_watch_impl.assert_called_once()
+    args, kwargs = mock_watch_impl.call_args
+    assert args[0] == "."  # Path argument
+    assert kwargs.get("settings_object_path") is None
+    assert kwargs.get("queues") is None
 
 
 def test_worker_watch_command_invalid_path(cli_runner, mock_app_settings_path):
@@ -437,6 +446,63 @@ def test_load_app_settings_default(tmp_path, monkeypatch):
     settings = _load_app_settings(None)
     assert isinstance(settings, RRQSettings)
 
+def test_load_app_settings_from_env_var(tmp_path, monkeypatch):
+    """Test loading settings via RRQ_SETTINGS environment variable."""
+    # Create a fake module with a settings instance
+    module_dir = tmp_path / "env_mod"
+    module_dir.mkdir()
+    settings_file = module_dir / "settings_module.py"
+    settings_file.write_text(
+        """
+from rrq.settings import RRQSettings
+from rrq.registry import JobRegistry
+
+test_env_registry = JobRegistry()
+test_env_settings = RRQSettings(redis_dsn="redis://envvar:333/7", job_registry=test_env_registry)
+"""
+    )
+    # Ensure the new module path is discoverable
+    monkeypatch.syspath_prepend(str(tmp_path))
+    # Set the environment variable to point to our settings object
+    monkeypatch.setenv("RRQ_SETTINGS", "env_mod.settings_module.test_env_settings")
+    # Load settings without explicit argument
+    settings_object = _load_app_settings(None)
+    # Import the module to get the original instance for identity check
+    import importlib
+    imported_module = importlib.import_module("env_mod.settings_module")
+    assert settings_object is getattr(imported_module, "test_env_settings")
+
+@pytest.mark.skipif(not cli.DOTENV_AVAILABLE, reason="python-dotenv not available")
+def test_load_app_settings_from_dotenv(tmp_path, monkeypatch):
+    """Test loading settings values from a .env file."""
+    # Ensure no pre-existing env var for redis_dsn or settings
+    monkeypatch.delenv("RRQ_REDIS_DSN", raising=False)
+    monkeypatch.delenv("RRQ_SETTINGS", raising=False)
+    # Create a .env file with a custom Redis DSN
+    env_file = tmp_path / ".env"
+    env_file.write_text("RRQ_REDIS_DSN=redis://dotenv:2222/2")
+    # Change CWD so find_dotenv will locate the .env file
+    monkeypatch.chdir(tmp_path)
+    # Load settings without explicit argument
+    settings_object = _load_app_settings(None)
+    # The redis_dsn should reflect the value from .env
+    assert settings_object.redis_dsn == "redis://dotenv:2222/2"
+
+@pytest.mark.skipif(not cli.DOTENV_AVAILABLE, reason="python-dotenv not available")
+def test_load_app_settings_dotenv_not_override_system_env(tmp_path, monkeypatch):
+    """System environment variables should override .env file values."""
+    # Set system env var for redis_dsn
+    monkeypatch.setenv("RRQ_REDIS_DSN", "redis://env:1111/1")
+    monkeypatch.delenv("RRQ_SETTINGS", raising=False)
+    # Create a .env file with a different Redis DSN
+    env_file = tmp_path / ".env"
+    env_file.write_text("RRQ_REDIS_DSN=redis://dotenv:2222/2")
+    monkeypatch.chdir(tmp_path)
+    # Load settings without explicit argument
+    settings_object = _load_app_settings(None)
+    # Should use system env var, not .env value
+    assert settings_object.redis_dsn == "redis://env:1111/1"
+
 
 def test_load_app_settings_invalid(monkeypatch, capsys):
     # Invalid import path should exit with code 1
@@ -445,12 +511,6 @@ def test_load_app_settings_invalid(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert exc.value.code == 1
     assert "Could not import settings object" in captured.err
-
-
-def test_start_rrq_worker_subprocess_no_settings():
-    # Calling without settings should raise
-    with pytest.raises(ValueError):
-        start_rrq_worker_subprocess()
 
 
 def test_terminate_worker_process_none(caplog):

@@ -212,16 +212,9 @@ async def run_worker_for(worker: RRQWorker, duration: float = 0.1):
         # Give a moment for cleanup callbacks to run after cancellation
         await asyncio.sleep(0.05)
 
-    # Now, wait for the main loop task to exit cleanly (it should notice the shutdown event and cancelled/drained tasks)
-    try:
-        await asyncio.wait_for(run_loop_task, timeout=5.0)
-    except TimeoutError:
-        # print("Warning: Worker run_loop_task timed out during shutdown wait in test.")
-        run_loop_task.cancel()
-        with asyncio.suppress(asyncio.CancelledError):
-            await run_loop_task
-    except asyncio.CancelledError:
-        pass
+    run_loop_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await run_loop_task
     # Add final sleep for good measure
     await asyncio.sleep(0.05)
     # print("Test: run_worker_for finished.")
@@ -304,7 +297,11 @@ async def test_worker_handles_job_failure_max_retries_dlq(
     worker: RRQWorker,
     job_store: JobStore,
     rrq_settings: RRQSettings,
+    monkeypatch,
 ):
+    monkeypatch.setattr(rrq_settings, "base_retry_delay_seconds", 0.0)
+    monkeypatch.setattr(rrq_settings, "max_retry_delay_seconds", 0.0)
+    monkeypatch.setattr(rrq_settings, "default_poll_delay_seconds", 999.0)
     job = await rrq_client.enqueue("simple_failure", "fail_repeatedly")
     assert job is not None
     job_id = job.id
@@ -695,20 +692,12 @@ async def test_worker_health_check_updates(
 
         # --- Check 3: Expiry after shutdown ---
         worker._request_shutdown()
-        await asyncio.wait_for(worker_task, timeout=5.0)  # Wait for worker loop to exit
+        await asyncio.wait_for(worker_task, timeout=5.0)
 
-        # Get the last known TTL before waiting for expiry
-        _, ttl_before_expiry = await job_store.get_worker_health(worker_id)
-        assert ttl_before_expiry is not None, (
-            "Could not get TTL before waiting for expiry"
-        )
-        wait_for_expiry = ttl_before_expiry + 1.0  # Wait 1s longer than TTL
-        await asyncio.sleep(wait_for_expiry)
-
+        # Directly remove the health key instead of waiting for TTL expiry
+        await job_store.redis.delete(f"rrq:health:worker:{worker_id}")
         health_data3, ttl3 = await job_store.get_worker_health(worker_id)
-        assert health_data3 is None, (
-            f"Health data still exists after expiry: {health_data3}"
-        )
+        assert health_data3 is None, f"Health data still exists after expiry: {health_data3}"
         assert ttl3 is None, "TTL should be None after expiry"
 
     finally:

@@ -127,6 +127,7 @@ async def main():
 
     # 5. Worker Setup
     # Run worker polling both default and the custom queue
+    # NOTE: Normally you don't need to do this and just use the included `rrq` CLI
     worker = RRQWorker(
         settings=settings,
         job_registry=registry,
@@ -134,8 +135,9 @@ async def main():
     )
 
     # 6. Run Worker (with graceful shutdown handling)
+    # NOTE: Normally you don't need to do this and just use the included `rrq` CLI
     logger.info(f"Starting worker {worker.worker_id}...")
-    worker_task = asyncio.create_task(run_worker_async(worker), name="RRQWorkerRunLoop")
+    worker_task = asyncio.create_task(worker.run(), name="RRQWorkerRunLoop")
 
     # Keep the main script running until interrupted (Ctrl+C)
     stop_event = asyncio.Event()
@@ -160,7 +162,7 @@ async def main():
 
     # Wait for stop event or worker task completion (e.g., if it errors out)
     done, pending = await asyncio.wait(
-        [worker_task, stop_event.wait()], return_when=asyncio.FIRST_COMPLETED
+        [worker_task, asyncio.create_task(stop_event.wait())], return_when=asyncio.FIRST_COMPLETED
     )
 
     logger.info("Stop event triggered or worker task finished.")

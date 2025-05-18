@@ -18,6 +18,14 @@ from .settings import RRQSettings
 from .store import JobStore
 from .worker import RRQWorker
 
+# Attempt to import dotenv components for .env file loading
+try:
+    from dotenv import find_dotenv, load_dotenv
+
+    DOTENV_AVAILABLE = True
+except ImportError:
+    DOTENV_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,12 +36,21 @@ def _load_app_settings(settings_object_path: str | None = None) -> RRQSettings:
     If the environment variable is not set, will create a default settings object.
     RRQ Setting objects, automatically pick up ENVIRONMENT variables starting with RRQ_.
 
+    This function will also attempt to load a .env file if python-dotenv is installed
+    and a .env file is found. System environment variables take precedence over .env variables.
+
     Args:
         settings_object_path: A string representing the path to the settings object. (e.g. "myapp.worker_config.rrq_settings").
 
     Returns:
         The RRQSettings object.
     """
+    if DOTENV_AVAILABLE:
+        dotenv_path = find_dotenv(usecwd=True)
+        if dotenv_path:
+            logger.debug(f"Loading .env file at: {dotenv_path}...")
+            load_dotenv(dotenv_path=dotenv_path, override=False)
+
     try:
         if settings_object_path is None:
             settings_object_path = os.getenv("RRQ_SETTINGS")
@@ -153,12 +170,10 @@ def start_rrq_worker_subprocess(
 ) -> subprocess.Popen | None:
     """Start an RRQ worker process, optionally for specific queues."""
     command = ["rrq", "worker", "run"]
+
     if settings_object_path:
         command.extend(["--settings", settings_object_path])
-    else:
-        raise ValueError(
-            "start_rrq_worker_subprocess called without settings_object_path!"
-        )
+
     # Add queue filters if specified
     if queues:
         for q in queues:
@@ -220,16 +235,6 @@ async def watch_rrq_worker_impl(
     settings_object_path: str | None = None,
     queues: list[str] | None = None,
 ) -> None:
-    if not settings_object_path:
-        click.echo(
-            click.style(
-                "ERROR: 'rrq worker watch' requires --settings to be specified.",
-                fg="red",
-            ),
-            err=True,
-        )
-        sys.exit(1)
-
     abs_watch_path = os.path.abspath(watch_path)
     click.echo(
         f"Watching for file changes in {abs_watch_path} to restart RRQ worker (app settings: {settings_object_path})..."
@@ -295,7 +300,7 @@ def rrq():
     """RRQ: Reliable Redis Queue Command Line Interface.
 
     Provides tools for running RRQ workers, checking system health,
-    and managing jobs. Requires an application-specific --settings module
+    and managing jobs. Requires an application-specific settings object
     for most operations.
     """
     pass
@@ -329,6 +334,7 @@ def worker_cli():
     help=(
         "Python settings path for application worker settings "
         "(e.g., myapp.worker_config.rrq_settings). "
+        "Alternatively, this can be specified as RRQ_SETTINGS env variable. "
         "The specified settings object must include a `job_registry: JobRegistry`."
     ),
 )
@@ -337,7 +343,9 @@ def worker_run_command(
     queues: tuple[str, ...],
     settings_object_path: str,
 ):
-    """Run an RRQ worker process. Requires --settings."""
+    """Run an RRQ worker process.
+    Requires an application-specific settings object.
+    """
     rrq_settings = _load_app_settings(settings_object_path)
 
     # Determine queues to poll
@@ -418,7 +426,9 @@ def worker_watch_command(
     settings_object_path: str,
     queues: tuple[str, ...],
 ):
-    """Run the RRQ worker with auto-restart on file changes in PATH. Requires --settings."""
+    """Run the RRQ worker with auto-restart on file changes in PATH.
+    Requires an application-specific settings object.
+    """
     # Run watch with optional queue filters
     asyncio.run(
         watch_rrq_worker_impl(
@@ -446,7 +456,9 @@ def worker_watch_command(
     ),
 )
 def check_command(settings_object_path: str):
-    """Perform a health check on active RRQ worker(s). Requires --settings."""
+    """Perform a health check on active RRQ worker(s).
+    Requires an application-specific settings object.
+    """
     click.echo("Performing RRQ health check...")
     healthy = asyncio.run(
         check_health_async_impl(settings_object_path=settings_object_path)

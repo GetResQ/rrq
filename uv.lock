@@ -370,7 +370,7 @@ hiredis = [
 
 [[package]]
 name = "rrq"
-version = "0.3.0"
+version = "0.3.7"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
