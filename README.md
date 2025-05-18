@@ -26,6 +26,16 @@ RRQ is a Python library for creating reliable job queues using Redis and `asynci
 *   **Worker Health Checks**: Workers periodically update a health key in Redis with a TTL, allowing monitoring systems to track active workers.
 *   **Deferred Execution**: Jobs can be scheduled to run at a future time using `_defer_by` or `_defer_until`.
     *Note: Using deferral with a specific `_job_id` will effectively reschedule the job associated with that ID to the new time, overwriting its previous definition and score. It does not create multiple distinct scheduled jobs with the same ID.*
+    *To batch multiple enqueue calls into a single deferred job (and prevent duplicates within the defer window), combine `_unique_key` with `_defer_by`. For example:*
+
+      ```python
+      await client.enqueue(
+          "process_updates",
+          item_id=123,
+          _unique_key="update:123",
+          _defer_by=10,
+      )
+      ```
 
 ## Basic Usage
 

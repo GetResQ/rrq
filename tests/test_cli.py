@@ -5,13 +5,13 @@ from unittest import mock
 import pytest
 from click.testing import CliRunner
 
-from rrq import rrq
-from rrq.registry import JobRegistry
-from rrq.rrq import (
+from rrq import cli
+from rrq.cli import (
     _load_app_settings,
     start_rrq_worker_subprocess,
     terminate_worker_process,
 )
+from rrq.registry import JobRegistry
 from rrq.settings import RRQSettings
 
 # A simple settings file content for testing
@@ -76,7 +76,7 @@ def test_load_app_settings_success(mock_app_settings_path):
     """Test that _load_app_settings successfully loads a settings object."""
     # The _load_app_settings function is implicitly tested by commands requiring --settings.
     # We can directly test it for more granular feedback if needed.
-    from rrq.rrq import _load_app_settings  # Import here to use the modified sys.path
+    from rrq.cli import _load_app_settings  # Import here to use the modified sys.path
 
     settings_object = _load_app_settings(mock_app_settings_path)
     assert isinstance(settings_object, RRQSettings)
@@ -86,7 +86,7 @@ def test_load_app_settings_success(mock_app_settings_path):
 
 def test_load_app_settings_failure_module_not_found():
     """Test _load_app_settings with a non-existent module."""
-    from rrq.rrq import _load_app_settings
+    from rrq.cli import _load_app_settings
 
     with pytest.raises(SystemExit) as e:
         _load_app_settings("non_existent_module.settings_object")
@@ -98,7 +98,7 @@ def test_load_app_settings_failure_object_not_found(tmp_path):
     """Test _load_app_settings with an existing module but non-existent object."""
     import sys
 
-    from rrq.rrq import _load_app_settings
+    from rrq.cli import _load_app_settings
 
     module_dir = tmp_path / "fakemodule"
     module_dir.mkdir()
@@ -117,7 +117,7 @@ def test_load_app_settings_failure_object_not_found(tmp_path):
 
 def test_load_app_settings_fallback_to_default():
     """Test _load_app_settings when no settings path is provided or in environment."""
-    from rrq.rrq import _load_app_settings
+    from rrq.cli import _load_app_settings
 
     # Mock os.getenv to return None for RRQ_SETTINGS
     with mock.patch("os.getenv", return_value=None):
@@ -138,7 +138,7 @@ def test_worker_run_command_foreground(
     mock_worker_class.return_value = mock_worker_instance
 
     result = cli_runner.invoke(
-        rrq.rrq, ["worker", "run", "--settings", mock_app_settings_path]
+        cli.rrq, ["worker", "run", "--settings", mock_app_settings_path]
     )
 
     assert result.exit_code == 0
@@ -162,7 +162,7 @@ def test_worker_run_command_burst_mode(
     mock_worker_class.return_value = mock_worker_instance
 
     result = cli_runner.invoke(
-        rrq.rrq, ["worker", "run", "--settings", mock_app_settings_path, "--burst"]
+        cli.rrq, ["worker", "run", "--settings", mock_app_settings_path, "--burst"]
     )
 
     # Should run in burst mode and exit successfully
@@ -183,7 +183,7 @@ def test_worker_run_command_with_queues(
     mock_worker_class.return_value = mock_worker_instance
 
     result = cli_runner.invoke(
-        rrq.rrq,
+        cli.rrq,
         [
             "worker",
             "run",
@@ -204,7 +204,7 @@ def test_worker_run_command_with_queues(
 
 def test_worker_run_command_missing_settings(cli_runner):
     """Test 'rrq worker run' without --settings."""
-    result = cli_runner.invoke(rrq.rrq, ["worker", "run"])
+    result = cli_runner.invoke(cli.rrq, ["worker", "run"])
     assert result.exit_code != 0  # Should fail because --settings is required
     expected_error = "ERROR: No 'job_registry_app'. You must provide a JobRegistry instance in settings."
     assert expected_error in str(result.output) or expected_error in str(
@@ -224,7 +224,7 @@ def test_worker_watch_command(mock_watch_impl, cli_runner, mock_app_settings_pat
     mock_watch_impl.side_effect = dummy_watch_impl
 
     result = cli_runner.invoke(
-        rrq.rrq,
+        cli.rrq,
         ["worker", "watch", "--settings", mock_app_settings_path, "--path", "."],
     )
 
@@ -249,7 +249,7 @@ def test_worker_watch_command_with_queues(
     mock_watch_impl.side_effect = dummy_watch
 
     result = cli_runner.invoke(
-        rrq.rrq,
+        cli.rrq,
         [
             "worker",
             "watch",
@@ -273,7 +273,7 @@ def test_worker_watch_command_with_queues(
 
 def test_worker_watch_command_missing_settings(cli_runner):
     """Test 'rrq worker watch' without --settings."""
-    result = cli_runner.invoke(rrq.rrq, ["worker", "watch", "--path", "."])
+    result = cli_runner.invoke(cli.rrq, ["worker", "watch", "--path", "."])
     assert result.exit_code != 0
     assert "requires --settings to be specified" in result.output
 
@@ -282,7 +282,7 @@ def test_worker_watch_command_invalid_path(cli_runner, mock_app_settings_path):
     """Test 'rrq worker watch' with a non-existent path."""
     # watchfiles checks path existence, Click also does for click.Path(exists=True)
     result = cli_runner.invoke(
-        rrq.rrq,
+        cli.rrq,
         [
             "worker",
             "watch",
@@ -309,7 +309,7 @@ def test_check_command_healthy(mock_check_health, cli_runner, mock_app_settings_
 
     mock_check_health.side_effect = dummy_check_impl
 
-    result = cli_runner.invoke(rrq.rrq, ["check", "--settings", mock_app_settings_path])
+    result = cli_runner.invoke(cli.rrq, ["check", "--settings", mock_app_settings_path])
 
     assert result.exit_code == 0
     mock_check_health.assert_called_once_with(
@@ -327,7 +327,7 @@ def test_check_command_unhealthy(mock_check_health, cli_runner, mock_app_setting
 
     mock_check_health.side_effect = dummy_check_impl
 
-    result = cli_runner.invoke(rrq.rrq, ["check", "--settings", mock_app_settings_path])
+    result = cli_runner.invoke(cli.rrq, ["check", "--settings", mock_app_settings_path])
 
     assert result.exit_code == 1  # Should exit with 1 on failure
     mock_check_health.assert_called_once_with(
@@ -338,7 +338,7 @@ def test_check_command_unhealthy(mock_check_health, cli_runner, mock_app_setting
 
 def test_check_command_missing_settings(cli_runner):
     """Test 'rrq check' without --settings."""
-    result = cli_runner.invoke(rrq.rrq, ["check"])
+    result = cli_runner.invoke(cli.rrq, ["check"])
     assert result.exit_code != 0
     assert "No active workers found" in result.output
 
@@ -347,14 +347,14 @@ def test_stats_command(cli_runner, mock_app_settings_path):
     """Test 'rrq stats' command."""
     # Test with no specific queue
     result_all = cli_runner.invoke(
-        rrq.rrq, ["stats", "--settings", mock_app_settings_path]
+        cli.rrq, ["stats", "--settings", mock_app_settings_path]
     )
     assert result_all.exit_code != 0  # Command doesn't exist yet
     assert "No such command 'stats'" in result_all.output
 
     # Test with a specific queue
     result_specific = cli_runner.invoke(
-        rrq.rrq, ["stats", "--settings", mock_app_settings_path, "--queue", "my_queue"]
+        cli.rrq, ["stats", "--settings", mock_app_settings_path, "--queue", "my_queue"]
     )
     assert result_specific.exit_code != 0
     assert "No such command 'stats'" in result_specific.output
@@ -363,7 +363,7 @@ def test_stats_command(cli_runner, mock_app_settings_path):
 
 def test_stats_command_missing_settings(cli_runner):
     """Test 'rrq stats' without --settings."""
-    result = cli_runner.invoke(rrq.rrq, ["stats"])
+    result = cli_runner.invoke(cli.rrq, ["stats"])
     assert result.exit_code != 0
     assert "No such command 'stats'" in result.output
 
@@ -379,13 +379,13 @@ def test_dlq_requeue_command(mock_requeue, cli_runner, mock_app_settings_path):
     mock_requeue.side_effect = dummy_requeue
 
     result = cli_runner.invoke(
-        rrq.rrq, ["dlq", "requeue", "--settings", mock_app_settings_path]
+        cli.rrq, ["dlq", "requeue", "--settings", mock_app_settings_path]
     )
     assert result.exit_code == 0
     mock_requeue.assert_called_once()
     args, _ = mock_requeue.call_args
     # args: (dlq_name, target_queue, limit)
-    from rrq.rrq import _load_app_settings
+    from rrq.cli import _load_app_settings
 
     settings = _load_app_settings(mock_app_settings_path)
     assert args[0] == settings.default_dlq_name
@@ -405,7 +405,7 @@ def test_dlq_requeue_with_options(mock_requeue, cli_runner, mock_app_settings_pa
     mock_requeue.side_effect = dummy_requeue
 
     result = cli_runner.invoke(
-        rrq.rrq,
+        cli.rrq,
         [
             "dlq",
             "requeue",

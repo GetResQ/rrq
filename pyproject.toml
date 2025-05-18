@@ -41,7 +41,7 @@ dev = [
 "Bug Tracker" = "https://github.com/getresq/rrq/issues"
 
 [project.scripts]
-rrq = "rrq.rrq:rrq" # Assumes rrq.py is at the root of your source directory
+rrq = "rrq.cli:rrq"
 
 [tool.pytest.ini_options]
 asyncio_default_fixture_loop_scope = "function"
