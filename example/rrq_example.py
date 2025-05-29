@@ -8,6 +8,7 @@ from contextlib import suppress
 from datetime import timedelta
 
 from rrq.client import RRQClient
+from rrq.cron import CronJob
 from rrq.exc import RetryJob
 from rrq.registry import JobRegistry
 from rrq.settings import RRQSettings
@@ -62,6 +63,33 @@ async def retry_task(ctx, counter_limit: int):
         return {"status": "completed_after_retries", "attempts": attempt}
 
 
+# --- Example Cron Job Handlers ---
+async def daily_cleanup(ctx, task_type: str, max_age_days: int = 30):
+    """Example cron job handler for daily cleanup tasks."""
+    logger.info(
+        f"DAILY_CLEANUP (Job {ctx['job_id']}): Running {task_type} cleanup, max age: {max_age_days} days"
+    )
+    await asyncio.sleep(0.5)  # Simulate cleanup work
+    logger.info(f"DAILY_CLEANUP (Job {ctx['job_id']}): Cleanup completed")
+    return {"task_type": task_type, "max_age_days": max_age_days, "status": "completed"}
+
+
+async def send_status_report(ctx):
+    """Example cron job handler for sending status reports."""
+    logger.info(f"STATUS_REPORT (Job {ctx['job_id']}): Generating and sending status report")
+    await asyncio.sleep(0.3)  # Simulate report generation
+    logger.info(f"STATUS_REPORT (Job {ctx['job_id']}): Status report sent")
+    return {"report_type": "weekly", "status": "sent"}
+
+
+async def health_check(ctx):
+    """Example cron job handler for health checks."""
+    logger.info(f"HEALTH_CHECK (Job {ctx['job_id']}): Running system health check")
+    await asyncio.sleep(0.1)  # Simulate health check
+    logger.info(f"HEALTH_CHECK (Job {ctx['job_id']}): Health check completed - all systems OK")
+    return {"status": "healthy", "timestamp": ctx.get("job_start_time")}
+
+
 # --- Main Execution ---
 async def main():
     logger.info("--- Starting RRQ Example ---")
@@ -72,8 +100,24 @@ async def main():
         default_max_retries=3,  # Lower retries for example
         worker_health_check_interval_seconds=5,  # Frequent health check
         worker_shutdown_grace_period_seconds=5,
+        # Example cron jobs - these will run periodically when the worker is running
+        cron_jobs=[
+            # Run a health check every 2 minutes (for demo purposes)
+            CronJob(
+                function_name="health_check",
+                schedule="*/2 * * * *",  # Every 2 minutes
+                queue_name="monitoring"
+            ),
+            # Send a status report every 5 minutes (for demo purposes)
+            CronJob(
+                function_name="send_status_report",
+                schedule="*/5 * * * *",  # Every 5 minutes
+                unique=True  # Prevent duplicate reports
+            ),
+        ]
     )
     logger.info(f"Using Redis DB: {settings.redis_dsn}")
+    logger.info(f"Configured {len(settings.cron_jobs)} cron jobs")
 
     # Ensure Redis DB is clean before starting (optional, good for examples)
     try:
@@ -90,6 +134,10 @@ async def main():
     registry.register("handle_success", successful_task)
     registry.register("handle_failure", failing_task)
     registry.register("handle_retry", retry_task)
+    # Register cron job handlers
+    registry.register("daily_cleanup", daily_cleanup)
+    registry.register("send_status_report", send_status_report)
+    registry.register("health_check", health_check)
     logger.info(f"Registered handlers: {registry.get_registered_functions()}")
 
     # 3. Client
@@ -131,7 +179,7 @@ async def main():
     worker = RRQWorker(
         settings=settings,
         job_registry=registry,
-        queues=[settings.default_queue_name, "high_priority"],
+        queues=[settings.default_queue_name, "high_priority", "monitoring"],
     )
 
     # 6. Run Worker (with graceful shutdown handling)
