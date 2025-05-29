@@ -3,8 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any, Optional, Sequence
 
-from pydantic import BaseModel, Field
-
+from pydantic import BaseModel, Field, PrivateAttr
 
 MONTH_NAMES = {
     "jan": 1,
@@ -97,12 +96,23 @@ class CronSchedule:
                 dt += timedelta(minutes=1)
                 continue
             dom_match = dt.day in self.dom
-            dow_match = dt.weekday() in self.dow
+            # Convert Python weekday (Monday=0) to cron weekday (Sunday=0)
+            # Python: Mon=0, Tue=1, Wed=2, Thu=3, Fri=4, Sat=5, Sun=6
+            # Cron:   Sun=0, Mon=1, Tue=2, Wed=3, Thu=4, Fri=5, Sat=6
+            python_weekday = dt.weekday()
+            cron_weekday = (python_weekday + 1) % 7
+            dow_match = cron_weekday in self.dow
+            
             if self.dom_all and self.dow_all:
                 condition = True
-            elif self.dom_all or self.dow_all:
-                condition = dom_match and dow_match
+            elif self.dom_all:
+                # Only day-of-week constraint
+                condition = dow_match
+            elif self.dow_all:
+                # Only day-of-month constraint
+                condition = dom_match
             else:
+                # Both constraints specified - use OR logic (standard cron behavior)
                 condition = dom_match or dow_match
             if condition:
                 return dt
@@ -124,7 +134,7 @@ class CronJob(BaseModel):
 
     # Next run time and parsed schedule are maintained at runtime
     next_run_time: Optional[datetime] = Field(default=None, exclude=True)
-    _cron: CronSchedule | None = Field(default=None, exclude=True)
+    _cron: CronSchedule | None = PrivateAttr(default=None)
 
     def model_post_init(self, __context: Any) -> None:  # type: ignore[override]
         self._cron = CronSchedule(self.schedule)

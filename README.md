@@ -126,6 +126,111 @@ It supports the most common features from Unix cron:
 
 Jobs are evaluated in the server's timezone and run with minute resolution.
 
+### Cron Schedule Examples
+
+```python
+# Every minute
+"* * * * *"
+
+# Every hour at minute 30
+"30 * * * *"
+
+# Every day at 2:30 AM
+"30 2 * * *"
+
+# Every Monday at 9:00 AM
+"0 9 * * mon"
+
+# Every 15 minutes
+"*/15 * * * *"
+
+# Every weekday at 6:00 PM
+"0 18 * * mon-fri"
+
+# First day of every month at midnight
+"0 0 1 * *"
+
+# Every 2 hours during business hours on weekdays
+"0 9-17/2 * * mon-fri"
+```
+
+### Defining Cron Jobs
+
+```python
+from rrq.settings import RRQSettings
+from rrq.cron import CronJob
+
+# Define your cron jobs
+cron_jobs = [
+    # Daily cleanup at 2 AM
+    CronJob(
+        function_name="daily_cleanup",
+        schedule="0 2 * * *",
+        args=["temp_files"],
+        kwargs={"max_age_days": 7}
+    ),
+    
+    # Weekly report every Monday at 9 AM
+    CronJob(
+        function_name="generate_weekly_report",
+        schedule="0 9 * * mon",
+        unique=True  # Prevent duplicate reports if worker restarts
+    ),
+    
+    # Health check every 15 minutes on a specific queue
+    CronJob(
+        function_name="system_health_check",
+        schedule="*/15 * * * *",
+        queue_name="monitoring"
+    ),
+    
+    # Backup database every night at 1 AM
+    CronJob(
+        function_name="backup_database",
+        schedule="0 1 * * *",
+        kwargs={"backup_type": "incremental"}
+    ),
+]
+
+# Add to your settings
+rrq_settings = RRQSettings(
+    redis_dsn="redis://localhost:6379/0",
+    cron_jobs=cron_jobs
+)
+```
+
+### Cron Job Handlers
+
+Your cron job handlers are regular async functions, just like other job handlers:
+
+```python
+async def daily_cleanup(ctx, file_type: str, max_age_days: int = 7):
+    """Clean up old files."""
+    job_id = ctx['job_id']
+    print(f"Job {job_id}: Cleaning up {file_type} files older than {max_age_days} days")
+    # Your cleanup logic here
+    return {"cleaned_files": 42, "status": "completed"}
+
+async def generate_weekly_report(ctx):
+    """Generate and send weekly report."""
+    job_id = ctx['job_id']
+    print(f"Job {job_id}: Generating weekly report")
+    # Your report generation logic here
+    return {"report_id": "weekly_2024_01", "status": "sent"}
+
+# Register your handlers
+from rrq.registry import JobRegistry
+
+job_registry = JobRegistry()
+job_registry.register("daily_cleanup", daily_cleanup)
+job_registry.register("generate_weekly_report", generate_weekly_report)
+
+# Add the registry to your settings
+rrq_settings.job_registry = job_registry
+```
+
+**Note:** Cron jobs are automatically enqueued by the worker when they become due. The worker checks for due cron jobs every 30 seconds and enqueues them as regular jobs to be processed.
+
 ## Command Line Interface
 
 RRQ provides a command-line interface (CLI) for managing workers and performing health checks:
@@ -166,7 +271,4 @@ RRQ can be configured in several ways, with the following precedence:
 *   **`JobRegistry` (`registry.py`)**: A simple registry to map string function names (used when enqueuing) to the actual asynchronous handler functions the worker should execute.
 *   **`JobStore` (`store.py`)**: An abstraction layer handling all direct interactions with Redis. It manages job definitions (Hashes), queues (Sorted Sets), processing locks (Strings with TTL), unique job locks, and worker health checks.
 *   **`Job` (`job.py`)**: A Pydantic model representing a job, containing its ID, handler name, arguments, status, retry counts, timestamps, results, etc.
-*   **`JobStatus` (`job.py`)**: An Enum defining the possible states of a job (`PENDING`, `ACTIVE`, `COMPLETED`, `FAILED`, `RETRYING`).
-*   **`RRQSettings` (`settings.py`)**: A Pydantic `BaseSettings` model for configuring RRQ behavior (Redis DSN, queue names, timeouts, retry policies, concurrency, etc.). Loadable from environment variables (prefix `RRQ_`).
-*   **`constants.py`**: Defines shared constants like Redis key prefixes and default configuration values.
-*   **`exc.py`**: Defines custom exceptions, notably `RetryJob` which handlers can raise to explicitly request a retry, potentially with a custom delay.
+*   **`JobStatus` (`job.py`)**: An Enum defining the possible states of a job (`PENDING`, `ACTIVE`, `COMPLETED`, `FAILED`, `
