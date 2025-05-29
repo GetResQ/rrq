@@ -13,6 +13,7 @@ RRQ is a Python library for creating reliable job queues using Redis and `asynci
 *   **Graceful Shutdown**: Workers listen for SIGINT/SIGTERM and attempt to finish active jobs within a grace period before exiting. Interrupted jobs are re-queued.
 *   **Worker Health Checks**: Workers periodically update a health key in Redis with a TTL, allowing monitoring systems to track active workers.
 *   **Deferred Execution**: Jobs can be scheduled to run at a future time using `_defer_by` or `_defer_until`.
+*   **Cron Jobs**: Periodic jobs can be defined in `RRQSettings.cron_jobs` using a simple cron syntax.
 
     - Using deferral with a specific `_job_id` will effectively reschedule the job associated with that ID to the new time, overwriting its previous definition and score. It does not create multiple distinct scheduled jobs with the same ID.
 
@@ -110,6 +111,20 @@ if __name__ == "__main__":
 ```
 
 You can run multiple instances of `worker_script.py` for concurrent processing.
+
+## Cron Jobs
+
+Add instances of `CronJob` to `RRQSettings.cron_jobs` to run periodic jobs. The
+`schedule` string follows the typical five-field cron format `minute hour day-of-month month day-of-week`.
+It supports the most common features from Unix cron:
+
+- numeric values
+- ranges (e.g. `8-11`)
+- lists separated by commas (e.g. `mon,wed,fri`)
+- step values using `/` (e.g. `*/15`)
+- names for months and days (`jan-dec`, `sun-sat`)
+
+Jobs are evaluated in the server's timezone and run with minute resolution.
 
 ## Command Line Interface
 

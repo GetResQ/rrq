@@ -28,6 +28,7 @@ from .job import Job, JobStatus
 from .registry import JobRegistry
 from .settings import RRQSettings
 from .store import JobStore
+from .cron import CronJob
 
 logger = logging.getLogger(__name__)
 
@@ -77,11 +78,14 @@ class RRQWorker:
         # Burst mode: process existing jobs then exit
         self.burst = burst
 
+        self.cron_jobs: list[CronJob] = list(self.settings.cron_jobs)
+
         self._semaphore = asyncio.Semaphore(self.settings.worker_concurrency)
         self._running_tasks: set[asyncio.Task] = set()
         self._shutdown_event = asyncio.Event()
         self._loop = None  # Will be set in run()
         self._health_check_task: Optional[asyncio.Task] = None
+        self._cron_task: Optional[asyncio.Task] = None
         self.status: str = "initializing"  # Worker status (e.g., initializing, running, polling, idle, stopped)
         logger.info(
             f"Initializing RRQWorker {self.worker_id} for queues: {self.queues}"
@@ -135,6 +139,10 @@ class RRQWorker:
         """
         logger.info(f"Worker {self.worker_id} starting run loop.")
         self._health_check_task = self._loop.create_task(self._heartbeat_loop())
+        if self.cron_jobs:
+            for cj in self.cron_jobs:
+                cj.schedule_next()
+            self._cron_task = self._loop.create_task(self._cron_loop())
 
         while not self._shutdown_event.is_set():
             try:
@@ -181,6 +189,10 @@ class RRQWorker:
             self._health_check_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._health_check_task
+        if self._cron_task:
+            self._cron_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._cron_task
 
     async def _poll_for_jobs(self, count: int) -> None:
         """Polls configured queues round-robin and attempts to start processing jobs.
@@ -780,6 +792,39 @@ class RRQWorker:
                 await asyncio.sleep(1)  # Avoid tight loop
 
         logger.debug(f"Worker {self.worker_id} heartbeat loop finished.")
+
+    async def _maybe_enqueue_cron_jobs(self) -> None:
+        """Enqueue cron jobs that are due to run."""
+        now = datetime.now(UTC)
+        for cj in self.cron_jobs:
+            if cj.due(now):
+                unique_key = f"cron:{cj.function_name}" if cj.unique else None
+                try:
+                    await self.client.enqueue(
+                        cj.function_name,
+                        *cj.args,
+                        _queue_name=cj.queue_name,
+                        _unique_key=unique_key,
+                        **cj.kwargs,
+                    )
+                finally:
+                    cj.schedule_next(now)
+
+    async def _cron_loop(self) -> None:
+        logger.debug(f"Worker {self.worker_id} starting cron loop.")
+        while not self._shutdown_event.is_set():
+            try:
+                await self._maybe_enqueue_cron_jobs()
+            except Exception as e:
+                logger.error(
+                    f"Worker {self.worker_id} error running cron jobs: {e}",
+                    exc_info=True,
+                )
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=30)
+            except TimeoutError:
+                pass
+        logger.debug(f"Worker {self.worker_id} cron loop finished.")
 
     async def _close_resources(self) -> None:
         """Closes the worker's resources, primarily the JobStore connection."""

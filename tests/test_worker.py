@@ -18,6 +18,7 @@ from rrq.registry import JobRegistry
 from rrq.settings import RRQSettings
 from rrq.store import JobStore
 from rrq.worker import RRQWorker
+from rrq.cron import CronJob
 
 # --- Test Job Handlers ---
 job_results: dict[str, Any] = {}
@@ -951,3 +952,18 @@ async def test_worker_close_calls_job_store_aclose():
     # Call close
     await worker.close()
     assert store.aclose_called, "JobStore.aclose was not called by worker.close"
+
+@pytest.mark.asyncio
+async def test_cron_job_enqueue_unique(rrq_settings, job_registry, job_store):
+    cron_job = CronJob(function_name="simple_success", schedule="* * * * *", unique=True)
+    rrq_settings.cron_jobs = [cron_job]
+    worker = RRQWorker(settings=rrq_settings, job_registry=job_registry)
+    worker.job_store = job_store
+    worker.client.job_store = job_store
+    await worker._maybe_enqueue_cron_jobs()
+    queued1 = await job_store.get_queued_job_ids(rrq_settings.default_queue_name, 0, -1)
+    assert len(queued1) == 1
+    await worker._maybe_enqueue_cron_jobs()
+    queued2 = await job_store.get_queued_job_ids(rrq_settings.default_queue_name, 0, -1)
+    assert queued2 == queued1
+

@@ -21,6 +21,7 @@ from .constants import (
     DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
 )
 from .registry import JobRegistry
+from .cron import CronJob
 
 
 class RRQSettings(BaseSettings):
@@ -96,6 +97,10 @@ class RRQSettings(BaseSettings):
     job_registry: Optional[JobRegistry] = Field(
         default=None,
         description="Job registry instance, typically provided by the application.",
+    )
+    cron_jobs: list[CronJob] = Field(
+        default_factory=list,
+        description="Optional list of cron job specifications to run periodically.",
     )
     model_config = SettingsConfigDict(
         env_prefix="RRQ_",
