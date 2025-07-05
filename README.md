@@ -239,6 +239,7 @@ RRQ provides a command-line interface (CLI) for managing workers and performing 
   - `--settings` (optional): Specify the Python path to your settings object (e.g., `myapp.worker_config.rrq_settings`). If not provided, it will use the `RRQ_SETTINGS` environment variable or default to a basic `RRQSettings` object.
   - `--queue` (optional, multiple): Specify queue(s) to poll. Defaults to the `default_queue_name` in settings.
   - `--burst` (flag): Run the worker in burst mode to process one job or batch and then exit.
+  - `--num-workers` (optional, integer): Number of parallel worker processes to start. Defaults to the number of CPU cores available on the machine.
 - **`rrq worker watch`** - Run an RRQ worker with auto-restart on file changes.
   - `--path` (optional): Directory path to watch for changes. Defaults to the current directory.
   - `--settings` (optional): Same as above.

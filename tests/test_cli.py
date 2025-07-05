@@ -1,4 +1,4 @@
-import sys
+import sys # Python's sys module
 from typing import Generator
 from unittest import mock
 
@@ -129,10 +129,11 @@ def test_load_app_settings_fallback_to_default():
 
 
 @mock.patch("rrq.cli.RRQWorker")
+@mock.patch("rrq.cli.os.cpu_count", return_value=1) # Force single worker path
 def test_worker_run_command_foreground(
-    mock_worker_class, cli_runner, mock_app_settings_path
+    mock_cpu_count_unused, mock_worker_class, cli_runner, mock_app_settings_path
 ):
-    """Test 'rrq worker run' in foreground mode."""
+    """Test 'rrq worker run' in foreground mode (single worker)."""
     mock_worker_instance = mock.MagicMock()
     mock_worker_class.return_value = mock_worker_instance
 
@@ -153,10 +154,11 @@ def test_worker_run_command_foreground(
 
 
 @mock.patch("rrq.cli.RRQWorker")
+@mock.patch("rrq.cli.os.cpu_count", return_value=1) # Force single worker path
 def test_worker_run_command_burst_mode(
-    mock_worker_class, cli_runner, mock_app_settings_path
+    mock_cpu_count_unused, mock_worker_class, cli_runner, mock_app_settings_path
 ):
-    """Test 'rrq worker run --burst'."""
+    """Test 'rrq worker run --burst' (single worker)."""
     mock_worker_instance = mock.MagicMock()
     mock_worker_class.return_value = mock_worker_instance
 
@@ -174,10 +176,11 @@ def test_worker_run_command_burst_mode(
 
 
 @mock.patch("rrq.cli.RRQWorker")
+@mock.patch("rrq.cli.os.cpu_count", return_value=1) # Force single worker path
 def test_worker_run_command_with_queues(
-    mock_worker_class, cli_runner, mock_app_settings_path
+    mock_cpu_count_unused, mock_worker_class, cli_runner, mock_app_settings_path
 ):
-    """Test 'rrq worker run' with --queue options."""
+    """Test 'rrq worker run' with --queue options (single worker)."""
     mock_worker_instance = mock.MagicMock()
     mock_worker_class.return_value = mock_worker_instance
 
@@ -201,11 +204,14 @@ def test_worker_run_command_with_queues(
     mock_worker_instance.run.assert_called_once()
 
 
-def test_worker_run_command_missing_settings(cli_runner):
-    """Test 'rrq worker run' without --settings."""
+@mock.patch("rrq.cli.os.cpu_count", return_value=1) # Force single worker path
+def test_worker_run_command_missing_settings(mock_cpu_count_unused, cli_runner):
+    """Test 'rrq worker run' without --settings (single worker)."""
     result = cli_runner.invoke(cli.rrq, ["worker", "run"])
     assert result.exit_code != 0  # Should fail because --settings is required
-    expected_error = "ERROR: No 'job_registry_app'. You must provide a JobRegistry instance in settings."
+    # When settings are missing, and job_registry is consequently None, _run_single_worker will sys.exit(1)
+    # The error message comes from _run_single_worker's check.
+    expected_error = "ERROR: No 'job_registry'. You must provide a JobRegistry instance in settings."
     assert expected_error in str(result.output) or expected_error in str(
         result.exception
     )
@@ -544,3 +550,228 @@ def test_terminate_worker_already_terminated(caplog):
     terminate_worker_process(proc, logger)
     # should log that process already terminated
     assert "already terminated" in caplog.text
+
+
+# --- Tests for --num-workers ---
+
+@mock.patch("rrq.cli.subprocess.Popen")
+@mock.patch("rrq.cli.os.cpu_count")
+@mock.patch("rrq.cli.RRQWorker") # To mock the single worker path
+def test_worker_run_num_workers_default_cpu_count(
+    mock_rrq_worker, mock_cpu_count, mock_popen, cli_runner, mock_app_settings_path
+):
+    """Test 'rrq worker run' defaults to os.cpu_count() for --num-workers."""
+    mock_cpu_count.return_value = 4
+    mock_popen_instance = mock.MagicMock()
+    mock_popen.return_value = mock_popen_instance
+
+    result = cli_runner.invoke(
+        cli.rrq, ["worker", "run", "--settings", mock_app_settings_path]
+    )
+    assert result.exit_code == 0, result.output
+    mock_cpu_count.assert_called_once()
+    assert mock_popen.call_count == 4 # Should start 4 subprocesses
+
+    # Check command for subprocesses
+    for call_args in mock_popen.call_args_list:
+        cmd = call_args[0][0]
+        assert cmd[0] == sys.executable # Check for python interpreter
+        assert cmd[1] == "-m"
+        assert cmd[2] == "rrq.cli"
+        assert cmd[3] == "worker"
+        assert cmd[4] == "run"
+        assert "--settings" in cmd
+        assert mock_app_settings_path in cmd
+        assert "--num-workers" not in cmd # Children should not get this flag
+
+
+@mock.patch("rrq.cli.subprocess.Popen")
+@mock.patch("rrq.cli.os.cpu_count") # Still mock cpu_count to ensure it's not called
+@mock.patch("rrq.cli.RRQWorker")
+def test_worker_run_num_workers_explicit(
+    mock_rrq_worker, mock_cpu_count, mock_popen, cli_runner, mock_app_settings_path
+):
+    """Test 'rrq worker run --num-workers N' starts N subprocesses."""
+    num_explicit_workers = 3
+    mock_popen_instance = mock.MagicMock()
+    mock_popen.return_value = mock_popen_instance
+
+    result = cli_runner.invoke(
+        cli.rrq,
+        [
+            "worker",
+            "run",
+            "--settings",
+            mock_app_settings_path,
+            "--num-workers",
+            str(num_explicit_workers),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_cpu_count.assert_not_called() # Should not call cpu_count if num_workers is provided
+    assert mock_popen.call_count == num_explicit_workers
+
+    # Check command for subprocesses
+    for call_args in mock_popen.call_args_list:
+        cmd = call_args[0][0]
+        assert "--num-workers" not in cmd
+
+
+@mock.patch("rrq.cli.subprocess.Popen")
+@mock.patch("rrq.cli.os.cpu_count")
+@mock.patch("rrq.cli.RRQWorker") # Mock the actual worker for single worker case
+def test_worker_run_num_workers_one(
+    mock_rrq_worker_class, mock_cpu_count, mock_popen, cli_runner, mock_app_settings_path
+):
+    """Test 'rrq worker run --num-workers 1' runs a single worker in foreground."""
+    mock_worker_instance = mock.MagicMock()
+    mock_rrq_worker_class.return_value = mock_worker_instance
+
+    result = cli_runner.invoke(
+        cli.rrq,
+        ["worker", "run", "--settings", mock_app_settings_path, "--num-workers", "1"],
+    )
+    assert result.exit_code == 0, result.output
+    mock_cpu_count.assert_not_called()
+    mock_popen.assert_not_called() # No subprocesses
+    mock_rrq_worker_class.assert_called_once() # Direct call to RRQWorker
+    args, kwargs = mock_rrq_worker_class.call_args
+    assert isinstance(kwargs["settings"], RRQSettings)
+    assert not kwargs.get("burst", False) # Default burst is False
+    mock_worker_instance.run.assert_called_once()
+
+
+def test_worker_run_num_workers_zero(cli_runner, mock_app_settings_path):
+    """Test 'rrq worker run --num-workers 0' exits with error."""
+    result = cli_runner.invoke(
+        cli.rrq,
+        ["worker", "run", "--settings", mock_app_settings_path, "--num-workers", "0"],
+    )
+    assert result.exit_code == 1
+    assert "ERROR: --num-workers must be a positive integer." in result.output
+
+
+def test_worker_run_num_workers_negative(cli_runner, mock_app_settings_path):
+    """Test 'rrq worker run --num-workers -2' exits with error."""
+    result = cli_runner.invoke(
+        cli.rrq,
+        ["worker", "run", "--settings", mock_app_settings_path, "--num-workers", "-2"],
+    )
+    assert result.exit_code == 1
+    assert "ERROR: --num-workers must be a positive integer." in result.output
+
+
+@mock.patch("rrq.cli.subprocess.Popen")
+@mock.patch("rrq.cli.os.cpu_count")
+def test_worker_run_num_workers_passes_flags(
+    mock_cpu_count, mock_popen, cli_runner, mock_app_settings_path
+):
+    """Test 'rrq worker run' with multiple workers passes flags like --burst and --queue."""
+    mock_cpu_count.return_value = 2
+    mock_popen_instance = mock.MagicMock()
+    mock_popen.return_value = mock_popen_instance
+
+    queues_to_test = ["high", "default"]
+    invoke_args = [
+        "worker", "run",
+        "--settings", mock_app_settings_path,
+        "--burst",
+    ]
+    for q in queues_to_test:
+        invoke_args.extend(["--queue", q])
+
+    result = cli_runner.invoke(cli.rrq, invoke_args)
+    assert result.exit_code == 0, result.output
+    assert mock_popen.call_count == 2
+
+    for call_args in mock_popen.call_args_list:
+        cmd = call_args[0][0]
+        assert "--burst" in cmd
+        for q_name in queues_to_test:
+            assert "--queue" in cmd
+            # This check needs to be more robust if order isn't guaranteed
+            # or if multiple --queue args are consumed by one Popen call.
+            # For now, assume simple presence.
+            assert q_name in cmd
+        assert "--num-workers" not in cmd
+
+
+@mock.patch("rrq.cli.subprocess.Popen")
+@mock.patch("rrq.cli.os.cpu_count", return_value=2) # Mock cpu_count to return 2
+@mock.patch("rrq.cli.signal.signal") # Mock signal.signal
+@mock.patch("rrq.cli.terminate_worker_process") # Mock terminate_worker_process
+def test_worker_run_multiple_workers_signal_handling(
+    mock_terminate, mock_signal, mock_cpu_count, mock_popen, cli_runner, mock_app_settings_path
+):
+    """Test that signal handlers are set up for multiple workers and terminate them."""
+    mock_popen_instance1 = mock.MagicMock(pid=1001)
+    mock_popen_instance2 = mock.MagicMock(pid=1002)
+    # Simulate Popen calls returning different instances
+    mock_popen.side_effect = [mock_popen_instance1, mock_popen_instance2]
+
+    # Store the original signal handlers to restore them if necessary
+    import signal as signal_module
+    original_sigint = signal_module.getsignal(signal_module.SIGINT)
+    original_sigterm = signal_module.getsignal(signal_module.SIGTERM)
+
+    # This test will invoke the command, which should set up new signal handlers.
+    # We need a way to trigger the signal handler from within the test.
+    # Click's CliRunner executes the command in the same process, so we can
+    # potentially send a signal to os.getpid() if the handler was more complex.
+    # Here, we'll verify that signal.signal was called correctly.
+
+    # The `_run_multiple_workers` function is expected to call `p.wait()`.
+    # If we don't want the test to hang, Popen's `wait` method needs to be non-blocking
+    # or the processes need to exit. We can make `wait` a no-op for this test.
+    mock_popen_instance1.wait = mock.MagicMock()
+    mock_popen_instance2.wait = mock.MagicMock()
+
+
+    # We need to simulate the sig_handler being called.
+    # The easiest way is to capture the handler passed to signal.signal
+    # and call it directly.
+    sigint_handler_args = None
+    sigterm_handler_args = None
+
+    def capture_signal_handler(signum, handler):
+        nonlocal sigint_handler_args, sigterm_handler_args
+        if signum == signal_module.SIGINT:
+            sigint_handler_args = (signum, handler)
+        elif signum == signal_module.SIGTERM:
+            sigterm_handler_args = (signum, handler)
+        # Call the original signal registration if needed, or just mock it away for the test
+        # For this test, we don't need to call the original `signal.signal`.
+
+    mock_signal.side_effect = capture_signal_handler
+
+    result = cli_runner.invoke(
+        cli.rrq, ["worker", "run", "--settings", mock_app_settings_path, "--num-workers", "2"]
+    )
+
+    assert result.exit_code == 0, result.output # Expect clean exit after simulated signal
+    assert mock_popen.call_count == 2
+
+    # Verify signal.signal was called for SIGINT and SIGTERM
+    # We check that it was called at least for SIGINT and SIGTERM.
+    # The mock_signal.call_args_list would contain all calls.
+    # We need to find the ones for SIGINT and SIGTERM.
+    sigint_called = any(call[0][0] == signal_module.SIGINT for call in mock_signal.call_args_list)
+    sigterm_called = any(call[0][0] == signal_module.SIGTERM for call in mock_signal.call_args_list)
+    assert sigint_called, "signal.signal not called for SIGINT"
+    assert sigterm_called, "signal.signal not called for SIGTERM"
+
+    # Now, simulate a signal by calling the captured handler
+    assert sigint_handler_args is not None, "SIGINT handler not captured"
+    _signum, captured_handler_func = sigint_handler_args
+
+    with pytest.raises(SystemExit): # The handler calls sys.exit(0)
+        captured_handler_func(signal_module.SIGINT, None) # Call with (signum, frame)
+
+    # Verify that terminate_worker_process was called for each Popen instance
+    assert mock_terminate.call_count == 2
+    mock_terminate.assert_any_call(mock_popen_instance1, mock.ANY) # mock.ANY for the logger
+    mock_terminate.assert_any_call(mock_popen_instance2, mock.ANY)
+
+    # Restore original signal handlers (important for test isolation)
+    signal_module.signal(signal_module.SIGINT, original_sigint)
+    signal_module.signal(signal_module.SIGTERM, original_sigterm)

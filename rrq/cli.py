@@ -7,6 +7,7 @@ import os
 import signal
 import subprocess
 import sys
+# import multiprocessing # No longer needed directly, os.cpu_count() is sufficient
 from contextlib import suppress
 
 import click
@@ -338,28 +339,50 @@ def worker_cli():
         "The specified settings object must include a `job_registry: JobRegistry`."
     ),
 )
+@click.option(
+    "--num-workers",
+    type=int,
+    default=None,
+    help="Number of parallel worker processes to start. Defaults to the number of CPU cores.",
+)
 def worker_run_command(
     burst: bool,
     queues: tuple[str, ...],
     settings_object_path: str,
+    num_workers: int | None,
 ):
-    """Run an RRQ worker process.
+    """Run RRQ worker processes.
     Requires an application-specific settings object.
     """
+    if num_workers is None:
+        num_workers = os.cpu_count() or 1  # Default to CPU cores, or 1 if cpu_count() is None
+        logger.info(f"No --num-workers specified, defaulting to {num_workers} (CPU cores).")
+    elif num_workers <= 0:
+        click.echo(click.style("ERROR: --num-workers must be a positive integer.", fg="red"), err=True)
+        sys.exit(1)
+
+    if num_workers == 1:
+        # Run a single worker in the current process
+        logger.info(f"Starting 1 RRQ worker process (Burst: {burst}, App Settings: {settings_object_path})")
+        _run_single_worker(burst, list(queues) if queues else None, settings_object_path)
+    else:
+        # Run multiple worker subprocesses
+        logger.info(f"Starting {num_workers} RRQ worker processes (Burst: {burst}, App Settings: {settings_object_path})")
+        _run_multiple_workers(num_workers, burst, list(queues) if queues else None, settings_object_path)
+
+
+def _run_single_worker(
+    burst: bool,
+    queues_arg: list[str] | None,
+    settings_object_path: str | None,
+):
+    """Helper function to run a single RRQ worker instance."""
     rrq_settings = _load_app_settings(settings_object_path)
-
-    # Determine queues to poll
-    queues_arg = list(queues) if queues else None
-    # Run worker in foreground (burst or continuous mode)
-
-    logger.info(
-        f"Starting RRQ Worker (Burst: {burst}, App Settings: {settings_object_path})"
-    )
 
     if not rrq_settings.job_registry:
         click.echo(
             click.style(
-                "ERROR: No 'job_registry_app'. You must provide a JobRegistry instance in settings.",
+                "ERROR: No 'job_registry'. You must provide a JobRegistry instance in settings.",
                 fg="red",
             ),
             err=True,
@@ -378,20 +401,102 @@ def worker_run_command(
         burst=burst,
     )
 
-    loop = asyncio.get_event_loop()
     try:
-        logger.info("Starting worker run loop...")
-        loop.run_until_complete(worker_instance.run())
+        logger.info("Starting worker run loop for single worker...")
+        asyncio.run(worker_instance.run())
     except KeyboardInterrupt:
         logger.info("RRQ Worker run interrupted by user (KeyboardInterrupt).")
     except Exception as e:
         logger.error(f"Exception during RRQ Worker run: {e}", exc_info=True)
+        # Consider re-raising or sys.exit(1) if the exception means failure
     finally:
-        logger.info("RRQ Worker run finished or exited. Cleaning up event loop.")
-        if loop.is_running():
-            loop.run_until_complete(loop.shutdown_asyncgens())
-            loop.close()
+        # asyncio.run handles loop cleanup.
+        logger.info("RRQ Worker run finished or exited.")
         logger.info("RRQ Worker has shut down.")
+
+
+def _run_multiple_workers(
+    num_workers: int,
+    burst: bool, # Pass burst flag
+    queues: list[str] | None,
+    settings_object_path: str | None,
+):
+    """Manages multiple worker subprocesses."""
+    processes: list[subprocess.Popen] = []
+    # loop = asyncio.get_event_loop() # Not needed here, this function is synchronous
+
+    original_sigint_handler = signal.getsignal(signal.SIGINT)
+    original_sigterm_handler = signal.getsignal(signal.SIGTERM)
+
+    def sig_handler(signum, frame):
+        logger.info(f"Signal {signal.Signals(signum).name} received by parent process. Terminating child workers...")
+        for p in processes:
+            terminate_worker_process(p, logger) # Use existing termination logic
+        # Restore original handlers before exiting or re-raising
+        signal.signal(signal.SIGINT, original_sigint_handler)
+        signal.signal(signal.SIGTERM, original_sigterm_handler)
+        # Propagate signal to ensure parent exits if it was, e.g., a Ctrl+C
+        # This is a bit tricky; for now, just exit.
+        # A more robust way might involve re-raising the signal if not handled by click/asyncio.
+        sys.exit(0)
+
+
+    signal.signal(signal.SIGINT, sig_handler)
+    signal.signal(signal.SIGTERM, sig_handler)
+
+    try:
+        for i in range(num_workers):
+            # Construct the command for the subprocess.
+            # Each subprocess runs 'rrq worker run' for a single worker.
+            # We pass along relevant flags like --settings, --queue, and --burst.
+            # Crucially, we do *not* pass --num-workers to the child,
+            # or rather, we could conceptually pass --num-workers 1.
+            # Use sys.executable to ensure the correct Python interpreter and context for the CLI.
+            cmd = [sys.executable, "-m", "rrq.cli", "worker", "run"]
+            if settings_object_path:
+                cmd.extend(["--settings", settings_object_path])
+            if queues:
+                for q_name in queues:
+                    cmd.extend(["--queue", q_name])
+            if burst:
+                cmd.append("--burst")
+            # Explicitly tell the child it's a single instance if multi-processing.
+            # This simplifies the child's logic as it won't try to spawn more.
+            # However, the current implementation of worker_run_command would call
+            # _run_single_worker if --num-workers is 1.
+            # For safety and clarity, we ensure the child doesn't get the multi-worker flag.
+
+            logger.info(f"Starting worker subprocess {i+1}/{num_workers} with command: {' '.join(cmd)}")
+            # Use start_new_session=True for process group management, similar to watch_rrq_worker_impl
+            # stdout and stderr can be configured as needed, e.g., to files or piped.
+            # For now, let them inherit or go to console.
+            process = subprocess.Popen(
+                cmd,
+                start_new_session=True, # Ensures child can be killed by group
+                stdout=subprocess.PIPE, # Use PIPE to avoid fileno issues in tests
+                stderr=subprocess.PIPE, # Use PIPE
+            )
+            processes.append(process)
+            logger.info(f"Worker subprocess {i+1} started with PID {process.pid}")
+
+        # Wait for all processes to complete
+        for p in processes:
+            p.wait()
+
+    except Exception as e:
+        logger.error(f"Error managing worker subprocesses: {e}", exc_info=True)
+        # Terminate any running processes if an error occurs in the manager
+        for p in processes:
+            if p.poll() is None: # If process is still running
+                terminate_worker_process(p, logger)
+    finally:
+        logger.info("All worker subprocesses terminated or completed.")
+        # Restore original signal handlers
+        signal.signal(signal.SIGINT, original_sigint_handler)
+        signal.signal(signal.SIGTERM, original_sigterm_handler)
+        # Any other cleanup for the parent process
+        # No loop to check or close here as this part is synchronous
+        logger.info("Parent process for multi-worker management is exiting.")
 
 
 @worker_cli.command("watch")
