@@ -360,6 +360,18 @@ def worker_run_command(
     elif num_workers <= 0:
         click.echo(click.style("ERROR: --num-workers must be a positive integer.", fg="red"), err=True)
         sys.exit(1)
+    
+    # Restrict burst mode with multiple workers
+    if num_workers > 1 and burst:
+        click.echo(
+            click.style(
+                "ERROR: --burst mode is not supported with multiple workers (--num-workers > 1). "
+                "Burst mode cannot coordinate across multiple processes.", 
+                fg="red"
+            ), 
+            err=True
+        )
+        sys.exit(1)
 
     if num_workers == 1:
         # Run a single worker in the current process

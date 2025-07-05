@@ -7,6 +7,7 @@ import asyncio
 # Use standard logging instead of custom one if appropriate
 import logging
 import os
+import random
 import signal
 import time
 import uuid
@@ -91,6 +92,21 @@ class RRQWorker:
             f"Initializing RRQWorker {self.worker_id} for queues: {self.queues}"
         )
 
+    def _calculate_jittered_delay(self, base_delay: float, jitter_factor: float = 0.5) -> float:
+        """Calculate a jittered delay to prevent thundering herd effects.
+        
+        Args:
+            base_delay: The base delay in seconds.
+            jitter_factor: Factor for jitter (0.0 to 1.0). Default 0.5 means ±50% jitter.
+            
+        Returns:
+            The jittered delay in seconds.
+        """
+        # Calculate jitter range: base_delay * (1 ± jitter_factor)
+        min_delay = base_delay * (1 - jitter_factor)
+        max_delay = base_delay * (1 + jitter_factor)
+        return random.uniform(min_delay, max_delay)
+
     async def _call_startup_hook(self) -> None:
         if self.settings.on_startup:
             logger.info(f"Worker {self.worker_id} calling on_startup hook...")
@@ -171,14 +187,17 @@ class RRQWorker:
                         self.status = "idle (concurrency limit)"
                     # At concurrency limit, wait for tasks to finish or poll delay
 
-                await asyncio.sleep(self.settings.default_poll_delay_seconds)
+                                    # Use jittered delay to prevent thundering herd effects
+                    jittered_delay = self._calculate_jittered_delay(self.settings.default_poll_delay_seconds)
+                    await asyncio.sleep(jittered_delay)
             except Exception as e:
                 logger.error(
                     f"Worker {self.worker_id} encountered error in main run loop: {e}",
                     exc_info=True,
                 )
-                # Avoid tight loop on persistent errors
-                await asyncio.sleep(1)
+                # Avoid tight loop on persistent errors with jittered delay
+                jittered_delay = self._calculate_jittered_delay(1.0)
+                await asyncio.sleep(jittered_delay)
 
         logger.info(
             f"Worker {self.worker_id} shutdown signal received. Draining tasks..."
@@ -245,7 +264,9 @@ class RRQWorker:
                     f"Worker {self.worker_id} error polling queue '{queue_name}': {e_poll}",
                     exc_info=True,
                 )
-                await asyncio.sleep(1)  # Avoid tight loop on polling error
+                # Avoid tight loop on polling error with jittered delay
+                jittered_delay = self._calculate_jittered_delay(1.0)
+                await asyncio.sleep(jittered_delay)
         # For burst mode, return number of jobs fetched in this poll
         return fetched_count
 
@@ -280,30 +301,18 @@ class RRQWorker:
             job_timeout + self.settings.default_lock_timeout_extension_seconds
         ) * 1000
 
-        # Attempt to acquire the processing lock
-        lock_acquired = await self.job_store.acquire_job_lock(
-            job.id, self.worker_id, int(lock_timeout_ms)
+        # Atomically acquire the processing lock and remove from queue
+        lock_acquired, removed_count = await self.job_store.atomic_lock_and_remove_job(
+            job.id, queue_name, self.worker_id, int(lock_timeout_ms)
         )
+        
         if not lock_acquired:
-            logger.debug(
-                f"Worker {self.worker_id} failed to acquire lock for job {job.id} (already locked by another worker)."
-            )
             return False  # Another worker got there first
-
-        logger.debug(f"Worker {self.worker_id} acquired lock for job {job.id}")
-
-        # Atomically remove the job from the queue (verify it was actually removed)
-        # Note: Ideally, lock acquisition and queue removal would be a single atomic operation (e.g., Lua script).
-        removed_count = await self.job_store.remove_job_from_queue(queue_name, job.id)
-        logger.debug(
-            f"Worker {self.worker_id} removed job {job.id} from queue '{queue_name}' (count: {removed_count})."
-        )
+        
         if removed_count == 0:
-            logger.warning(
-                f"Worker {self.worker_id} job {job.id} was already removed from queue '{queue_name}' after lock acquisition. Releasing lock."
-            )
-            await self.job_store.release_job_lock(job.id)  # Release the acquired lock
-            return False  # Job processed by another worker between our poll and lock
+            # Lock was acquired but job wasn't in queue (already processed by another worker)
+            # The atomic script automatically released the lock for us
+            return False
 
         # We have the lock and have removed the job from the queue - proceed to execute
         try:
@@ -475,48 +484,36 @@ class RRQWorker:
         appropriate delay (custom or exponential backoff) or moves to DLQ.
         """
         log_prefix = f"Worker {self.worker_id} job {job.id} (queue '{queue_name}')"
-        job_key = f"{JOB_KEY_PREFIX}{job.id}"
+        max_retries = job.max_retries
+        
         try:
-            # Atomically increment retries in the store.
-            new_retry_count = await self.job_store.increment_job_retries(job.id)
-            max_retries = (
-                job.max_retries
-            )  # Use max_retries from the job object passed in
+            # Determine deferral time
+            defer_seconds = exc.defer_seconds
+            if defer_seconds is None:
+                # Create a temporary job representation for backoff calculation
+                # We'll use current_retries + 1 since we're about to increment
+                temp_job_for_backoff = Job(
+                    id=job.id,
+                    function_name=job.function_name,
+                    current_retries=job.current_retries + 1,  # Use anticipated count
+                    max_retries=max_retries,
+                )
+                defer_ms = self._calculate_backoff_ms(temp_job_for_backoff)
+                defer_seconds = defer_ms / 1000.0
+            else:
+                logger.debug(
+                    f"{log_prefix} using custom deferral of {defer_seconds}s from RetryJob exception."
+                )
+
+            retry_at_score = (time.time() + defer_seconds) * 1000
+            target_queue = job.queue_name or self.settings.default_queue_name
+            
+            # Atomically increment retries, update status/error, and re-queue
+            new_retry_count = await self.job_store.atomic_retry_job(
+                job.id, target_queue, retry_at_score, str(exc), JobStatus.RETRYING
+            )
 
             if new_retry_count < max_retries:
-                # Update status and error atomically
-                await self.job_store.redis.hset(
-                    job_key,
-                    mapping={
-                        "status": JobStatus.RETRYING.value,
-                        "last_error": str(exc),
-                    },
-                )
-                logger.debug(f"{log_prefix} status set to RETRYING, error saved.")
-
-                # Determine deferral time
-                defer_seconds = exc.defer_seconds
-                if defer_seconds is None:
-                    # Create a temporary job representation for backoff calculation
-                    # using the *new* retry count.
-                    temp_job_for_backoff = Job(
-                        id=job.id,
-                        function_name=job.function_name,
-                        current_retries=new_retry_count,  # Use updated count
-                        max_retries=max_retries,  # Ensure this is passed
-                    )
-                    defer_ms = self._calculate_backoff_ms(temp_job_for_backoff)
-                    defer_seconds = defer_ms / 1000.0
-                else:
-                    logger.debug(
-                        f"{log_prefix} using custom deferral of {defer_seconds}s from RetryJob exception."
-                    )
-
-                retry_at_score = (time.time() + defer_seconds) * 1000
-                target_queue = job.queue_name or self.settings.default_queue_name
-                await self.job_store.add_job_to_queue(
-                    target_queue, job.id, retry_at_score
-                )
                 logger.info(
                     f"{log_prefix} explicitly retrying in {defer_seconds:.2f}s "
                     f"(attempt {new_retry_count}/{max_retries}) due to RetryJob."
@@ -549,38 +546,27 @@ class RRQWorker:
         logger.debug(f"{log_prefix} processing general failure: {type(exc).__name__}")
 
         try:
-            new_retry_count = await self.job_store.increment_job_retries(job.id)
-            # Re-fetch job state after incrementing retries might be safer if fields changed?
-            # For now, assume the job object passed in is mostly accurate except for retry count.
-            # Use max_retries from the job object passed in.
             max_retries = job.max_retries
             last_error_str = str(exc)
 
-            if new_retry_count < max_retries:
-                # Re-queue for standard retry with backoff
-                defer_ms = self._calculate_backoff_ms(
-                    Job(
-                        id=job.id,
-                        function_name=job.function_name,
-                        current_retries=new_retry_count,
-                        max_retries=max_retries,
-                    )
+            # Calculate backoff delay using anticipated retry count
+            defer_ms = self._calculate_backoff_ms(
+                Job(
+                    id=job.id,
+                    function_name=job.function_name,
+                    current_retries=job.current_retries + 1,  # Use anticipated count
+                    max_retries=max_retries,
                 )
-                retry_at_score = (time.time() * 1000) + defer_ms
-                target_queue = job.queue_name or self.settings.default_queue_name
+            )
+            retry_at_score = (time.time() * 1000) + defer_ms
+            target_queue = job.queue_name or self.settings.default_queue_name
 
-                # Atomically update status/error and re-add to queue (if possible, else separate)
-                # For now, separate HSET and ZADD
-                await self.job_store.redis.hset(
-                    f"{JOB_KEY_PREFIX}{job.id}",
-                    mapping={
-                        "status": JobStatus.RETRYING.value,
-                        "last_error": last_error_str,
-                    },
-                )
-                await self.job_store.add_job_to_queue(
-                    target_queue, job.id, retry_at_score
-                )
+            # Atomically increment retries, update status/error, and re-queue
+            new_retry_count = await self.job_store.atomic_retry_job(
+                job.id, target_queue, retry_at_score, last_error_str, JobStatus.RETRYING
+            )
+
+            if new_retry_count < max_retries:
                 logger.info(
                     f"{log_prefix} failed, retrying in {defer_ms / 1000.0:.2f}s "
                     f"(attempt {new_retry_count}/{max_retries}). Error: {str(exc)[:100]}..."
