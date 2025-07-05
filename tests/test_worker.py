@@ -1,5 +1,6 @@
 import asyncio
 import time  # Import time for checking retry score
+import uuid
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any, AsyncGenerator  # Added Callable
@@ -1160,6 +1161,196 @@ async def test_cron_job_execution_end_to_end(rrq_settings, job_registry, job_sto
     final_job = await job_store.get_job_definition(job_id)
     assert final_job is not None
     assert final_job.status == JobStatus.COMPLETED
+
+
+# --- Jittered Delays Tests ---
+
+class TestJitteredDelays:
+    """Test jittered delay calculations in worker."""
+    
+    def test_calculate_jittered_delay_default_jitter(self, worker):
+        """Test jittered delay with default jitter factor."""
+        base_delay = 2.0
+        jitter_factor = 0.5  # Default
+        
+        # Test multiple calculations to verify jitter range
+        delays = [worker._calculate_jittered_delay(base_delay) for _ in range(100)]
+        
+        # All delays should be within the expected range
+        min_expected = base_delay * (1 - jitter_factor)  # 1.0
+        max_expected = base_delay * (1 + jitter_factor)  # 3.0
+        
+        for delay in delays:
+            assert min_expected <= delay <= max_expected
+        
+        # Should have variation (not all the same)
+        assert len(set(delays)) > 1
+        
+        # Average should be close to base delay
+        avg_delay = sum(delays) / len(delays)
+        assert abs(avg_delay - base_delay) < 0.5  # Within reasonable tolerance
+    
+    def test_calculate_jittered_delay_custom_jitter(self, worker):
+        """Test jittered delay with custom jitter factor."""
+        base_delay = 5.0
+        jitter_factor = 0.2  # 20% jitter
+        
+        delays = [worker._calculate_jittered_delay(base_delay, jitter_factor) for _ in range(50)]
+        
+        # All delays should be within the expected range
+        min_expected = base_delay * (1 - jitter_factor)  # 4.0
+        max_expected = base_delay * (1 + jitter_factor)  # 6.0
+        
+        for delay in delays:
+            assert min_expected <= delay <= max_expected
+        
+        # Should have variation
+        assert len(set(delays)) > 1
+    
+    def test_calculate_jittered_delay_no_jitter(self, worker):
+        """Test jittered delay with zero jitter factor."""
+        base_delay = 3.0
+        jitter_factor = 0.0  # No jitter
+        
+        delays = [worker._calculate_jittered_delay(base_delay, jitter_factor) for _ in range(10)]
+        
+        # All delays should equal base delay
+        for delay in delays:
+            assert delay == base_delay
+    
+    def test_jittered_delay_properties(self, worker):
+        """Test mathematical properties of jittered delays."""
+        base_delay = 2.0
+        jitter_factor = 0.3
+        sample_size = 1000
+        
+        delays = [worker._calculate_jittered_delay(base_delay, jitter_factor) for _ in range(sample_size)]
+        
+        # Statistical properties
+        min_delay = min(delays)
+        max_delay = max(delays)
+        avg_delay = sum(delays) / len(delays)
+        
+        # Check range bounds
+        expected_min = base_delay * (1 - jitter_factor)
+        expected_max = base_delay * (1 + jitter_factor)
+        
+        assert expected_min <= min_delay
+        assert max_delay <= expected_max
+        
+        # Average should be close to base delay (within 5% for large sample)
+        assert abs(avg_delay - base_delay) / base_delay < 0.05
+        
+        # Should use most of the available range
+        range_used = max_delay - min_delay
+        expected_range = expected_max - expected_min
+        assert range_used > expected_range * 0.8  # At least 80% of range used
+
+
+# --- Semaphore Optimization Tests ---
+
+class TestSemaphoreOptimization:
+    """Test semaphore optimization functionality."""
+    
+    @pytest.mark.asyncio
+    async def test_semaphore_acquired_only_after_successful_lock(self, worker):
+        """Test that semaphore is only acquired after successfully getting job lock."""
+        from unittest.mock import patch, AsyncMock
+        
+        job_id = f"test_job_{uuid.uuid4()}"
+        queue_name = "test_queue"
+        
+        # Mock the job acquisition to fail (another worker got it)
+        with patch.object(worker, '_try_acquire_job', return_value=None):
+            # Mock semaphore to track if it was acquired
+            semaphore_acquired = False
+            original_acquire = worker._semaphore.acquire
+            
+            async def mock_acquire():
+                nonlocal semaphore_acquired
+                semaphore_acquired = True
+                return await original_acquire()
+            
+            with patch.object(worker._semaphore, 'acquire', side_effect=mock_acquire):
+                # Try to process job (should fail to acquire)
+                job_started = await worker._try_process_job(job_id, queue_name)
+                
+                # Job should not have started and semaphore should not have been acquired
+                assert job_started is False
+                assert semaphore_acquired is False  # This is the key optimization test
+
+    @pytest.mark.asyncio
+    async def test_semaphore_acquired_after_successful_lock(self, worker):
+        """Test that semaphore is acquired after successfully getting job lock."""
+        from unittest.mock import patch, AsyncMock
+        
+        job_id = f"test_job_{uuid.uuid4()}"
+        queue_name = "test_queue"
+        job = Job(id=job_id, function_name="simple_success")
+        
+        # Mock successful job acquisition
+        with patch.object(worker, '_try_acquire_job', return_value=job):
+            # Mock _process_acquired_job to avoid actual execution
+            with patch.object(worker, '_process_acquired_job', new_callable=AsyncMock):
+                # Track semaphore acquisition
+                semaphore_acquired = False
+                original_acquire = worker._semaphore.acquire
+                
+                async def mock_acquire():
+                    nonlocal semaphore_acquired
+                    semaphore_acquired = True
+                    return await original_acquire()
+                
+                with patch.object(worker._semaphore, 'acquire', side_effect=mock_acquire):
+                    # Try to process job (should succeed)
+                    job_started = await worker._try_process_job(job_id, queue_name)
+                    
+                    # Job should have started and semaphore should have been acquired
+                    assert job_started is True
+                    assert semaphore_acquired is True
+
+    @pytest.mark.asyncio
+    async def test_semaphore_released_on_processing_error(self, worker):
+        """Test that semaphore is properly released when job processing fails."""
+        from unittest.mock import patch
+        
+        job_id = f"test_job_{uuid.uuid4()}"
+        queue_name = "test_queue"
+        job = Job(id=job_id, function_name="simple_success")
+        
+        # Track semaphore release
+        semaphore_released = False
+        original_release = worker._semaphore.release
+        
+        def mock_release():
+            nonlocal semaphore_released
+            semaphore_released = True
+            return original_release()
+        
+        # Mock successful job acquisition but failed processing
+        with patch.object(worker, '_try_acquire_job', return_value=job):
+            with patch.object(worker, '_process_acquired_job', side_effect=Exception("Processing failed")):
+                with patch.object(worker._semaphore, 'release', side_effect=mock_release):
+                    # Try to process job (should fail in processing)
+                    job_started = await worker._try_process_job(job_id, queue_name)
+                    
+                    # Job should not have started and semaphore should have been released
+                    assert job_started is False
+                    assert semaphore_released is True
+
+    def test_worker_has_optimized_methods(self, worker):
+        """Test that worker has the new optimized methods."""
+        # Verify the new methods exist and are properly structured
+        assert hasattr(worker, '_try_acquire_job')
+        assert hasattr(worker, '_process_acquired_job')
+        
+        # Verify the optimization is in the polling loop
+        import inspect
+        poll_source = inspect.getsource(worker._poll_for_jobs)
+        
+        # Should use the optimized approach
+        assert '_try_acquire_job' in poll_source
+        assert '_process_acquired_job' in poll_source
 
 
 @pytest.mark.asyncio

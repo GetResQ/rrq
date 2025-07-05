@@ -663,10 +663,10 @@ def test_worker_run_num_workers_negative(cli_runner, mock_app_settings_path):
 
 @mock.patch("rrq.cli.subprocess.Popen")
 @mock.patch("rrq.cli.os.cpu_count")
-def test_worker_run_num_workers_passes_flags(
+def test_worker_run_num_workers_passes_queue_flags(
     mock_cpu_count, mock_popen, cli_runner, mock_app_settings_path
 ):
-    """Test 'rrq worker run' with multiple workers passes flags like --burst and --queue."""
+    """Test 'rrq worker run' with multiple workers passes queue flags (burst mode excluded)."""
     mock_cpu_count.return_value = 2
     mock_popen_instance = mock.MagicMock()
     mock_popen.return_value = mock_popen_instance
@@ -675,7 +675,7 @@ def test_worker_run_num_workers_passes_flags(
     invoke_args = [
         "worker", "run",
         "--settings", mock_app_settings_path,
-        "--burst",
+        # Note: --burst removed due to burst mode restriction with multiple workers
     ]
     for q in queues_to_test:
         invoke_args.extend(["--queue", q])
@@ -686,7 +686,7 @@ def test_worker_run_num_workers_passes_flags(
 
     for call_args in mock_popen.call_args_list:
         cmd = call_args[0][0]
-        assert "--burst" in cmd
+        # Note: --burst no longer expected in multi-worker commands
         for q_name in queues_to_test:
             assert "--queue" in cmd
             # This check needs to be more robust if order isn't guaranteed
@@ -694,6 +694,23 @@ def test_worker_run_num_workers_passes_flags(
             # For now, assume simple presence.
             assert q_name in cmd
         assert "--num-workers" not in cmd
+
+
+def test_worker_run_burst_mode_restriction_with_multiple_workers(cli_runner, mock_app_settings_path):
+    """Test that burst mode is restricted when using multiple workers."""
+    result = cli_runner.invoke(
+        cli.rrq,
+        [
+            "worker", "run",
+            "--settings", mock_app_settings_path,
+            "--num-workers", "2",
+            "--burst"
+        ]
+    )
+    
+    assert result.exit_code == 1
+    assert "ERROR: --burst mode is not supported with multiple workers" in result.output
+    assert "Burst mode cannot coordinate across multiple processes" in result.output
 
 
 @mock.patch("rrq.cli.subprocess.Popen")
