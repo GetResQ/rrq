@@ -310,6 +310,7 @@ async def test_enqueue_with_defer_by_and_until():
     # score around future
     assert abs(score2 - future.replace(tzinfo=timezone.utc).timestamp() * 1000) < 100
 
+
 @pytest.mark.asyncio
 async def test_unique_lock_ttl_respects_defer_by_override():
     # Override default unique TTL to small value for testing
@@ -326,6 +327,7 @@ async def test_unique_lock_ttl_respects_defer_by_override():
     # TTL should be at least defer seconds + 1 (i.e., 6)
     assert ttl == 6, f"Expected TTL 6, got {ttl}"
 
+
 @pytest.mark.asyncio
 async def test_unique_lock_ttl_default_no_defer():
     # When no defer, TTL should equal default
@@ -336,6 +338,7 @@ async def test_unique_lock_ttl_default_no_defer():
     assert store.locks, "Unique lock was not acquired"
     _, _, ttl = store.locks[-1]
     assert ttl == 3, f"Expected TTL 3, got {ttl}"
+
 
 @pytest.mark.asyncio
 async def test_next_scheduled_run_time_set_correctly():

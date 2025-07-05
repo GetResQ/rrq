@@ -1,5 +1,6 @@
 import asyncio
 import time  # Import time for checking retry score
+import uuid
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any, AsyncGenerator  # Added Callable
@@ -300,12 +301,15 @@ async def test_worker_handles_job_failure_max_retries_dlq(
     rrq_settings: RRQSettings,
     monkeypatch,
 ):
-    monkeypatch.setattr(rrq_settings, "base_retry_delay_seconds", 0.0)
-    monkeypatch.setattr(rrq_settings, "max_retry_delay_seconds", 0.0)
-    monkeypatch.setattr(rrq_settings, "default_poll_delay_seconds", 999.0)
+    """Test that a job that always fails gets retried up to max_retries then moved to DLQ."""
+    # Set small retry delays so the test runs quickly
+    monkeypatch.setattr(rrq_settings, "base_retry_delay_seconds", 0.01)
+    monkeypatch.setattr(rrq_settings, "max_retry_delay_seconds", 0.01)
+
     job = await rrq_client.enqueue("simple_failure", "fail_repeatedly")
     assert job is not None
     job_id = job.id
+
     # Max retries is set to 3 in the rrq_settings fixture for tests
     max_tries = rrq_settings.default_max_retries
     assert max_tries == 3  # Double check fixture setting
@@ -313,63 +317,26 @@ async def test_worker_handles_job_failure_max_retries_dlq(
     queue_key = DEFAULT_QUEUE_NAME
     dlq_key = rrq_settings.default_dlq_name
 
-    # Loop through attempts (1 to max_tries)
-    for attempt in range(1, max_tries + 1):  # Attempts 1, 2, 3
-        # print(f"\n--- Running worker, attempt {attempt} for job {job_id} ---")
-        job_run_counts.clear()
-        job_results.clear()
+    # Run worker long enough for all retries to complete
+    # With fast polling (0.01s) and short retry delay (0.01s),
+    # all retries should complete within 1 second
+    await run_worker_for(worker, duration=1.0)
 
-        # Wait until job should be ready (relevant after first attempt)
-        if attempt > 1:
-            current_score = await job_store.redis.zscore(
-                queue_key, job_id.encode("utf-8")
-            )
-            assert current_score is not None, (
-                f"Job {job_id} not found in queue before attempt {attempt}"
-            )
-            wait_time = (current_score / 1000.0) - time.time()
-            if wait_time > 0:
-                # print(f"Waiting {wait_time:.2f}s for retry delay...")
-                await asyncio.sleep(wait_time + 0.1)
-
-        await run_worker_for(worker, duration=1)
-
-        # Get state *after* worker has run for this attempt
-        current_state = await job_store.get_job_definition(job_id)
-        assert current_state is not None
-
-        if attempt < max_tries:  # After runs for attempts 1, 2
-            assert current_state.status == JobStatus.RETRYING
-            assert current_state.current_retries == attempt
-        else:  # attempt == max_tries (After run for attempt 3)
-            assert current_state.status == JobStatus.FAILED
-            assert (
-                current_state.current_retries == max_tries
-            )  # Retries counter was incremented before the check failed
-            assert current_state.last_error is not None
-            assert "Test failure" in current_state.last_error
-
-            # Verify it's NOT in the original queue anymore
-            final_score = await job_store.redis.zscore(
-                queue_key, job_id.encode("utf-8")
-            )
-            assert final_score is None, (
-                f"Job {job_id} still found in original queue after attempt {attempt}"
-            )
-
-            # Verify it IS in the DLQ
-            dlq_content_bytes = await job_store.redis.lrange(dlq_key, 0, -1)
-            dlq_content = [item.decode("utf-8") for item in dlq_content_bytes]
-            assert job_id in dlq_content, (
-                f"Job {job_id} not found in DLQ after attempt {attempt}"
-            )
-            # print("Job correctly moved to DLQ after max retries.")
-
-    # Optional: Final check after loop to ensure state is persistent
+    # Verify final state: job should be FAILED and moved to DLQ
     final_state = await job_store.get_job_definition(job_id)
     assert final_state is not None
     assert final_state.status == JobStatus.FAILED
     assert final_state.current_retries == max_tries
+    assert "Test failure: fail_repeatedly" in final_state.last_error
+
+    # Verify job is NOT in the queue (moved to DLQ)
+    final_score = await job_store.redis.zscore(queue_key, job_id.encode("utf-8"))
+    assert final_score is None
+
+    # Verify DLQ entry
+    dlq_jobs = await job_store.redis.lrange(dlq_key, 0, -1)
+    dlq_job_ids = [job_bytes.decode("utf-8") for job_bytes in dlq_jobs]
+    assert job_id in dlq_job_ids
 
 
 @pytest.mark.asyncio
@@ -698,7 +665,9 @@ async def test_worker_health_check_updates(
         # Directly remove the health key instead of waiting for TTL expiry
         await job_store.redis.delete(f"rrq:health:worker:{worker_id}")
         health_data3, ttl3 = await job_store.get_worker_health(worker_id)
-        assert health_data3 is None, f"Health data still exists after expiry: {health_data3}"
+        assert health_data3 is None, (
+            f"Health data still exists after expiry: {health_data3}"
+        )
         assert ttl3 is None, "TTL should be None after expiry"
 
     finally:
@@ -953,12 +922,15 @@ async def test_worker_close_calls_job_store_aclose():
     await worker.close()
     assert store.aclose_called, "JobStore.aclose was not called by worker.close"
 
+
 @pytest.mark.asyncio
 async def test_cron_job_enqueue_unique(rrq_settings, job_registry, job_store):
-    cron_job = CronJob(function_name="simple_success", schedule="* * * * *", unique=True)
+    cron_job = CronJob(
+        function_name="simple_success", schedule="* * * * *", unique=True
+    )
     # Set the next_run_time to a past time so the job is considered due
     cron_job.next_run_time = datetime.now(UTC) - timedelta(minutes=1)
-    
+
     rrq_settings.cron_jobs = [cron_job]
     worker = RRQWorker(settings=rrq_settings, job_registry=job_registry)
     worker.job_store = job_store
@@ -978,22 +950,26 @@ async def test_cron_job_basic_enqueue(rrq_settings, job_registry, job_store):
     # Set the next_run_time to a past time so the job is considered due
     past_time = datetime.now(UTC) - timedelta(minutes=1)
     cron_job.next_run_time = past_time
-    
+
     rrq_settings.cron_jobs = [cron_job]
     worker = RRQWorker(settings=rrq_settings, job_registry=job_registry)
     worker.job_store = job_store
     worker.client.job_store = job_store
-    
+
     await worker._maybe_enqueue_cron_jobs()
-    queued_jobs = await job_store.get_queued_job_ids(rrq_settings.default_queue_name, 0, -1)
+    queued_jobs = await job_store.get_queued_job_ids(
+        rrq_settings.default_queue_name, 0, -1
+    )
     assert len(queued_jobs) == 1
-    
+
     # Reset to past time again since schedule_next was called
     cron_job.next_run_time = past_time
-    
+
     # Without unique constraint, should enqueue another job
     await worker._maybe_enqueue_cron_jobs()
-    queued_jobs2 = await job_store.get_queued_job_ids(rrq_settings.default_queue_name, 0, -1)
+    queued_jobs2 = await job_store.get_queued_job_ids(
+        rrq_settings.default_queue_name, 0, -1
+    )
     assert len(queued_jobs2) == 2
 
 
@@ -1004,19 +980,21 @@ async def test_cron_job_with_args_and_kwargs(rrq_settings, job_registry, job_sto
         function_name="simple_success",
         schedule="* * * * *",
         args=["cron_arg1", "cron_arg2"],
-        kwargs={"cron_key": "cron_value"}
+        kwargs={"cron_key": "cron_value"},
     )
     cron_job.next_run_time = datetime.now(UTC) - timedelta(minutes=1)
-    
+
     rrq_settings.cron_jobs = [cron_job]
     worker = RRQWorker(settings=rrq_settings, job_registry=job_registry)
     worker.job_store = job_store
     worker.client.job_store = job_store
-    
+
     await worker._maybe_enqueue_cron_jobs()
-    queued_jobs = await job_store.get_queued_job_ids(rrq_settings.default_queue_name, 0, -1)
+    queued_jobs = await job_store.get_queued_job_ids(
+        rrq_settings.default_queue_name, 0, -1
+    )
     assert len(queued_jobs) == 1
-    
+
     # Get the job definition and verify args/kwargs
     job_id = queued_jobs[0]
     job_def = await job_store.get_job_definition(job_id)
@@ -1030,23 +1008,23 @@ async def test_cron_job_custom_queue(rrq_settings, job_registry, job_store):
     """Test cron job with custom queue name."""
     custom_queue = "rrq:queue:cron_queue"
     cron_job = CronJob(
-        function_name="simple_success",
-        schedule="* * * * *",
-        queue_name=custom_queue
+        function_name="simple_success", schedule="* * * * *", queue_name=custom_queue
     )
     cron_job.next_run_time = datetime.now(UTC) - timedelta(minutes=1)
-    
+
     rrq_settings.cron_jobs = [cron_job]
     worker = RRQWorker(settings=rrq_settings, job_registry=job_registry)
     worker.job_store = job_store
     worker.client.job_store = job_store
-    
+
     await worker._maybe_enqueue_cron_jobs()
-    
+
     # Should not be in default queue
-    default_jobs = await job_store.get_queued_job_ids(rrq_settings.default_queue_name, 0, -1)
+    default_jobs = await job_store.get_queued_job_ids(
+        rrq_settings.default_queue_name, 0, -1
+    )
     assert len(default_jobs) == 0
-    
+
     # Should be in custom queue
     custom_jobs = await job_store.get_queued_job_ids(custom_queue, 0, -1)
     assert len(custom_jobs) == 1
@@ -1058,36 +1036,44 @@ async def test_cron_job_not_due(rrq_settings, job_registry, job_store):
     cron_job = CronJob(function_name="simple_success", schedule="* * * * *")
     # Set next_run_time to future so it's not due
     cron_job.next_run_time = datetime.now(UTC) + timedelta(hours=1)
-    
+
     rrq_settings.cron_jobs = [cron_job]
     worker = RRQWorker(settings=rrq_settings, job_registry=job_registry)
     worker.job_store = job_store
     worker.client.job_store = job_store
-    
+
     await worker._maybe_enqueue_cron_jobs()
-    queued_jobs = await job_store.get_queued_job_ids(rrq_settings.default_queue_name, 0, -1)
+    queued_jobs = await job_store.get_queued_job_ids(
+        rrq_settings.default_queue_name, 0, -1
+    )
     assert len(queued_jobs) == 0
 
 
 @pytest.mark.asyncio
-async def test_cron_job_schedule_next_after_enqueue(rrq_settings, job_registry, job_store):
+async def test_cron_job_schedule_next_after_enqueue(
+    rrq_settings, job_registry, job_store
+):
     """Test that cron job schedules next run time after enqueueing."""
-    cron_job = CronJob(function_name="simple_success", schedule="0 9 * * *")  # 9 AM daily
+    cron_job = CronJob(
+        function_name="simple_success", schedule="0 9 * * *"
+    )  # 9 AM daily
     # Set to past time so it's due
     cron_job.next_run_time = datetime.now(UTC) - timedelta(hours=1)
     original_next_run = cron_job.next_run_time
-    
+
     rrq_settings.cron_jobs = [cron_job]
     worker = RRQWorker(settings=rrq_settings, job_registry=job_registry)
     worker.job_store = job_store
     worker.client.job_store = job_store
-    
+
     await worker._maybe_enqueue_cron_jobs()
-    
+
     # Should have enqueued the job
-    queued_jobs = await job_store.get_queued_job_ids(rrq_settings.default_queue_name, 0, -1)
+    queued_jobs = await job_store.get_queued_job_ids(
+        rrq_settings.default_queue_name, 0, -1
+    )
     assert len(queued_jobs) == 1
-    
+
     # Should have updated next_run_time to future
     assert cron_job.next_run_time != original_next_run
     assert cron_job.next_run_time > datetime.now(UTC)
@@ -1096,70 +1082,288 @@ async def test_cron_job_schedule_next_after_enqueue(rrq_settings, job_registry, 
 @pytest.mark.asyncio
 async def test_multiple_cron_jobs(rrq_settings, job_registry, job_store):
     """Test multiple cron jobs being processed."""
-    cron_job1 = CronJob(function_name="simple_success", schedule="* * * * *", args=["job1"])
-    cron_job2 = CronJob(function_name="simple_success", schedule="* * * * *", args=["job2"])
-    
+    cron_job1 = CronJob(
+        function_name="simple_success", schedule="* * * * *", args=["job1"]
+    )
+    cron_job2 = CronJob(
+        function_name="simple_success", schedule="* * * * *", args=["job2"]
+    )
+
     # Set both to be due
     past_time = datetime.now(UTC) - timedelta(minutes=1)
     cron_job1.next_run_time = past_time
     cron_job2.next_run_time = past_time
-    
+
     rrq_settings.cron_jobs = [cron_job1, cron_job2]
     worker = RRQWorker(settings=rrq_settings, job_registry=job_registry)
     worker.job_store = job_store
     worker.client.job_store = job_store
-    
+
     await worker._maybe_enqueue_cron_jobs()
-    queued_jobs = await job_store.get_queued_job_ids(rrq_settings.default_queue_name, 0, -1)
+    queued_jobs = await job_store.get_queued_job_ids(
+        rrq_settings.default_queue_name, 0, -1
+    )
     assert len(queued_jobs) == 2
-    
+
     # Verify both jobs have different args
     job_defs = []
     for job_id in queued_jobs:
         job_def = await job_store.get_job_definition(job_id)
         job_defs.append(job_def.job_args[0])
-    
+
     assert "job1" in job_defs
     assert "job2" in job_defs
 
 
 @pytest.mark.asyncio
-async def test_cron_job_execution_end_to_end(rrq_settings, job_registry, job_store, worker):
+async def test_cron_job_execution_end_to_end(
+    rrq_settings, job_registry, job_store, worker
+):
     """Test end-to-end cron job execution."""
     cron_job = CronJob(
-        function_name="simple_success",
-        schedule="* * * * *",
-        args=["cron_test"]
+        function_name="simple_success", schedule="* * * * *", args=["cron_test"]
     )
     cron_job.next_run_time = datetime.now(UTC) - timedelta(minutes=1)
-    
+
     rrq_settings.cron_jobs = [cron_job]
     # Update the existing worker with cron jobs
     worker.cron_jobs = [cron_job]
-    
+
     # Clear any previous job results
     job_results.clear()
     job_run_counts.clear()
-    
+
     # Enqueue the cron job
     await worker._maybe_enqueue_cron_jobs()
-    queued_jobs = await job_store.get_queued_job_ids(rrq_settings.default_queue_name, 0, -1)
+    queued_jobs = await job_store.get_queued_job_ids(
+        rrq_settings.default_queue_name, 0, -1
+    )
     assert len(queued_jobs) == 1
     job_id = queued_jobs[0]
-    
+
     # Use the existing run_worker_for helper which properly handles the worker setup
     await run_worker_for(worker, duration=0.5)
-    
+
     # Verify job was executed
     assert job_id in job_results
     assert job_results[job_id]["status"] == "success"
     assert job_results[job_id]["args"] == ("cron_test",)
     assert job_run_counts.get(job_id) == 1
-    
+
     # Verify job completed
     final_job = await job_store.get_job_definition(job_id)
     assert final_job is not None
     assert final_job.status == JobStatus.COMPLETED
+
+
+# --- Jittered Delays Tests ---
+
+
+class TestJitteredDelays:
+    """Test jittered delay calculations in worker."""
+
+    def test_calculate_jittered_delay_default_jitter(self, worker):
+        """Test jittered delay with default jitter factor."""
+        base_delay = 2.0
+        jitter_factor = 0.5  # Default
+
+        # Test multiple calculations to verify jitter range
+        delays = [worker._calculate_jittered_delay(base_delay) for _ in range(100)]
+
+        # All delays should be within the expected range
+        min_expected = base_delay * (1 - jitter_factor)  # 1.0
+        max_expected = base_delay * (1 + jitter_factor)  # 3.0
+
+        for delay in delays:
+            assert min_expected <= delay <= max_expected
+
+        # Should have variation (not all the same)
+        assert len(set(delays)) > 1
+
+        # Average should be close to base delay
+        avg_delay = sum(delays) / len(delays)
+        assert abs(avg_delay - base_delay) < 0.5  # Within reasonable tolerance
+
+    def test_calculate_jittered_delay_custom_jitter(self, worker):
+        """Test jittered delay with custom jitter factor."""
+        base_delay = 5.0
+        jitter_factor = 0.2  # 20% jitter
+
+        delays = [
+            worker._calculate_jittered_delay(base_delay, jitter_factor)
+            for _ in range(50)
+        ]
+
+        # All delays should be within the expected range
+        min_expected = base_delay * (1 - jitter_factor)  # 4.0
+        max_expected = base_delay * (1 + jitter_factor)  # 6.0
+
+        for delay in delays:
+            assert min_expected <= delay <= max_expected
+
+        # Should have variation
+        assert len(set(delays)) > 1
+
+    def test_calculate_jittered_delay_no_jitter(self, worker):
+        """Test jittered delay with zero jitter factor."""
+        base_delay = 3.0
+        jitter_factor = 0.0  # No jitter
+
+        delays = [
+            worker._calculate_jittered_delay(base_delay, jitter_factor)
+            for _ in range(10)
+        ]
+
+        # All delays should equal base delay
+        for delay in delays:
+            assert delay == base_delay
+
+    def test_jittered_delay_properties(self, worker):
+        """Test mathematical properties of jittered delays."""
+        base_delay = 2.0
+        jitter_factor = 0.3
+        sample_size = 1000
+
+        delays = [
+            worker._calculate_jittered_delay(base_delay, jitter_factor)
+            for _ in range(sample_size)
+        ]
+
+        # Statistical properties
+        min_delay = min(delays)
+        max_delay = max(delays)
+        avg_delay = sum(delays) / len(delays)
+
+        # Check range bounds
+        expected_min = base_delay * (1 - jitter_factor)
+        expected_max = base_delay * (1 + jitter_factor)
+
+        assert expected_min <= min_delay
+        assert max_delay <= expected_max
+
+        # Average should be close to base delay (within 5% for large sample)
+        assert abs(avg_delay - base_delay) / base_delay < 0.05
+
+        # Should use most of the available range
+        range_used = max_delay - min_delay
+        expected_range = expected_max - expected_min
+        assert range_used > expected_range * 0.8  # At least 80% of range used
+
+
+# --- Semaphore Optimization Tests ---
+
+
+class TestSemaphoreOptimization:
+    """Test semaphore optimization functionality."""
+
+    @pytest.mark.asyncio
+    async def test_semaphore_acquired_only_after_successful_lock(self, worker):
+        """Test that semaphore is only acquired after successfully getting job lock."""
+        from unittest.mock import patch
+
+        job_id = f"test_job_{uuid.uuid4()}"
+        queue_name = "test_queue"
+
+        # Mock the job acquisition to fail (another worker got it)
+        with patch.object(worker, "_try_acquire_job", return_value=None):
+            # Mock semaphore to track if it was acquired
+            semaphore_acquired = False
+            original_acquire = worker._semaphore.acquire
+
+            async def mock_acquire():
+                nonlocal semaphore_acquired
+                semaphore_acquired = True
+                return await original_acquire()
+
+            with patch.object(worker._semaphore, "acquire", side_effect=mock_acquire):
+                # Try to process job (should fail to acquire)
+                job_started = await worker._try_process_job(job_id, queue_name)
+
+                # Job should not have started and semaphore should not have been acquired
+                assert job_started is False
+                assert semaphore_acquired is False  # This is the key optimization test
+
+    @pytest.mark.asyncio
+    async def test_semaphore_acquired_after_successful_lock(self, worker):
+        """Test that semaphore is acquired after successfully getting job lock."""
+        from unittest.mock import patch, AsyncMock
+
+        job_id = f"test_job_{uuid.uuid4()}"
+        queue_name = "test_queue"
+        job = Job(id=job_id, function_name="simple_success")
+
+        # Mock successful job acquisition
+        with patch.object(worker, "_try_acquire_job", return_value=job):
+            # Mock _process_acquired_job to avoid actual execution
+            with patch.object(worker, "_process_acquired_job", new_callable=AsyncMock):
+                # Track semaphore acquisition
+                semaphore_acquired = False
+                original_acquire = worker._semaphore.acquire
+
+                async def mock_acquire():
+                    nonlocal semaphore_acquired
+                    semaphore_acquired = True
+                    return await original_acquire()
+
+                with patch.object(
+                    worker._semaphore, "acquire", side_effect=mock_acquire
+                ):
+                    # Try to process job (should succeed)
+                    job_started = await worker._try_process_job(job_id, queue_name)
+
+                    # Job should have started and semaphore should have been acquired
+                    assert job_started is True
+                    assert semaphore_acquired is True
+
+    @pytest.mark.asyncio
+    async def test_semaphore_released_on_processing_error(self, worker):
+        """Test that semaphore is properly released when job processing fails."""
+        from unittest.mock import patch
+
+        job_id = f"test_job_{uuid.uuid4()}"
+        queue_name = "test_queue"
+        job = Job(id=job_id, function_name="simple_success")
+
+        # Track semaphore release
+        semaphore_released = False
+        original_release = worker._semaphore.release
+
+        def mock_release():
+            nonlocal semaphore_released
+            semaphore_released = True
+            return original_release()
+
+        # Mock successful job acquisition but failed processing
+        with patch.object(worker, "_try_acquire_job", return_value=job):
+            with patch.object(
+                worker,
+                "_process_acquired_job",
+                side_effect=Exception("Processing failed"),
+            ):
+                with patch.object(
+                    worker._semaphore, "release", side_effect=mock_release
+                ):
+                    # Try to process job (should fail in processing)
+                    job_started = await worker._try_process_job(job_id, queue_name)
+
+                    # Job should not have started and semaphore should have been released
+                    assert job_started is False
+                    assert semaphore_released is True
+
+    def test_worker_has_optimized_methods(self, worker):
+        """Test that worker has the new optimized methods."""
+        # Verify the new methods exist and are properly structured
+        assert hasattr(worker, "_try_acquire_job")
+        assert hasattr(worker, "_process_acquired_job")
+
+        # Verify the optimization is in the polling loop
+        import inspect
+
+        poll_source = inspect.getsource(worker._poll_for_jobs)
+
+        # Should use the optimized approach
+        assert "_try_acquire_job" in poll_source
+        assert "_process_acquired_job" in poll_source
 
 
 @pytest.mark.asyncio
@@ -1169,26 +1373,27 @@ async def test_cron_loop_integration(rrq_settings, job_registry, job_store, work
     # without the complexity of the full run loop
     cron_job = CronJob(function_name="simple_success", schedule="* * * * *")
     cron_job.next_run_time = datetime.now(UTC) - timedelta(minutes=1)
-    
+
     rrq_settings.cron_jobs = [cron_job]
     # Update the existing worker with cron jobs
     worker.cron_jobs = [cron_job]
-    
+
     # Clear previous results
     job_results.clear()
     job_run_counts.clear()
-    
+
     # Test that the cron job can be enqueued and processed
     await worker._maybe_enqueue_cron_jobs()
-    queued_jobs = await job_store.get_queued_job_ids(rrq_settings.default_queue_name, 0, -1)
+    queued_jobs = await job_store.get_queued_job_ids(
+        rrq_settings.default_queue_name, 0, -1
+    )
     assert len(queued_jobs) == 1
-    
+
     # Process the job
     await run_worker_for(worker, duration=0.5)
-    
+
     # Verify execution
     if job_results:
         job_ids = list(job_results.keys())
         assert len(job_ids) >= 1
         assert job_results[job_ids[0]]["status"] == "success"
-

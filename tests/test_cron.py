@@ -68,10 +68,10 @@ class TestCronSchedule:
         """Test that invalid expressions raise ValueError."""
         with pytest.raises(ValueError, match="must have 5 fields"):
             CronSchedule("* * *")
-        
+
         with pytest.raises(ValueError, match="out of range"):
             CronSchedule("60 * * * *")  # Invalid minute
-        
+
         with pytest.raises(ValueError, match="out of range"):
             CronSchedule("* 25 * * *")  # Invalid hour
 
@@ -122,9 +122,9 @@ class TestCronJob:
             args=["arg1", "arg2"],
             kwargs={"key": "value"},
             queue_name="custom_queue",
-            unique=True
+            unique=True,
         )
-        
+
         assert job.function_name == "test_task"
         assert job.schedule == "0 9 * * *"
         assert job.args == ["arg1", "arg2"]
@@ -136,7 +136,7 @@ class TestCronJob:
     def test_cron_job_defaults(self):
         """Test CronJob with default values."""
         job = CronJob(function_name="test_task", schedule="* * * * *")
-        
+
         assert job.args == []
         assert job.kwargs == {}
         assert job.queue_name is None
@@ -147,9 +147,9 @@ class TestCronJob:
         """Test the schedule_next method."""
         job = CronJob(function_name="test_task", schedule="30 14 * * *")
         now = datetime(2023, 6, 15, 10, 0, 0, tzinfo=UTC)
-        
+
         job.schedule_next(now)
-        
+
         expected = datetime(2023, 6, 15, 14, 30, 0, tzinfo=UTC)
         assert job.next_run_time == expected
 
@@ -157,13 +157,13 @@ class TestCronJob:
         """Test that due() schedules next run time if not set."""
         job = CronJob(function_name="test_task", schedule="* * * * *")
         now = datetime(2023, 6, 15, 10, 30, 0, tzinfo=UTC)
-        
+
         # next_run_time should be None initially
         assert job.next_run_time is None
-        
+
         # Calling due() should schedule the next run
         is_due = job.due(now)
-        
+
         # Should not be due immediately (next run is in the future)
         assert not is_due
         assert job.next_run_time is not None
@@ -174,9 +174,9 @@ class TestCronJob:
         job = CronJob(function_name="test_task", schedule="* * * * *")
         past_time = datetime(2023, 6, 15, 10, 0, 0, tzinfo=UTC)
         now = datetime(2023, 6, 15, 10, 30, 0, tzinfo=UTC)
-        
+
         job.next_run_time = past_time
-        
+
         is_due = job.due(now)
         assert is_due
 
@@ -185,9 +185,9 @@ class TestCronJob:
         job = CronJob(function_name="test_task", schedule="* * * * *")
         future_time = datetime(2023, 6, 15, 11, 0, 0, tzinfo=UTC)
         now = datetime(2023, 6, 15, 10, 30, 0, tzinfo=UTC)
-        
+
         job.next_run_time = future_time
-        
+
         is_due = job.due(now)
         assert not is_due
 
@@ -214,11 +214,11 @@ class TestCronScheduleEdgeCases:
         """Test the interaction between day-of-month and day-of-week."""
         # Run on the 15th OR on Fridays (OR logic when both are specified)
         schedule = CronSchedule("0 9 15 * fri")
-        
+
         # Test when 15th is not a Friday
         now = datetime(2023, 6, 10, 0, 0, 0, tzinfo=UTC)  # June 10, 2023 (Saturday)
         next_run = schedule.next_after(now)
-        
+
         # Should be June 15th (Thursday) since it comes before the next Friday
         expected = datetime(2023, 6, 15, 9, 0, 0, tzinfo=UTC)
         assert next_run == expected
@@ -226,11 +226,11 @@ class TestCronScheduleEdgeCases:
     def test_end_of_month_handling(self):
         """Test handling of end-of-month dates."""
         schedule = CronSchedule("0 0 31 * *")  # 31st of month
-        
+
         # Start in February (which doesn't have 31 days)
         now = datetime(2023, 2, 1, 0, 0, 0, tzinfo=UTC)
         next_run = schedule.next_after(now)
-        
+
         # Should be March 31st
         expected = datetime(2023, 3, 31, 0, 0, 0, tzinfo=UTC)
         assert next_run == expected
@@ -245,8 +245,8 @@ class TestCronScheduleEdgeCases:
         """Test a complex real-world cron expression."""
         # Run at 9:30 AM on weekdays in Q1 and Q4
         schedule = CronSchedule("30 9 * jan,feb,mar,oct,nov,dec mon-fri")
-        
+
         assert schedule.minutes == [30]
         assert schedule.hours == [9]
         assert schedule.months == [1, 2, 3, 10, 11, 12]
-        assert schedule.dow == [1, 2, 3, 4, 5]  # mon-fri 
+        assert schedule.dow == [1, 2, 3, 4, 5]  # mon-fri

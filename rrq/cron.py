@@ -42,22 +42,24 @@ def _parse_value(value: str, names: dict[str, int], min_val: int, max_val: int) 
     return num
 
 
-def _parse_field(field: str, *, names: dict[str, int] | None, min_val: int, max_val: int) -> Sequence[int]:
+def _parse_field(
+    field: str, *, names: dict[str, int] | None, min_val: int, max_val: int
+) -> Sequence[int]:
     names = names or {}
     if field == "*":
         return list(range(min_val, max_val + 1))
     values: set[int] = set()
-    for part in field.split(','):
+    for part in field.split(","):
         step = 1
-        if '/' in part:
-            base, step_str = part.split('/', 1)
+        if "/" in part:
+            base, step_str = part.split("/", 1)
             step = int(step_str)
         else:
             base = part
         if base == "*":
             start, end = min_val, max_val
-        elif '-' in base:
-            a, b = base.split('-', 1)
+        elif "-" in base:
+            a, b = base.split("-", 1)
             start = _parse_value(a, names, min_val, max_val)
             end = _parse_value(b, names, min_val, max_val)
         else:
@@ -102,7 +104,7 @@ class CronSchedule:
             python_weekday = dt.weekday()
             cron_weekday = (python_weekday + 1) % 7
             dow_match = cron_weekday in self.dow
-            
+
             if self.dom_all and self.dow_all:
                 condition = True
             elif self.dom_all:
@@ -117,7 +119,6 @@ class CronSchedule:
             if condition:
                 return dt
             dt += timedelta(minutes=1)
-
 
 
 class CronJob(BaseModel):

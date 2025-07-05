@@ -1,4 +1,4 @@
-'''example_rrq_settings.py: Example RRQ Application Settings'''
+"""example_rrq_settings.py: Example RRQ Application Settings"""
 
 import asyncio
 import logging
@@ -16,18 +16,16 @@ logger.addHandler(console_handler)
 redis_dsn = "redis://localhost:6379/0"
 
 
-
-
 async def on_startup_hook():
     logger.info("Executing 'on_startup_hook' (application-specific startup)...")
     await asyncio.sleep(0.1)
     logger.info("'on_startup_hook' complete.")
 
+
 async def on_shutdown_hook():
     logger.info("Executing 'on_shutdown_hook' (application-specific shutdown)...")
     await asyncio.sleep(0.1)
     logger.info("'on_shutdown_hook' complete.")
-
 
 
 # RRQ Settings
@@ -42,20 +40,19 @@ rrq_settings = RRQSettings(
             function_name="daily_cleanup",
             schedule="0 2 * * *",
             args=["cleanup_logs"],
-            kwargs={"max_age_days": 30}
+            kwargs={"max_age_days": 30},
         ),
         # Send a status report every Monday at 9 AM
         CronJob(
             function_name="send_status_report",
             schedule="0 9 * * mon",
-            unique=True  # Prevent duplicate reports if worker restarts
+            unique=True,  # Prevent duplicate reports if worker restarts
         ),
         # Health check every 15 minutes
         CronJob(
             function_name="health_check",
             schedule="*/15 * * * *",
-            queue_name="monitoring"  # Use a specific queue for monitoring tasks
+            queue_name="monitoring",  # Use a specific queue for monitoring tasks
         ),
-    ]
+    ],
 )
-
