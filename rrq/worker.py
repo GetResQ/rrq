@@ -241,23 +241,32 @@ class RRQWorker:
                     if fetched_count >= count or self._shutdown_event.is_set():
                         break
 
-                    # Attempt to acquire semaphore *before* trying to process
-                    await self._semaphore.acquire()
                     try:
-                        # _try_process_job handles lock acquisition, fetching, task creation
-                        job_started = await self._try_process_job(job_id, queue_name)
-                        if job_started:
-                            fetched_count += 1
-                        else:
-                            # If job wasn't started (e.g., lock conflict), release semaphore immediately
-                            self._semaphore.release()
+                        # Try to acquire lock and remove from queue first (without semaphore)
+                        job_acquired = await self._try_acquire_job(job_id, queue_name)
+                        if job_acquired:
+                            # Only acquire semaphore after successfully getting the job
+                            await self._semaphore.acquire()
+                            try:
+                                # Process the job (we already have the lock and removed from queue)
+                                # The semaphore will be released when the job task completes
+                                await self._process_acquired_job(job_acquired, queue_name)
+                                fetched_count += 1
+                            except Exception as e_process:
+                                logger.error(
+                                    f"Worker {self.worker_id} exception processing acquired job {job_id}: {e_process}",
+                                    exc_info=True,
+                                )
+                                # Release lock and semaphore since processing failed
+                                await self.job_store.release_job_lock(job_id)
+                                self._semaphore.release()
+                        # If job_acquired is None, another worker got it - continue to next job
                     except Exception as e_try:
-                        # Catch errors during the _try_process_job itself
+                        # Catch errors during the job acquisition itself
                         logger.error(
-                            f"Worker {self.worker_id} exception trying to process job {job_id}: {e_try}",
+                            f"Worker {self.worker_id} exception trying to acquire job {job_id}: {e_try}",
                             exc_info=True,
                         )
-                        self._semaphore.release()  # Ensure semaphore is released on error
 
             except Exception as e_poll:
                 logger.error(
@@ -270,26 +279,25 @@ class RRQWorker:
         # For burst mode, return number of jobs fetched in this poll
         return fetched_count
 
-    async def _try_process_job(self, job_id: str, queue_name: str) -> bool:
-        """Attempts to lock, fetch definition, and start the execution task for a specific job.
+    async def _try_acquire_job(self, job_id: str, queue_name: str) -> Optional[Job]:
+        """Attempts to atomically lock and remove a job from the queue.
 
         Args:
-            job_id: The ID of the job to attempt processing.
+            job_id: The ID of the job to attempt acquiring.
             queue_name: The name of the queue the job ID was retrieved from.
 
         Returns:
-            True if the job processing task was successfully started, False otherwise
-            (e.g., lock conflict, job definition not found, already removed).
+            The Job object if successfully acquired, None otherwise.
         """
         logger.debug(
-            f"Worker {self.worker_id} attempting to process job {job_id} from queue '{queue_name}'"
+            f"Worker {self.worker_id} attempting to acquire job {job_id} from queue '{queue_name}'"
         )
         job = await self.job_store.get_job_definition(job_id)
         if not job:
             logger.warning(
-                f"Worker {self.worker_id} job definition {job_id} not found during _try_process_job from queue {queue_name}."
+                f"Worker {self.worker_id} job definition {job_id} not found during _try_acquire_job from queue {queue_name}."
             )
-            return False  # Job vanished between poll and fetch?
+            return None  # Job vanished between poll and fetch?
 
         # Determine job-specific timeout and calculate lock timeout
         job_timeout = (
@@ -306,15 +314,23 @@ class RRQWorker:
             job.id, queue_name, self.worker_id, int(lock_timeout_ms)
         )
         
-        if not lock_acquired:
-            return False  # Another worker got there first
+        if not lock_acquired or removed_count == 0:
+            return None  # Another worker got there first
         
-        if removed_count == 0:
-            # Lock was acquired but job wasn't in queue (already processed by another worker)
-            # The atomic script automatically released the lock for us
-            return False
+        # Successfully acquired the job
+        logger.debug(f"Worker {self.worker_id} successfully acquired job {job.id}")
+        return job
 
-        # We have the lock and have removed the job from the queue - proceed to execute
+    async def _process_acquired_job(self, job: Job, queue_name: str) -> None:
+        """Processes a job that has already been acquired (locked and removed from queue).
+
+        Note: This method assumes the worker has already acquired the concurrency semaphore.
+        The semaphore will be released when the job task completes via _task_cleanup.
+
+        Args:
+            job: The Job object that was successfully acquired.
+            queue_name: The name of the queue the job was retrieved from.
+        """
         try:
             await self.job_store.update_job_status(job.id, JobStatus.ACTIVE)
             logger.debug(
@@ -322,21 +338,58 @@ class RRQWorker:
             )
 
             # Create and track the execution task
+            # The semaphore will be released when this task completes
             task = self._loop.create_task(self._execute_job(job, queue_name))
             self._running_tasks.add(task)
             task.add_done_callback(lambda t: self._task_cleanup(t, self._semaphore))
             logger.info(
                 f"Worker {self.worker_id} started job {job.id} ('{job.function_name}') from queue '{queue_name}'"
             )
-            return True
         except Exception as e_start:
             # Catch errors during status update or task creation
             logger.error(
-                f"Worker {self.worker_id} failed to start task for job {job.id} after lock/removal: {e_start}",
+                f"Worker {self.worker_id} failed to start task for job {job.id} after acquisition: {e_start}",
                 exc_info=True,
             )
-            # Attempt to release the lock since task wasn't started
+            # Release the lock since task wasn't started
             await self.job_store.release_job_lock(job.id)
+            raise  # Re-raise to be handled by caller
+
+    async def _try_process_job(self, job_id: str, queue_name: str) -> bool:
+        """Attempts to lock, fetch definition, and start the execution task for a specific job.
+
+        This method is kept for backward compatibility and uses the optimized approach internally.
+        For new code, prefer using _try_acquire_job and _process_acquired_job separately.
+
+        Note: This method handles semaphore acquisition internally for backward compatibility.
+
+        Args:
+            job_id: The ID of the job to attempt processing.
+            queue_name: The name of the queue the job ID was retrieved from.
+
+        Returns:
+            True if the job processing task was successfully started, False otherwise
+            (e.g., lock conflict, job definition not found, already removed).
+        """
+        # Use the optimized approach: acquire job first, then process
+        job_acquired = await self._try_acquire_job(job_id, queue_name)
+        if not job_acquired:
+            return False
+        
+        # For backward compatibility, acquire semaphore here since old callers expect it
+        await self._semaphore.acquire()
+        try:
+            # Process the acquired job 
+            await self._process_acquired_job(job_acquired, queue_name)
+            return True
+        except Exception as e_process:
+            logger.error(
+                f"Worker {self.worker_id} failed to process acquired job {job_id}: {e_process}",
+                exc_info=True,
+            )
+            # Release semaphore on error since _process_acquired_job doesn't handle it
+            self._semaphore.release()
+            # Lock is already released in _process_acquired_job on error
             return False
 
     async def _execute_job(self, job: Job, queue_name: str) -> None:
