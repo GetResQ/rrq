@@ -76,7 +76,9 @@ async def daily_cleanup(ctx, task_type: str, max_age_days: int = 30):
 
 async def send_status_report(ctx):
     """Example cron job handler for sending status reports."""
-    logger.info(f"STATUS_REPORT (Job {ctx['job_id']}): Generating and sending status report")
+    logger.info(
+        f"STATUS_REPORT (Job {ctx['job_id']}): Generating and sending status report"
+    )
     await asyncio.sleep(0.3)  # Simulate report generation
     logger.info(f"STATUS_REPORT (Job {ctx['job_id']}): Status report sent")
     return {"report_type": "weekly", "status": "sent"}
@@ -86,7 +88,9 @@ async def health_check(ctx):
     """Example cron job handler for health checks."""
     logger.info(f"HEALTH_CHECK (Job {ctx['job_id']}): Running system health check")
     await asyncio.sleep(0.1)  # Simulate health check
-    logger.info(f"HEALTH_CHECK (Job {ctx['job_id']}): Health check completed - all systems OK")
+    logger.info(
+        f"HEALTH_CHECK (Job {ctx['job_id']}): Health check completed - all systems OK"
+    )
     return {"status": "healthy", "timestamp": ctx.get("job_start_time")}
 
 
@@ -106,15 +110,15 @@ async def main():
             CronJob(
                 function_name="health_check",
                 schedule="*/2 * * * *",  # Every 2 minutes
-                queue_name="monitoring"
+                queue_name="monitoring",
             ),
             # Send a status report every 5 minutes (for demo purposes)
             CronJob(
                 function_name="send_status_report",
                 schedule="*/5 * * * *",  # Every 5 minutes
-                unique=True  # Prevent duplicate reports
+                unique=True,  # Prevent duplicate reports
             ),
-        ]
+        ],
     )
     logger.info(f"Using Redis DB: {settings.redis_dsn}")
     logger.info(f"Configured {len(settings.cron_jobs)} cron jobs")
@@ -210,7 +214,8 @@ async def main():
 
     # Wait for stop event or worker task completion (e.g., if it errors out)
     done, pending = await asyncio.wait(
-        [worker_task, asyncio.create_task(stop_event.wait())], return_when=asyncio.FIRST_COMPLETED
+        [worker_task, asyncio.create_task(stop_event.wait())],
+        return_when=asyncio.FIRST_COMPLETED,
     )
 
     logger.info("Stop event triggered or worker task finished.")

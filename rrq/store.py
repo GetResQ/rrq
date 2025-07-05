@@ -21,6 +21,7 @@ from .settings import RRQSettings
 
 logger = logging.getLogger(__name__)
 
+
 class JobStore:
     """Provides an abstraction layer for interacting with Redis for RRQ operations.
 
@@ -38,7 +39,33 @@ class JobStore:
         self.redis = AsyncRedis.from_url(
             settings.redis_dsn, decode_responses=False
         )  # Work with bytes initially
-        
+
+        # LUA scripts for atomic operations
+        self._atomic_lock_and_remove_script = """
+        -- KEYS: [1] = lock_key, [2] = queue_key
+        -- ARGV: [1] = worker_id, [2] = lock_timeout_ms, [3] = job_id
+        local lock_result = redis.call('SET', KEYS[1], ARGV[1], 'NX', 'PX', ARGV[2])
+        if lock_result then
+            local removed_count = redis.call('ZREM', KEYS[2], ARGV[3])
+            if removed_count == 0 then
+                redis.call('DEL', KEYS[1])  -- Release lock if job wasn't in queue
+                return {0, 0}  -- {lock_acquired, removed_count}
+            end
+            return {1, removed_count}
+        else
+            return {0, 0}
+        end
+        """
+
+        self._atomic_retry_script = """
+        -- KEYS: [1] = job_key, [2] = queue_key
+        -- ARGV: [1] = job_id, [2] = retry_at_score, [3] = error_message, [4] = status
+        local new_retry_count = redis.call('HINCRBY', KEYS[1], 'current_retries', 1)
+        redis.call('HMSET', KEYS[1], 'status', ARGV[4], 'last_error', ARGV[3])
+        redis.call('ZADD', KEYS[2], ARGV[2], ARGV[1])
+        return new_retry_count
+        """
+
     def _format_queue_key(self, queue_name: str) -> str:
         """Normalize a queue name or key into a Redis key for ZSET queues."""
 
@@ -308,6 +335,99 @@ class JobStore:
             logger.debug(f"Released lock for job {job_id} ({lock_key}).")
         # No need to log if lock didn't exist
 
+    async def atomic_lock_and_remove_job(
+        self, job_id: str, queue_name: str, worker_id: str, lock_timeout_ms: int
+    ) -> tuple[bool, int]:
+        """Atomically acquires a job lock and removes the job from the queue.
+
+        This is a critical operation that prevents race conditions between multiple
+        workers trying to process the same job.
+
+        Args:
+            job_id: The ID of the job to lock and remove.
+            queue_name: The name of the queue to remove the job from.
+            worker_id: The ID of the worker attempting to acquire the lock.
+            lock_timeout_ms: The lock timeout/TTL in milliseconds.
+
+        Returns:
+            A tuple of (lock_acquired: bool, removed_count: int).
+            - lock_acquired: True if the lock was successfully acquired
+            - removed_count: Number of jobs removed from the queue (0 or 1)
+        """
+        lock_key = f"{LOCK_KEY_PREFIX}{job_id}"
+        queue_key = self._format_queue_key(queue_name)
+
+        result = await self.redis.eval(
+            self._atomic_lock_and_remove_script,
+            2,  # Number of keys
+            lock_key,
+            queue_key,
+            worker_id.encode("utf-8"),
+            str(lock_timeout_ms),
+            job_id.encode("utf-8"),
+        )
+
+        lock_acquired = bool(result[0])
+        removed_count = int(result[1])
+
+        if lock_acquired and removed_count > 0:
+            logger.debug(
+                f"Worker {worker_id} atomically acquired lock and removed job {job_id} from queue '{queue_name}'."
+            )
+        elif not lock_acquired:
+            logger.debug(
+                f"Worker {worker_id} failed to acquire lock for job {job_id} (already locked by another worker)."
+            )
+        else:
+            logger.warning(
+                f"Worker {worker_id} acquired lock for job {job_id} but job was already removed from queue '{queue_name}'."
+            )
+
+        return lock_acquired, removed_count
+
+    async def atomic_retry_job(
+        self,
+        job_id: str,
+        queue_name: str,
+        retry_at_score: float,
+        error_message: str,
+        status: JobStatus,
+    ) -> int:
+        """Atomically increments job retry count, updates status/error, and re-queues the job.
+
+        This prevents race conditions in the retry logic where multiple operations
+        need to be performed atomically.
+
+        Args:
+            job_id: The ID of the job to retry.
+            queue_name: The name of the queue to add the job back to.
+            retry_at_score: The score (timestamp) when the job should be retried.
+            error_message: The error message to store.
+            status: The job status to set (usually RETRYING).
+
+        Returns:
+            The new retry count after incrementing.
+        """
+        job_key = f"{JOB_KEY_PREFIX}{job_id}"
+        queue_key = self._format_queue_key(queue_name)
+
+        new_retry_count = await self.redis.eval(
+            self._atomic_retry_script,
+            2,  # Number of keys
+            job_key,
+            queue_key,
+            job_id.encode("utf-8"),
+            str(retry_at_score),
+            error_message.encode("utf-8"),
+            status.value.encode("utf-8"),
+        )
+
+        new_count = int(new_retry_count)
+        logger.debug(
+            f"Atomically incremented retries for job {job_id} to {new_count} and re-queued for retry."
+        )
+        return new_count
+
     async def update_job_status(self, job_id: str, status: JobStatus) -> None:
         """Updates only the status field of a job in its Redis hash.
 
@@ -368,7 +488,7 @@ class JobStore:
             pipe.expire(job_key, DEFAULT_DLQ_RESULT_TTL_SECONDS)
             results = await pipe.execute()
         logger.info(f"Moved job {job_id} to DLQ '{dlq_redis_key}'. Results: {results}")
-    
+
     async def requeue_dlq(
         self,
         dlq_name: str,
