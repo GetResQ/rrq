@@ -5,7 +5,7 @@ Settings can be loaded from environment variables (with a prefix of `RRQ_`) or
 from a .env file. Sensible defaults are provided for most settings.
 """
 
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, List, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -101,6 +101,14 @@ class RRQSettings(BaseSettings):
     cron_jobs: list[CronJob] = Field(
         default_factory=list,
         description="Optional list of cron job specifications to run periodically.",
+    )
+    event_handlers: List[str] = Field(
+        default_factory=list,
+        description="List of module paths to event handler classes that implement RRQHook.",
+    )
+    metrics_exporter: Optional[str] = Field(
+        default=None,
+        description="Metrics exporter type ('prometheus', 'statsd') or module path to custom exporter.",
     )
     model_config = SettingsConfigDict(
         env_prefix="RRQ_",

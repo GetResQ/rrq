@@ -69,6 +69,3 @@ class JobRegistry:
     def clear(self) -> None:
         """Clears all registered handlers from the registry."""
         self._handlers.clear()
-
-
-# Global instance for convenience, though applications might manage their own.

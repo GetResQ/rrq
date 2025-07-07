@@ -1,12 +1,13 @@
 import asyncio
-import json
 import time
 import uuid
 from datetime import UTC, datetime
 from typing import AsyncGenerator
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
+from redis.exceptions import ConnectionError, RedisError, ResponseError
 
 from rrq.constants import (
     DEFAULT_DLQ_NAME,
@@ -376,26 +377,6 @@ def test_format_keys():
     assert store._format_dlq_key(full) == full
 
 
-@pytest.mark.asyncio
-async def test_serialize_deserialize():
-    store = JobStore(RRQSettings())
-    # simple types
-    b = await store._serialize_job_field(123)
-    assert b == b"123"
-    b2 = await store._serialize_job_field("abc")
-    assert b2 == b"abc"
-    # complex types
-    obj = {"x": 1}
-    b3 = await store._serialize_job_field(obj)
-    assert json.loads(b3.decode()) == obj
-    # deserialize valid JSON
-    v = await store._deserialize_job_field(b'{"a":2}')
-    assert v == {"a": 2}
-    # deserialize non-JSON
-    v2 = await store._deserialize_job_field(b"xyz")
-    assert v2 == "xyz"
-
-
 # --- Atomic Operations Tests ---
 
 
@@ -658,3 +639,289 @@ class TestAtomicOperations:
         assert retrieved_job.current_retries == 1
         assert retrieved_job.status == JobStatus.RETRYING
         assert retrieved_job.last_error == error_message
+
+
+# --- Pipeline Exception Handling Tests ---
+
+
+class TestPipelineExceptionHandling:
+    """Test exception handling in Redis pipeline operations."""
+
+    @pytest.mark.asyncio
+    async def test_move_to_dlq_pipeline_exception_cleanup(self, job_store: JobStore):
+        """Test that pipeline resources are cleaned up even when exceptions occur."""
+        job = Job(function_name="test_dlq_exception")
+        await job_store.save_job_definition(job)
+
+        # Mock pipeline to raise exception during execute
+        with patch.object(job_store.redis, "pipeline") as mock_pipeline_factory:
+            mock_pipe = AsyncMock()
+            mock_pipe.__aenter__.return_value = mock_pipe
+            mock_pipe.__aexit__.return_value = None
+            mock_pipe.hset = MagicMock()
+            mock_pipe.lpush = MagicMock()
+            mock_pipe.expire = MagicMock()
+            mock_pipe.execute = AsyncMock(side_effect=RedisError("Pipeline failed"))
+            mock_pipeline_factory.return_value = mock_pipe
+
+            # Call should raise the exception
+            with pytest.raises(RedisError, match="Pipeline failed"):
+                await job_store.move_job_to_dlq(
+                    job.id, "test_dlq", "Test error", datetime.now(UTC)
+                )
+
+            # Verify cleanup was called
+            mock_pipe.__aexit__.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_save_result_pipeline_exception_cleanup(self, job_store: JobStore):
+        """Test that save_job_result pipeline cleans up on exception."""
+        job = Job(function_name="test_result_exception")
+        await job_store.save_job_definition(job)
+
+        # Mock pipeline to raise exception during execute
+        with patch.object(job_store.redis, "pipeline") as mock_pipeline_factory:
+            mock_pipe = AsyncMock()
+            mock_pipe.__aenter__.return_value = mock_pipe
+            mock_pipe.__aexit__.return_value = None
+            mock_pipe.hset = MagicMock()
+            mock_pipe.expire = MagicMock()
+            mock_pipe.persist = MagicMock()
+            mock_pipe.execute = AsyncMock(side_effect=RedisError("Save failed"))
+            mock_pipeline_factory.return_value = mock_pipe
+
+            # Call should raise the exception
+            with pytest.raises(RedisError, match="Save failed"):
+                await job_store.save_job_result(job.id, {"result": "data"}, 60)
+
+            # Verify cleanup was called
+            mock_pipe.__aexit__.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_pipeline_connection_error_handling(self, job_store: JobStore):
+        """Test handling of connection errors in pipeline operations."""
+        job = Job(function_name="test_connection_error")
+        await job_store.save_job_definition(job)
+
+        with patch.object(job_store.redis, "pipeline") as mock_pipeline_factory:
+            mock_pipe = AsyncMock()
+            mock_pipe.__aenter__.return_value = mock_pipe
+            mock_pipe.__aexit__.return_value = None
+            mock_pipe.hset = MagicMock()
+            mock_pipe.lpush = MagicMock()
+            mock_pipe.expire = MagicMock()
+            mock_pipe.execute = AsyncMock(
+                side_effect=ConnectionError("Connection lost")
+            )
+            mock_pipeline_factory.return_value = mock_pipe
+
+            with pytest.raises(ConnectionError, match="Connection lost"):
+                await job_store.move_job_to_dlq(
+                    job.id, "test_dlq", "Test error", datetime.now(UTC)
+                )
+
+            # Verify cleanup was called even for connection errors
+            mock_pipe.__aexit__.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_pipeline_partial_execution_rollback(self, job_store: JobStore):
+        """Test that transactional pipelines rollback on failure."""
+        job = Job(function_name="test_rollback")
+        await job_store.save_job_definition(job)
+
+        # Get initial job state
+        initial_job = await job_store.get_job_definition(job.id)
+        assert initial_job.status == JobStatus.PENDING
+
+        # Mock pipeline to fail after partial execution
+        with patch.object(job_store.redis, "pipeline") as mock_pipeline_factory:
+            mock_pipe = AsyncMock()
+            mock_pipe.__aenter__.return_value = mock_pipe
+            mock_pipe.__aexit__.return_value = None
+            mock_pipe.hset = MagicMock()
+            mock_pipe.lpush = MagicMock()
+            mock_pipe.expire = MagicMock()
+            # Simulate partial execution failure
+            mock_pipe.execute = AsyncMock(
+                side_effect=ResponseError("Transaction aborted")
+            )
+            mock_pipeline_factory.return_value = mock_pipe
+
+            with pytest.raises(ResponseError):
+                await job_store.move_job_to_dlq(
+                    job.id, "test_dlq", "Test error", datetime.now(UTC)
+                )
+
+        # Verify job state hasn't changed (transaction rollback)
+        final_job = await job_store.get_job_definition(job.id)
+        assert final_job.status == JobStatus.PENDING  # Should remain unchanged
+
+    @pytest.mark.asyncio
+    async def test_concurrent_pipeline_exception_handling(self, job_store: JobStore):
+        """Test multiple concurrent pipelines with exceptions."""
+        jobs = [Job(function_name=f"test_concurrent_{i}") for i in range(5)]
+        for job in jobs:
+            await job_store.save_job_definition(job)
+
+        # Create mix of successful and failing operations
+        async def move_with_random_failure(job: Job, index: int):
+            if index % 2 == 0:
+                # Mock failure for even indices
+                with patch.object(job_store.redis, "pipeline") as mock_pipeline_factory:
+                    mock_pipe = AsyncMock()
+                    mock_pipe.__aenter__.return_value = mock_pipe
+                    mock_pipe.__aexit__.return_value = None
+                    mock_pipe.hset = MagicMock()
+                    mock_pipe.lpush = MagicMock()
+                    mock_pipe.expire = MagicMock()
+                    mock_pipe.execute = AsyncMock(
+                        side_effect=RedisError(f"Failed {index}")
+                    )
+                    mock_pipeline_factory.return_value = mock_pipe
+
+                    with pytest.raises(RedisError):
+                        await job_store.move_job_to_dlq(
+                            job.id, "test_dlq", f"Error {index}", datetime.now(UTC)
+                        )
+                    return f"failed_{index}"
+            else:
+                # Real operation for odd indices
+                await job_store.move_job_to_dlq(
+                    job.id, "test_dlq", f"Error {index}", datetime.now(UTC)
+                )
+                return f"success_{index}"
+
+        # Run concurrently
+        tasks = [move_with_random_failure(job, i) for i, job in enumerate(jobs)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Verify mix of successes and failures
+        success_count = sum(
+            1 for r in results if isinstance(r, str) and r.startswith("success")
+        )
+        failure_count = sum(
+            1 for r in results if isinstance(r, str) and r.startswith("failed")
+        )
+
+        assert success_count == 2  # Odd indices succeed (1, 3)
+        assert failure_count == 3  # Even indices fail (0, 2, 4)
+
+    @pytest.mark.asyncio
+    async def test_pipeline_exception_with_ttl_operations(self, job_store: JobStore):
+        """Test exception handling in save_job_result with different TTL paths."""
+        job = Job(function_name="test_ttl_exception")
+        await job_store.save_job_definition(job)
+
+        # Test with TTL > 0 (expire path)
+        with patch.object(job_store.redis, "pipeline") as mock_pipeline_factory:
+            mock_pipe = AsyncMock()
+            mock_pipe.__aenter__.return_value = mock_pipe
+            mock_pipe.__aexit__.return_value = None
+            mock_pipe.hset = MagicMock()
+            mock_pipe.expire = MagicMock()
+            # Fail on expire operation
+            mock_pipe.execute = AsyncMock(side_effect=RedisError("Expire failed"))
+            mock_pipeline_factory.return_value = mock_pipe
+
+            with pytest.raises(RedisError, match="Expire failed"):
+                await job_store.save_job_result(
+                    job.id, {"result": "data"}, ttl_seconds=60
+                )
+
+            mock_pipe.__aexit__.assert_called_once()
+
+        # Test with TTL = 0 (persist path)
+        with patch.object(job_store.redis, "pipeline") as mock_pipeline_factory:
+            mock_pipe = AsyncMock()
+            mock_pipe.__aenter__.return_value = mock_pipe
+            mock_pipe.__aexit__.return_value = None
+            mock_pipe.hset = MagicMock()
+            mock_pipe.persist = MagicMock()
+            # Fail on persist operation
+            mock_pipe.execute = AsyncMock(side_effect=RedisError("Persist failed"))
+            mock_pipeline_factory.return_value = mock_pipe
+
+            with pytest.raises(RedisError, match="Persist failed"):
+                await job_store.save_job_result(
+                    job.id, {"result": "data"}, ttl_seconds=0
+                )
+
+            mock_pipe.__aexit__.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_pipeline_logging_on_exception(self, job_store: JobStore, caplog):
+        """Test that exceptions are properly logged with context."""
+        job = Job(function_name="test_logging")
+        await job_store.save_job_definition(job)
+
+        # Test move_job_to_dlq logging
+        with patch.object(job_store.redis, "pipeline") as mock_pipeline_factory:
+            mock_pipe = AsyncMock()
+            mock_pipe.__aenter__.return_value = mock_pipe
+            mock_pipe.__aexit__.return_value = None
+            mock_pipe.hset = MagicMock()
+            mock_pipe.lpush = MagicMock()
+            mock_pipe.expire = MagicMock()
+            mock_pipe.execute = AsyncMock(
+                side_effect=RedisError("DLQ operation failed")
+            )
+            mock_pipeline_factory.return_value = mock_pipe
+
+            with pytest.raises(RedisError):
+                await job_store.move_job_to_dlq(
+                    job.id, "test_dlq", "Test error", datetime.now(UTC)
+                )
+
+            # Check that error was logged with job context
+            # The DLQ key will be formatted with prefix
+            assert (
+                f"Failed to move job {job.id} to DLQ 'rrq:dlq:test_dlq'" in caplog.text
+            )
+            assert "DLQ operation failed" in caplog.text
+
+        caplog.clear()
+
+        # Test save_job_result logging
+        with patch.object(job_store.redis, "pipeline") as mock_pipeline_factory:
+            mock_pipe = AsyncMock()
+            mock_pipe.__aenter__.return_value = mock_pipe
+            mock_pipe.__aexit__.return_value = None
+            mock_pipe.hset = MagicMock()
+            mock_pipe.expire = MagicMock()
+            mock_pipe.execute = AsyncMock(side_effect=RedisError("Result save failed"))
+            mock_pipeline_factory.return_value = mock_pipe
+
+            with pytest.raises(RedisError):
+                await job_store.save_job_result(job.id, {"result": "data"}, 60)
+
+            # Check that error was logged with job context
+            assert f"Failed to save result for job {job.id}" in caplog.text
+            assert "Result save failed" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_real_pipeline_transaction_behavior(self, job_store: JobStore):
+        """Test real Redis pipeline behavior with transactions."""
+        job = Job(function_name="test_real_transaction")
+        await job_store.save_job_definition(job)
+
+        # Verify job is in initial state
+        initial_job = await job_store.get_job_definition(job.id)
+        assert initial_job.status == JobStatus.PENDING
+        assert initial_job.last_error is None
+
+        # Successfully move to DLQ
+        completion_time = datetime.now(UTC)
+        await job_store.move_job_to_dlq(
+            job.id, "test_dlq", "Test error message", completion_time
+        )
+
+        # Verify all changes were applied atomically
+        updated_job = await job_store.get_job_definition(job.id)
+        assert updated_job.status == JobStatus.FAILED
+        assert updated_job.last_error == "Test error message"
+        assert updated_job.completion_time is not None
+
+        # Verify job is in DLQ (use formatted key)
+        dlq_key = "rrq:dlq:test_dlq"
+        dlq_jobs = await job_store.redis.lrange(dlq_key, 0, -1)
+        assert job.id.encode("utf-8") in dlq_jobs

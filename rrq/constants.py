@@ -26,6 +26,15 @@ RETRY_COUNTER_PREFIX: str = (
     "rrq:retry_count:"  # Potentially, if not stored directly in job hash
 )
 
+# Hybrid monitoring optimization keys
+ACTIVE_QUEUES_SET: str = (
+    "rrq:active:queues"  # ZSET: queue_name -> last_activity_timestamp
+)
+ACTIVE_WORKERS_SET: str = (
+    "rrq:active:workers"  # ZSET: worker_id -> last_heartbeat_timestamp
+)
+MONITOR_EVENTS_STREAM: str = "rrq:monitor:events"  # Stream for real-time changes
+
 # Default job settings (can be overridden by RRQSettings or per job)
 DEFAULT_MAX_RETRIES: int = 5
 DEFAULT_JOB_TIMEOUT_SECONDS: int = 300  # 5 minutes
@@ -41,3 +50,4 @@ DEFAULT_POLL_DELAY_SECONDS: float = 0.1
 
 # Default worker ID if not specified
 DEFAULT_WORKER_ID_PREFIX: str = "rrq_worker_"
+CONNECTION_POOL_MAX_CONNECTIONS: int = 20

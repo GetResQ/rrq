@@ -8,12 +8,14 @@ RRQ is a Python library for creating reliable job queues using Redis and `asynci
 *   **Automatic Retries with Backoff**: Jobs that fail with standard exceptions are automatically retried based on `max_retries` settings, using exponential backoff for delays.
 *   **Explicit Retries**: Handlers can raise `RetryJob` to control retry attempts and delays.
 *   **Job Timeouts**: Jobs exceeding their configured timeout (`job_timeout_seconds` or `default_job_timeout_seconds`) are terminated and moved to the DLQ.
-*   **Dead Letter Queue (DLQ)**: Jobs that fail permanently (max retries reached, fatal error, timeout) are moved to a DLQ list in Redis for inspection.
+*   **Dead Letter Queue (DLQ)**: Jobs that fail permanently (max retries reached, fatal error, timeout) are moved to a single global DLQ list in Redis. Each failed job retains its original queue information, allowing for filtered inspection and selective requeuing.
 *   **Job Uniqueness**: The `_unique_key` parameter in `enqueue` prevents duplicate jobs based on a custom key within a specified TTL.
 *   **Graceful Shutdown**: Workers listen for SIGINT/SIGTERM and attempt to finish active jobs within a grace period before exiting. Interrupted jobs are re-queued.
 *   **Worker Health Checks**: Workers periodically update a health key in Redis with a TTL, allowing monitoring systems to track active workers.
 *   **Deferred Execution**: Jobs can be scheduled to run at a future time using `_defer_by` or `_defer_until`.
 *   **Cron Jobs**: Periodic jobs can be defined in `RRQSettings.cron_jobs` using a simple cron syntax.
+*   **Comprehensive Monitoring**: Built-in CLI tools for monitoring queues, inspecting jobs, and debugging with real-time dashboards and beautiful table output.
+*   **Development Tools**: Debug commands for generating test data, stress testing, and cleaning up development environments.
 
     - Using deferral with a specific `_job_id` will effectively reschedule the job associated with that ID to the new time, overwriting its previous definition and score. It does not create multiple distinct scheduled jobs with the same ID.
 
@@ -231,26 +233,149 @@ rrq_settings.job_registry = job_registry
 
 **Note:** Cron jobs are automatically enqueued by the worker when they become due. The worker checks for due cron jobs every 30 seconds and enqueues them as regular jobs to be processed.
 
+## Dead Letter Queue (DLQ) Management
+
+RRQ uses a single global Dead Letter Queue to store jobs that have failed permanently. Jobs in the DLQ retain their original queue information, allowing for sophisticated filtering and management.
+
+### DLQ Structure
+
+- **Global DLQ**: One DLQ per RRQ instance (configurable via `default_dlq_name`)
+- **Queue Preservation**: Each failed job remembers its original queue name
+- **Filtering**: Jobs can be filtered by original queue, function name, error patterns, and time ranges
+- **Inspection**: Full job details including arguments, errors, and execution timeline
+
+### Common DLQ Workflows
+
+#### Investigating Failures
+```bash
+# Get overall DLQ statistics
+rrq dlq stats
+
+# List recent failures from a specific queue
+rrq dlq list --queue urgent --limit 10
+
+# Group failures by function
+rrq dlq list --function send_email
+
+# Inspect a specific failed job
+rrq dlq inspect job_abc123
+```
+
+#### Requeuing Failed Jobs
+```bash
+# Preview what would be requeued (dry run)
+rrq dlq requeue --queue urgent --dry-run
+
+# Requeue all failures from urgent queue
+rrq dlq requeue --queue urgent --all
+
+# Requeue specific function failures with limit
+rrq dlq requeue --function send_email --limit 10
+
+# Requeue single job to different queue
+rrq dlq requeue --job-id abc123 --target-queue retry_queue
+```
+
+#### Monitoring DLQ in Real-time
+```bash
+# Monitor includes DLQ statistics panel
+rrq monitor
+
+# Queue stats show DLQ count per original queue
+rrq queue stats
+```
+
 ## Command Line Interface
 
-RRQ provides a command-line interface (CLI) for managing workers and performing health checks:
+RRQ provides a comprehensive command-line interface (CLI) for managing workers, monitoring queues, and debugging.
 
-- **`rrq worker run`** - Run an RRQ worker process.
-  - `--settings` (optional): Specify the Python path to your settings object (e.g., `myapp.worker_config.rrq_settings`). If not provided, it will use the `RRQ_SETTINGS` environment variable or default to a basic `RRQSettings` object.
-  - `--queue` (optional, multiple): Specify queue(s) to poll. Defaults to the `default_queue_name` in settings.
-  - `--burst` (flag): Run the worker in burst mode to process one job or batch and then exit. Cannot be used with `--num-workers > 1`.
-  - `--num-workers` (optional, integer): Number of parallel worker processes to start. Defaults to the number of CPU cores available on the machine. Cannot be used with `--burst` mode.
-- **`rrq worker watch`** - Run an RRQ worker with auto-restart on file changes.
-  - `--path` (optional): Directory path to watch for changes. Defaults to the current directory.
-  - `--settings` (optional): Same as above.
-  - `--queue` (optional, multiple): Same as above.
-- **`rrq check`** - Perform a health check on active RRQ workers.
-  - `--settings` (optional): Same as above.
-- **`rrq dlq requeue`** - Requeue jobs from the dead letter queue back into a live queue.
-  - `--settings` (optional): Same as above.
-  - `--dlq-name` (optional): Name of the DLQ (without prefix). Defaults to `default_dlq_name` in settings.
-  - `--queue` (optional): Target queue name (without prefix). Defaults to `default_queue_name` in settings.
-  - `--limit` (optional): Maximum number of DLQ jobs to requeue; all if not set.
+📖 **[Full CLI Reference Documentation](docs/CLI_REFERENCE.md)**
+
+### Quick Examples
+```bash
+# Use default settings (localhost Redis)
+rrq queue list
+
+# Use custom settings
+rrq queue list --settings myapp.config.rrq_settings
+
+# Use environment variable
+export RRQ_SETTINGS=myapp.config.rrq_settings
+rrq monitor
+
+# Debug workflow
+rrq debug generate-jobs --count 100 --queue urgent
+rrq queue inspect urgent --limit 10
+rrq monitor --queues urgent --refresh 0.5
+
+# DLQ management workflow
+rrq dlq list --queue urgent --limit 10      # List failed jobs from urgent queue
+rrq dlq stats                                # Show DLQ statistics and error patterns
+rrq dlq inspect <job_id>                     # Inspect specific failed job
+rrq dlq requeue --queue urgent --dry-run     # Preview requeue of urgent queue jobs
+rrq dlq requeue --queue urgent --limit 5     # Requeue 5 jobs from urgent queue
+
+# Advanced DLQ filtering and management
+rrq dlq list --function send_email --limit 20          # List failed email jobs
+rrq dlq list --queue urgent --function process_data    # Filter by queue AND function
+rrq dlq requeue --function send_email --all            # Requeue all failed email jobs
+rrq dlq requeue --job-id abc123 --target-queue retry   # Requeue specific job to retry queue
+```
+
+## Performance and Limitations
+
+### Monitoring Performance Considerations
+
+RRQ's monitoring and statistics commands are designed for operational visibility but have some performance considerations for large-scale deployments:
+
+#### Queue Statistics (`rrq queue stats`)
+- **Pending Job Counts**: Very fast, uses Redis `ZCARD` operation
+- **Active/Completed/Failed Counts**: Requires scanning job records in Redis which can be slow for large datasets
+- **Optimization**: Use `--max-scan` parameter to limit scanning (default: 1,000 jobs)
+  ```bash
+  # Fast scan for quick overview
+  rrq queue stats --max-scan 500
+  
+  # Complete scan (may be slow)
+  rrq queue stats --max-scan 0
+  ```
+
+#### DLQ Operations (`rrq dlq`)
+- **Job Listing**: Uses batch fetching with Redis pipelines for efficiency
+- **Optimization**: Use `--batch-size` parameter to control memory vs. performance trade-offs
+  ```bash
+  # Smaller batches for memory-constrained environments
+  rrq dlq list --batch-size 50
+  
+  # Larger batches for better performance
+  rrq dlq list --batch-size 200
+  ```
+
+#### Real-time Monitoring (`rrq monitor`)
+- **Error Message Truncation**: Newest errors truncated to 50 characters, error patterns to 50 characters for display consistency
+- **DLQ Statistics**: Updates in real-time but may impact Redis performance with very large DLQs
+
+### Full Metrics Requirements
+
+For comprehensive job lifecycle tracking and historical analytics, consider these architectural additions:
+
+1. **Job History Tracking**: 
+   - Store completed/failed job summaries in a separate Redis structure or external database
+   - Implement job completion event logging for time-series analytics
+
+2. **Active Job Monitoring**: 
+   - Enhanced worker health tracking with job-level visibility
+   - Real-time active job registry for immediate status reporting
+
+3. **Throughput Calculation**: 
+   - Time-series data collection for accurate throughput metrics
+   - Queue-specific performance trend tracking
+
+4. **Scalable Statistics**: 
+   - Consider Redis Streams or time-series databases for high-frequency job event tracking
+   - Implement sampling strategies for large-scale deployments
+
+The current implementation prioritizes operational simplicity and immediate visibility over comprehensive historical analytics. For production monitoring at scale, complement RRQ's built-in tools with external monitoring systems.
 
 ## Configuration
 
@@ -272,4 +397,4 @@ RRQ can be configured in several ways, with the following precedence:
 *   **`JobRegistry` (`registry.py`)**: A simple registry to map string function names (used when enqueuing) to the actual asynchronous handler functions the worker should execute.
 *   **`JobStore` (`store.py`)**: An abstraction layer handling all direct interactions with Redis. It manages job definitions (Hashes), queues (Sorted Sets), processing locks (Strings with TTL), unique job locks, and worker health checks.
 *   **`Job` (`job.py`)**: A Pydantic model representing a job, containing its ID, handler name, arguments, status, retry counts, timestamps, results, etc.
-*   **`JobStatus` (`job.py`)**: An Enum defining the possible states of a job (`PENDING`, `ACTIVE`, `COMPLETED`, `FAILED`, `
+*   **`JobStatus` (`job.py`)**: An Enum defining the possible states of a job (`PENDING`, `ACTIVE`, `COMPLETED`, `FAILED`, `DEFERRED`). `
