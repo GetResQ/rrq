@@ -387,67 +387,8 @@ def test_stats_command_missing_settings(cli_runner):
     assert "No such command 'stats'" in result.output
 
 
-@mock.patch("rrq.cli.JobStore.requeue_dlq")
-def test_dlq_requeue_command(mock_requeue, cli_runner, mock_app_settings_path):
-    """Test 'rrq dlq requeue' command with default options."""
-
-    # Patch the store method, which does not take the store instance as arg for MagicMock
-    async def dummy_requeue(dlq_name, target_queue, limit):
-        return 5
-
-    mock_requeue.side_effect = dummy_requeue
-
-    result = cli_runner.invoke(
-        cli.rrq, ["dlq", "requeue", "--settings", mock_app_settings_path]
-    )
-    assert result.exit_code == 0
-    mock_requeue.assert_called_once()
-    args, _ = mock_requeue.call_args
-    # args: (dlq_name, target_queue, limit)
-    from rrq.cli import _load_app_settings
-
-    settings = _load_app_settings(mock_app_settings_path)
-    assert args[0] == settings.default_dlq_name
-    assert args[1] == settings.default_queue_name
-    assert args[2] is None
-    assert "Requeuing jobs from DLQ" in result.output
-    assert "Requeued 5 job(s) from DLQ" in result.output
-
-
-@mock.patch("rrq.cli.JobStore.requeue_dlq")
-def test_dlq_requeue_with_options(mock_requeue, cli_runner, mock_app_settings_path):
-    """Test 'rrq dlq requeue' with explicit dlq-name, queue, and limit."""
-
-    async def dummy_requeue(dlq_name, target_queue, limit):
-        return 2
-
-    mock_requeue.side_effect = dummy_requeue
-
-    result = cli_runner.invoke(
-        cli.rrq,
-        [
-            "dlq",
-            "requeue",
-            "--settings",
-            mock_app_settings_path,
-            "--dlq-name",
-            "custom-dlq",
-            "--queue",
-            "custom-queue",
-            "--limit",
-            "3",
-        ],
-    )
-    assert result.exit_code == 0
-    mock_requeue.assert_called_once_with("custom-dlq", "custom-queue", 3)
-    assert (
-        "Requeuing jobs from DLQ 'custom-dlq' to queue 'custom-queue' (limit: 3)"
-        in result.output
-    )
-    assert (
-        "Requeued 2 job(s) from DLQ 'custom-dlq' to queue 'custom-queue'."
-        in result.output
-    )
+# DLQ tests removed - DLQ functionality is now implemented in the enhanced CLI
+# and is thoroughly tested in tests/cli_commands/test_dlq_commands.py
 
 
 def test_load_app_settings_default(tmp_path, monkeypatch):

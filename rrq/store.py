@@ -8,8 +8,10 @@ from datetime import UTC, datetime
 from typing import Any, Optional
 
 from redis.asyncio import Redis as AsyncRedis
+from redis.exceptions import RedisError
 
 from .constants import (
+    CONNECTION_POOL_MAX_CONNECTIONS,
     DEFAULT_DLQ_RESULT_TTL_SECONDS,
     JOB_KEY_PREFIX,
     LOCK_KEY_PREFIX,
@@ -27,6 +29,11 @@ class JobStore:
 
     Handles serialization/deserialization, key management, and atomic operations
     related to jobs, queues, locks, and worker health.
+
+    Transaction Usage Guidelines:
+    - Use transaction=True for write operations that must be atomic (job updates, DLQ moves)
+    - Use transaction=False for read-only batch operations (health checks, queue size queries)
+    - All async context managers (async with) properly handle cleanup even on exceptions
     """
 
     def __init__(self, settings: RRQSettings):
@@ -37,8 +44,13 @@ class JobStore:
         """
         self.settings = settings
         self.redis = AsyncRedis.from_url(
-            settings.redis_dsn, decode_responses=False
-        )  # Work with bytes initially
+            settings.redis_dsn,
+            decode_responses=False,
+            max_connections=CONNECTION_POOL_MAX_CONNECTIONS,
+            retry_on_timeout=True,
+            socket_keepalive=True,
+            socket_keepalive_options={},
+        )
 
         # LUA scripts for atomic operations
         self._atomic_lock_and_remove_script = """
@@ -86,37 +98,6 @@ class JobStore:
     async def aclose(self):
         """Closes the Redis connection pool associated with this store."""
         await self.redis.aclose()
-
-    async def _serialize_job_field(self, value: Any) -> bytes:
-        """Serializes a single field value for storing in a Redis hash."""
-        # Pydantic models are dumped to dict, then JSON string, then bytes.
-        # Basic types are JSON dumped directly.
-        if hasattr(value, "model_dump_json"):  # For Pydantic sub-models if any
-            return value.model_dump_json().encode("utf-8")
-        if isinstance(value, dict | list) or (
-            hasattr(value, "__dict__") and not callable(value)
-        ):
-            # Fallback for other dict-like or list-like objects, and simple custom objects
-            try:
-                # Use Pydantic-aware JSON dumping if possible
-                if hasattr(value, "model_dump"):
-                    value = value.model_dump(mode="json")
-                return json.dumps(value, default=str).encode(
-                    "utf-8"
-                )  # default=str for datetimes etc.
-            except TypeError:
-                return str(value).encode("utf-8")  # Last resort
-        return str(value).encode("utf-8")  # For simple types like int, str, bool
-
-    async def _deserialize_job_field(self, value_bytes: bytes) -> Any:
-        """Deserializes a single field value from Redis bytes."""
-        try:
-            # Attempt to parse as JSON first, as most complex types will be stored this way.
-            return json.loads(value_bytes.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            # If it fails, it might be a simple string that wasn't JSON encoded (e.g. status enums)
-            # or a raw byte representation that needs specific handling (not covered here yet)
-            return value_bytes.decode("utf-8")  # Fallback to string
 
     async def save_job_definition(self, job: Job) -> None:
         """Saves the complete job definition as a Redis hash.
@@ -240,6 +221,29 @@ class JobStore:
                 exc_info=True,
             )
             return None
+
+    async def get_job_data_dict(self, job_id: str) -> Optional[dict[str, str]]:
+        """Retrieves raw job data from Redis as a decoded dictionary.
+
+        This method provides a lightweight way to get job data for CLI commands
+        without the overhead of full Job object reconstruction and validation.
+
+        Args:
+            job_id: The unique ID of the job to retrieve.
+
+        Returns:
+            Dict with decoded string keys and values, or None if job not found.
+        """
+        job_key = f"{JOB_KEY_PREFIX}{job_id}"
+        job_data_raw_bytes = await self.redis.hgetall(job_key)
+
+        if not job_data_raw_bytes:
+            return None
+
+        # Decode all keys and values from bytes to str
+        return {
+            k.decode("utf-8"): v.decode("utf-8") for k, v in job_data_raw_bytes.items()
+        }
 
     async def add_job_to_queue(
         self, queue_name: str, job_id: str, score: float
@@ -481,13 +485,22 @@ class JobStore:
             "completion_time": completion_time.isoformat().encode("utf-8"),
         }
 
-        # Use pipeline for atomicity
+        # Use pipeline with transaction=True for atomic write operations
+        # This ensures all commands succeed or none do (ACID properties)
         async with self.redis.pipeline(transaction=True) as pipe:
-            pipe.hset(job_key, mapping=update_data)
-            pipe.lpush(dlq_redis_key, job_id.encode("utf-8"))
-            pipe.expire(job_key, DEFAULT_DLQ_RESULT_TTL_SECONDS)
-            results = await pipe.execute()
-        logger.info(f"Moved job {job_id} to DLQ '{dlq_redis_key}'. Results: {results}")
+            try:
+                pipe.hset(job_key, mapping=update_data)
+                pipe.lpush(dlq_redis_key, job_id.encode("utf-8"))
+                pipe.expire(job_key, DEFAULT_DLQ_RESULT_TTL_SECONDS)
+                results = await pipe.execute()
+                logger.info(
+                    f"Moved job {job_id} to DLQ '{dlq_redis_key}'. Results: {results}"
+                )
+            except RedisError as e:
+                logger.error(
+                    f"Failed to move job {job_id} to DLQ '{dlq_redis_key}': {e}"
+                )
+                raise
 
     async def requeue_dlq(
         self,
@@ -646,17 +659,22 @@ class JobStore:
             "status": JobStatus.COMPLETED.value.encode("utf-8"),
         }
 
-        # Use pipeline for atomicity of update + expire
+        # Use pipeline with transaction=True to atomically update and set TTL
+        # This prevents partial updates where result is saved but TTL isn't set
         async with self.redis.pipeline(transaction=True) as pipe:
-            pipe.hset(job_key, mapping=update_data)
-            if ttl_seconds > 0:
-                pipe.expire(job_key, ttl_seconds)
-            elif ttl_seconds == 0:
-                pipe.persist(job_key)
-            results = await pipe.execute()
-        logger.debug(
-            f"Saved result for job {job_id}. Status set to COMPLETED. TTL={ttl_seconds}. Results: {results}"
-        )
+            try:
+                pipe.hset(job_key, mapping=update_data)
+                if ttl_seconds > 0:
+                    pipe.expire(job_key, ttl_seconds)
+                elif ttl_seconds == 0:
+                    pipe.persist(job_key)
+                results = await pipe.execute()
+                logger.debug(
+                    f"Saved result for job {job_id}. Status set to COMPLETED. TTL={ttl_seconds}. Results: {results}"
+                )
+            except RedisError as e:
+                logger.error(f"Failed to save result for job {job_id}: {e}")
+                raise
 
     async def set_worker_health(
         self, worker_id: str, data: dict[str, Any], ttl_seconds: int
@@ -692,6 +710,8 @@ class JobStore:
         """
         health_key = f"rrq:health:worker:{worker_id}"
 
+        # Use pipeline with transaction=False for read-only batch operations
+        # No atomicity needed as we're only reading, this improves performance
         async with self.redis.pipeline(transaction=False) as pipe:
             pipe.get(health_key)
             pipe.ttl(health_key)
@@ -721,3 +741,107 @@ class JobStore:
             f"Retrieved health data for worker {worker_id}: TTL={final_ttl}, Data keys={list(health_data.keys()) if health_data else None}"
         )
         return health_data, final_ttl
+
+    async def get_job(self, job_id: str) -> Optional[dict[str, Any]]:
+        """Get simplified job data for monitoring/CLI purposes.
+
+        Returns a dictionary with basic job information, or None if job not found.
+        This is more lightweight than get_job_definition which returns full Job objects.
+        """
+        job_key = f"{JOB_KEY_PREFIX}{job_id}"
+        job_data = await self.redis.hgetall(job_key)
+
+        if not job_data:
+            return None
+
+        # Convert bytes to strings and return simplified dict
+        return {k.decode("utf-8"): v.decode("utf-8") for k, v in job_data.items()}
+
+    # Hybrid monitoring optimization methods
+    async def register_active_queue(self, queue_name: str) -> None:
+        """Register a queue as active in the monitoring registry"""
+        from .constants import ACTIVE_QUEUES_SET
+
+        timestamp = datetime.now(UTC).timestamp()
+        await self.redis.zadd(ACTIVE_QUEUES_SET, {queue_name: timestamp})
+
+    async def register_active_worker(self, worker_id: str) -> None:
+        """Register a worker as active in the monitoring registry"""
+        from .constants import ACTIVE_WORKERS_SET
+
+        timestamp = datetime.now(UTC).timestamp()
+        await self.redis.zadd(ACTIVE_WORKERS_SET, {worker_id: timestamp})
+
+    async def get_active_queues(self, max_age_seconds: int = 300) -> list[str]:
+        """Get list of recently active queues"""
+        from .constants import ACTIVE_QUEUES_SET
+
+        cutoff_time = datetime.now(UTC).timestamp() - max_age_seconds
+
+        # Remove stale entries and get active ones
+        await self.redis.zremrangebyscore(ACTIVE_QUEUES_SET, 0, cutoff_time)
+        active_queues = await self.redis.zrange(ACTIVE_QUEUES_SET, 0, -1)
+
+        return [q.decode("utf-8") if isinstance(q, bytes) else q for q in active_queues]
+
+    async def get_active_workers(self, max_age_seconds: int = 60) -> list[str]:
+        """Get list of recently active workers"""
+        from .constants import ACTIVE_WORKERS_SET
+
+        cutoff_time = datetime.now(UTC).timestamp() - max_age_seconds
+
+        # Remove stale entries and get active ones
+        await self.redis.zremrangebyscore(ACTIVE_WORKERS_SET, 0, cutoff_time)
+        active_workers = await self.redis.zrange(ACTIVE_WORKERS_SET, 0, -1)
+
+        return [
+            w.decode("utf-8") if isinstance(w, bytes) else w for w in active_workers
+        ]
+
+    async def publish_monitor_event(self, event_type: str, data: dict) -> None:
+        """Publish a monitoring event to the Redis stream"""
+        from .constants import MONITOR_EVENTS_STREAM
+
+        event_data = {
+            "event_type": event_type,
+            "timestamp": datetime.now(UTC).timestamp(),
+            **data,
+        }
+
+        # Add to stream with max length to prevent unbounded growth
+        await self.redis.xadd(
+            MONITOR_EVENTS_STREAM, event_data, maxlen=1000, approximate=True
+        )
+
+    async def consume_monitor_events(
+        self, last_id: str = "0", count: int = 100, block: int = 50
+    ) -> list:
+        """Consume monitoring events from Redis stream"""
+        from .constants import MONITOR_EVENTS_STREAM
+
+        try:
+            events = await self.redis.xread(
+                {MONITOR_EVENTS_STREAM: last_id}, count=count, block=block
+            )
+            return events
+        except Exception:
+            # Handle timeout or other Redis errors gracefully
+            return []
+
+    async def batch_get_queue_sizes(self, queue_names: list[str]) -> dict[str, int]:
+        """Efficiently get sizes for multiple queues using pipeline"""
+        from .constants import QUEUE_KEY_PREFIX
+
+        if not queue_names:
+            return {}
+
+        # Use pipeline with transaction=False for read-only batch operations
+        # No atomicity needed as we're only reading, this improves performance
+        async with self.redis.pipeline(transaction=False) as pipe:
+            for queue_name in queue_names:
+                queue_key = f"{QUEUE_KEY_PREFIX}{queue_name}"
+                pipe.zcard(queue_key)
+
+            sizes = await pipe.execute()
+
+        return dict(zip(queue_names, sizes))

@@ -90,13 +90,62 @@ class CronSchedule:
 
     def next_after(self, dt: datetime) -> datetime:
         dt = dt.replace(second=0, microsecond=0) + timedelta(minutes=1)
-        while True:
+
+        # Optimization: limit iterations to prevent infinite loops on edge cases
+        max_iterations = 400 * 24 * 60  # ~400 days worth of minutes
+        iterations = 0
+
+        while iterations < max_iterations:
+            iterations += 1
+
+            # Fast skip to next valid month if current month is invalid
             if dt.month not in self.months:
-                dt += timedelta(minutes=1)
+                # Jump to the first day of the next valid month
+                next_month = (
+                    min(m for m in self.months if m > dt.month)
+                    if any(m > dt.month for m in self.months)
+                    else min(self.months)
+                )
+                if next_month <= dt.month:
+                    # Need to go to next year
+                    dt = dt.replace(
+                        year=dt.year + 1, month=next_month, day=1, hour=0, minute=0
+                    )
+                else:
+                    dt = dt.replace(month=next_month, day=1, hour=0, minute=0)
                 continue
-            if dt.hour not in self.hours or dt.minute not in self.minutes:
-                dt += timedelta(minutes=1)
+
+            # Fast skip to next valid hour if current hour is invalid
+            if dt.hour not in self.hours:
+                # Jump to the next valid hour
+                next_hour = (
+                    min(h for h in self.hours if h > dt.hour)
+                    if any(h > dt.hour for h in self.hours)
+                    else min(self.hours)
+                )
+                if next_hour <= dt.hour:
+                    # Need to go to next day
+                    dt = (dt + timedelta(days=1)).replace(hour=next_hour, minute=0)
+                else:
+                    dt = dt.replace(hour=next_hour, minute=0)
                 continue
+
+            # Fast skip to next valid minute if current minute is invalid
+            if dt.minute not in self.minutes:
+                # Jump to the next valid minute
+                next_minute = (
+                    min(m for m in self.minutes if m > dt.minute)
+                    if any(m > dt.minute for m in self.minutes)
+                    else min(self.minutes)
+                )
+                if next_minute <= dt.minute:
+                    # Need to go to next hour
+                    dt = (dt + timedelta(hours=1)).replace(minute=next_minute)
+                else:
+                    dt = dt.replace(minute=next_minute)
+                continue
+
+            # Check day constraints
             dom_match = dt.day in self.dom
             # Convert Python weekday (Monday=0) to cron weekday (Sunday=0)
             # Python: Mon=0, Tue=1, Wed=2, Thu=3, Fri=4, Sat=5, Sun=6
@@ -116,9 +165,19 @@ class CronSchedule:
             else:
                 # Both constraints specified - use OR logic (standard cron behavior)
                 condition = dom_match or dow_match
+
             if condition:
                 return dt
-            dt += timedelta(minutes=1)
+
+            # If day constraints don't match, skip to next day
+            dt = (dt + timedelta(days=1)).replace(
+                hour=min(self.hours), minute=min(self.minutes)
+            )
+
+        # If we've exceeded max iterations, fall back to a reasonable default
+        raise ValueError(
+            f"Could not find next execution time for cron schedule within {max_iterations} iterations"
+        )
 
 
 class CronJob(BaseModel):

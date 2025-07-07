@@ -363,6 +363,38 @@ def rrq():
     pass
 
 
+# Register modular commands
+try:
+    # Import new command classes
+    from .cli_commands.commands.queues import QueueCommands
+    from .cli_commands.commands.jobs import JobCommands
+    from .cli_commands.commands.monitor import MonitorCommands
+    from .cli_commands.commands.debug import DebugCommands
+    from .cli_commands.commands.dlq import DLQCommands
+
+    # Register new commands with existing CLI
+    command_classes = [
+        QueueCommands(),
+        JobCommands(),
+        MonitorCommands(),
+        DebugCommands(),
+        DLQCommands(),
+    ]
+
+    for command_instance in command_classes:
+        try:
+            command_instance.register(rrq)
+        except Exception as e:
+            click.echo(
+                f"Warning: Failed to register command {command_instance.__class__.__name__}: {e}",
+                err=True,
+            )
+
+except ImportError as e:
+    # Fall back to original CLI if new modules aren't available
+    click.echo(f"Warning: Enhanced CLI features not available: {e}", err=True)
+
+
 @rrq.group("worker")
 def worker_cli():
     """Manage RRQ workers (run, watch)."""
@@ -562,8 +594,13 @@ def _run_multiple_workers(
                 # Pass the RRQ_SETTINGS env var as explicit parameter to subprocess
                 cmd.extend(["--settings", os.getenv("RRQ_SETTINGS")])
             else:
-                # Default to app.config.rrq.rrq_settings for ResQ
-                cmd.extend(["--settings", "app.config.rrq.rrq_settings"])
+                # Error: No settings provided for multi-worker mode
+                click.echo(
+                    "Error: Multi-worker mode requires explicit settings. "
+                    "Please provide either --settings option or set RRQ_SETTINGS environment variable.",
+                    err=True,
+                )
+                sys.exit(1)
             if queues:
                 for q_name in queues:
                     cmd.extend(["--queue", q_name])
@@ -742,65 +779,3 @@ def check_command(settings_object_path: str):
     else:
         click.echo(click.style("Health check FAILED.", fg="red"))
         sys.exit(1)
-
-
-@rrq.group("dlq")
-def dlq_cli():
-    """Manage the Dead Letter Queue (DLQ)."""
-    pass
-
-
-@dlq_cli.command("requeue")
-@click.option(
-    "--settings",
-    "settings_object_path",
-    type=str,
-    required=False,
-    default=None,
-    help=(
-        "Python settings path for application worker settings "
-        "(e.g., myapp.worker_config.rrq_settings). "
-        "Must include `job_registry: JobRegistry` if requeueing requires handler resolution."
-    ),
-)
-@click.option(
-    "--dlq-name",
-    "dlq_name",
-    type=str,
-    required=False,
-    default=None,
-    help="Name of the DLQ (without prefix). Defaults to settings.default_dlq_name.",
-)
-@click.option(
-    "--queue",
-    "target_queue",
-    type=str,
-    required=False,
-    default=None,
-    help="Name of the target queue (without prefix). Defaults to settings.default_queue_name.",
-)
-@click.option(
-    "--limit",
-    type=int,
-    required=False,
-    default=None,
-    help="Maximum number of DLQ jobs to requeue; all if not set.",
-)
-def dlq_requeue_command(
-    settings_object_path: str,
-    dlq_name: str,
-    target_queue: str,
-    limit: int,
-):
-    """Requeue jobs from the dead letter queue back into a live queue."""
-    rrq_settings = _load_app_settings(settings_object_path)
-    dlq_to_use = dlq_name or rrq_settings.default_dlq_name
-    queue_to_use = target_queue or rrq_settings.default_queue_name
-    job_store = JobStore(settings=rrq_settings)
-    click.echo(
-        f"Requeuing jobs from DLQ '{dlq_to_use}' to queue '{queue_to_use}' (limit: {limit or 'all'})..."
-    )
-    count = asyncio.run(job_store.requeue_dlq(dlq_to_use, queue_to_use, limit))
-    click.echo(
-        f"Requeued {count} job(s) from DLQ '{dlq_to_use}' to queue '{queue_to_use}'."
-    )
