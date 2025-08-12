@@ -106,6 +106,10 @@ class RRQSettings(BaseSettings):
         default_factory=list,
         description="List of module paths to event handler classes that implement RRQHook.",
     )
+    expected_job_ttl: int = Field(
+        default=30,
+        description="Expected job processing time buffer for locks (in seconds)."
+    )
     metrics_exporter: Optional[str] = Field(
         default=None,
         description="Metrics exporter type ('prometheus', 'statsd') or module path to custom exporter.",

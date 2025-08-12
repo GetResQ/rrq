@@ -2,7 +2,7 @@
 
 import logging
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timezone, datetime, timedelta
 from typing import Any, Optional
 
 from .job import Job, JobStatus
@@ -68,7 +68,7 @@ class RRQClient:
                          Uses a Redis lock with `default_unique_job_lock_ttl_seconds`.
             _max_retries: Maximum number of retries for this specific job. Overrides `RRQSettings.default_max_retries`.
             _job_timeout_seconds: Timeout (in seconds) for this specific job. Overrides `RRQSettings.default_job_timeout_seconds`.
-            _defer_until: A specific datetime (UTC recommended) when the job should become available for processing.
+            _defer_until: A specific datetime (timezone.utc recommended) when the job should become available for processing.
             _defer_by: A timedelta relative to now, specifying when the job should become available.
             _result_ttl_seconds: Time-to-live (in seconds) for the result of this specific job. Overrides `RRQSettings.default_result_ttl_seconds`.
             **kwargs: Keyword arguments to pass to the handler function.
@@ -79,40 +79,48 @@ class RRQClient:
         """
         # Determine job ID and enqueue timestamp
         job_id_to_use = _job_id or str(uuid.uuid4())
-        enqueue_time_utc = datetime.now(UTC)
+        enqueue_time_utc = datetime.now(timezone.utc)
 
-        # Compute unique lock TTL: cover deferral window if any
+        # Compute base desired run time and unique lock TTL to cover deferral
         lock_ttl_seconds = self.settings.default_unique_job_lock_ttl_seconds
-        if _defer_by is not None:
-            # Defer relative to now
-            defer_secs = max(0, int(_defer_by.total_seconds()))
-            lock_ttl_seconds = max(lock_ttl_seconds, defer_secs + 1)
-        elif _defer_until is not None:
-            # Defer until specific datetime
+        desired_run_time = enqueue_time_utc
+        if _defer_until is not None:
             dt = _defer_until
-            # Normalize to UTC
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=UTC)
-            elif dt.tzinfo != UTC:
-                dt = dt.astimezone(UTC)
+                dt = dt.replace(tzinfo=timezone.utc)
+            elif dt.tzinfo != timezone.utc:
+                dt = dt.astimezone(timezone.utc)
+            desired_run_time = dt
             diff = (dt - enqueue_time_utc).total_seconds()
             if diff > 0:
                 lock_ttl_seconds = max(lock_ttl_seconds, int(diff) + 1)
+        elif _defer_by is not None:
+            defer_secs = max(0, int(_defer_by.total_seconds()))
+            desired_run_time = enqueue_time_utc + timedelta(seconds=defer_secs)
+            lock_ttl_seconds = max(lock_ttl_seconds, defer_secs + 1)
 
         unique_acquired = False
-        # Acquire unique lock if requested, with TTL covering defer window
+        # Handle unique key with deferral if locked
+        unique_acquired = False
         if _unique_key:
-            lock_acquired = await self.job_store.acquire_unique_job_lock(
-                unique_key=_unique_key,
-                job_id=job_id_to_use,
-                lock_ttl_seconds=lock_ttl_seconds,
-            )
-            if not lock_acquired:
-                logger.info(
-                    f"Job with unique key '{_unique_key}' already active or recently run. Enqueue denied."
+            remaining_ttl = await self.job_store.get_lock_ttl(_unique_key)
+            if remaining_ttl > 0:
+                desired_run_time = max(
+                    desired_run_time, enqueue_time_utc + timedelta(seconds=remaining_ttl)
                 )
-                return None
-            unique_acquired = True
+            else:
+                acquired = await self.job_store.acquire_unique_job_lock(
+                    _unique_key, job_id_to_use, lock_ttl_seconds
+                )
+                if acquired:
+                    unique_acquired = True
+                else:
+                    # Race: lock acquired after our check; defer by remaining TTL
+                    remaining = await self.job_store.get_lock_ttl(_unique_key)
+                    desired_run_time = max(
+                        desired_run_time,
+                        enqueue_time_utc + timedelta(seconds=max(0, int(remaining))),
+                    )
 
         queue_name_to_use = _queue_name or self.settings.default_queue_name
 
@@ -146,18 +154,14 @@ class RRQClient:
 
         # Determine the score for the sorted set (queue)
         # Score is a millisecond timestamp for when the job should be processed.
-        score_dt = enqueue_time_utc  # Default to immediate processing
-        if _defer_until:
-            score_dt = _defer_until
-        elif _defer_by:
-            score_dt = enqueue_time_utc + _defer_by
+        score_dt = desired_run_time
 
-        # Ensure score_dt is timezone-aware (UTC) if it's naive from user input
+        # Ensure score_dt is timezone-aware (timezone.utc) if it's naive from user input
         if score_dt.tzinfo is None:
-            score_dt = score_dt.replace(tzinfo=UTC)
-        elif score_dt.tzinfo != UTC:
-            # Convert to UTC if it's aware but not UTC
-            score_dt = score_dt.astimezone(UTC)
+            score_dt = score_dt.replace(tzinfo=timezone.utc)
+        elif score_dt.tzinfo != timezone.utc:
+            # Convert to timezone.utc if it's aware but not timezone.utc
+            score_dt = score_dt.astimezone(timezone.utc)
 
         score_timestamp_ms = int(score_dt.timestamp() * 1000)
         # Record when the job is next scheduled to run (for deferred execution)

@@ -1,7 +1,7 @@
 import asyncio
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import timezone, datetime, timedelta
 from typing import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -62,7 +62,7 @@ async def test_save_and_get_job_definition(job_store: JobStore):
     assert retrieved_job.status == JobStatus.PENDING
     assert isinstance(retrieved_job.enqueue_time, datetime)
     if retrieved_job.enqueue_time.tzinfo is not None:
-        assert retrieved_job.enqueue_time.tzinfo == UTC
+        assert retrieved_job.enqueue_time.tzinfo == timezone.utc
 
 
 @pytest.mark.asyncio
@@ -261,7 +261,7 @@ async def test_move_job_to_dlq(job_store: JobStore):
 
     dlq_name_to_use = DEFAULT_DLQ_NAME  # Use default from constants
     error_message = "Max retries exceeded"
-    completion_time = datetime.now(UTC)
+    completion_time = datetime.now(timezone.utc)
 
     await job_store.move_job_to_dlq(
         job.id, dlq_name_to_use, error_message, completion_time
@@ -667,7 +667,7 @@ class TestPipelineExceptionHandling:
             # Call should raise the exception
             with pytest.raises(RedisError, match="Pipeline failed"):
                 await job_store.move_job_to_dlq(
-                    job.id, "test_dlq", "Test error", datetime.now(UTC)
+                    job.id, "test_dlq", "Test error", datetime.now(timezone.utc)
                 )
 
             # Verify cleanup was called
@@ -717,7 +717,7 @@ class TestPipelineExceptionHandling:
 
             with pytest.raises(ConnectionError, match="Connection lost"):
                 await job_store.move_job_to_dlq(
-                    job.id, "test_dlq", "Test error", datetime.now(UTC)
+                    job.id, "test_dlq", "Test error", datetime.now(timezone.utc)
                 )
 
             # Verify cleanup was called even for connection errors
@@ -749,7 +749,7 @@ class TestPipelineExceptionHandling:
 
             with pytest.raises(ResponseError):
                 await job_store.move_job_to_dlq(
-                    job.id, "test_dlq", "Test error", datetime.now(UTC)
+                    job.id, "test_dlq", "Test error", datetime.now(timezone.utc)
                 )
 
         # Verify job state hasn't changed (transaction rollback)
@@ -781,13 +781,13 @@ class TestPipelineExceptionHandling:
 
                     with pytest.raises(RedisError):
                         await job_store.move_job_to_dlq(
-                            job.id, "test_dlq", f"Error {index}", datetime.now(UTC)
+                            job.id, "test_dlq", f"Error {index}", datetime.now(timezone.utc)
                         )
                     return f"failed_{index}"
             else:
                 # Real operation for odd indices
                 await job_store.move_job_to_dlq(
-                    job.id, "test_dlq", f"Error {index}", datetime.now(UTC)
+                    job.id, "test_dlq", f"Error {index}", datetime.now(timezone.utc)
                 )
                 return f"success_{index}"
 
@@ -869,7 +869,7 @@ class TestPipelineExceptionHandling:
 
             with pytest.raises(RedisError):
                 await job_store.move_job_to_dlq(
-                    job.id, "test_dlq", "Test error", datetime.now(UTC)
+                    job.id, "test_dlq", "Test error", datetime.now(timezone.utc)
                 )
 
             # Check that error was logged with job context
@@ -910,7 +910,7 @@ class TestPipelineExceptionHandling:
         assert initial_job.last_error is None
 
         # Successfully move to DLQ
-        completion_time = datetime.now(UTC)
+        completion_time = datetime.now(timezone.utc)
         await job_store.move_job_to_dlq(
             job.id, "test_dlq", "Test error message", completion_time
         )
@@ -925,3 +925,29 @@ class TestPipelineExceptionHandling:
         dlq_key = "rrq:dlq:test_dlq"
         dlq_jobs = await job_store.redis.lrange(dlq_key, 0, -1)
         assert job.id.encode("utf-8") in dlq_jobs
+
+@pytest.mark.asyncio
+async def test_get_lock_ttl(job_store: JobStore):
+    unique_key = "ttl_test"
+    ttl = 5
+    await job_store.acquire_unique_job_lock(unique_key, "job1", ttl)
+    remaining = await job_store.get_lock_ttl(unique_key)
+    assert 0 < remaining <= ttl
+
+@pytest.mark.asyncio
+async def test_get_set_last_process_time(job_store: JobStore):
+    unique_key = "process_time_test"
+    ts = datetime.now(timezone.utc)
+    await job_store.set_last_process_time(unique_key, ts)
+    retrieved = await job_store.get_last_process_time(unique_key)
+    assert retrieved == ts
+
+@pytest.mark.asyncio
+async def test_defer_job(job_store: JobStore):
+    job = Job(function_name="defer_test", queue_name="test_queue")
+    await job_store.save_job_definition(job)
+    defer_by = timedelta(seconds=10)
+    await job_store.defer_job(job, defer_by)
+    score = await job_store.redis.zscore("rrq:queue:test_queue", job.id.encode("utf-8"))
+    expected_ms = int((datetime.now(timezone.utc) + defer_by).timestamp() * 1000)
+    assert abs(score - expected_ms) < 1500  # allow ~1.5s leeway

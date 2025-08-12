@@ -1,5 +1,5 @@
 import asyncio  # For testing unique key lock expiry
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import timezone, datetime, timedelta, timezone
 from typing import AsyncGenerator
 
 import pytest
@@ -108,7 +108,7 @@ async def test_enqueue_job_with_defer_until(
     rrq_client: RRQClient, job_store_for_client_tests: JobStore
 ):
     func_name = "deferred_until_func"
-    defer_until_dt = datetime.now(UTC) + timedelta(minutes=1)
+    defer_until_dt = datetime.now(timezone.utc) + timedelta(minutes=1)
 
     enqueued_job = await rrq_client.enqueue(func_name, _defer_until=defer_until_dt)
     assert enqueued_job is not None
@@ -184,34 +184,25 @@ async def test_enqueue_with_unique_key(
     unique_key = "idempotent-op-user-555"
     func_name = "unique_func"
 
-    # First enqueue should succeed
+    # First enqueue should succeed and acquire unique lock
     job1 = await rrq_client.enqueue(func_name, _unique_key=unique_key)
     assert job1 is not None
     assert job1.job_unique_key == unique_key
 
-    # Second enqueue with same unique key should fail (return None)
+    # Second enqueue with same unique key should defer instead of failing
     job2 = await rrq_client.enqueue(func_name, "different_arg", _unique_key=unique_key)
-    assert job2 is None, "Second job with same unique key should not have been enqueued"
-
-    # Verify lock exists in Redis (optional, for deeper debugging)
-    unique_lock_key_name = f"{UNIQUE_JOB_LOCK_PREFIX}{unique_key}"
-    lock_holder_job_id = await job_store_for_client_tests.redis.get(
-        unique_lock_key_name
+    assert job2 is not None
+    # Check that it's scheduled no earlier than the remaining lock TTL
+    score = await job_store_for_client_tests.redis.zscore(
+        rrq_client.settings.default_queue_name, job2.id.encode("utf-8")
     )
-    assert lock_holder_job_id is not None
-    assert lock_holder_job_id.decode("utf-8") == job1.id
-
-    # Wait for the unique key lock to expire
-    # Using default_unique_job_lock_ttl_seconds from rrq_settings fixture
-    await asyncio.sleep(
-        rrq_settings_for_client.default_unique_job_lock_ttl_seconds + 0.5
+    assert score is not None
+    # remaining TTL from Redis
+    remaining = await job_store_for_client_tests.redis.ttl(
+        f"{UNIQUE_JOB_LOCK_PREFIX}{unique_key}"
     )
-
-    # Third enqueue after lock expiry should succeed
-    job3 = await rrq_client.enqueue(func_name, "another_arg", _unique_key=unique_key)
-    assert job3 is not None
-    assert job3.job_unique_key == unique_key
-    assert job3.id != job1.id  # Should be a new job
+    min_expected_ms = int((datetime.now(timezone.utc) + timedelta(seconds=max(0, remaining - 1))).timestamp() * 1000)
+    assert score >= min_expected_ms
 
 
 class DummyStore:
@@ -220,6 +211,7 @@ class DummyStore:
         self.saved = []
         self.queued = []
         self.locks = []
+        self._lock_ttl = 0
 
     async def aclose(self):
         self.aclose_called = True
@@ -228,6 +220,9 @@ class DummyStore:
         self.locks.append((unique_key, job_id, lock_ttl_seconds))
         # Deny lock to simulate duplicate job
         return False
+
+    async def get_lock_ttl(self, unique_key: str) -> int:
+        return self._lock_ttl
 
     async def save_job_definition(self, job: Job):
         self.saved.append(job)
@@ -279,15 +274,17 @@ async def test_enqueue_without_unique_key_and_defaults():
 
 
 @pytest.mark.asyncio
-async def test_enqueue_with_unique_key_denied():
+async def test_enqueue_with_unique_key_defers_when_locked():
     settings = RRQSettings()
     store = DummyStore()
     client = RRQClient(settings, job_store=store)
     # attempt enqueue with unique key when lock is denied
+    # Simulate existing lock TTL so client defers
+    store._lock_ttl = 10
     result = await client.enqueue("f", _unique_key="X")
-    assert result is None
-    # acquire_unique_job_lock called
-    assert store.locks and store.locks[0][0] == "X"
+    assert isinstance(result, Job)
+    # ensure not acquiring lock when already locked
+    assert not store.locks or store.locks[-1][0] != "X"
 
 
 @pytest.mark.asyncio
@@ -304,7 +301,7 @@ async def test_enqueue_with_defer_by_and_until():
     now_ms = datetime.now(timezone.utc).timestamp() * 1000
     assert score1 >= now_ms + 5000 - 10
     # test defer_until with naive datetime
-    future = datetime.now(UTC) + timedelta(seconds=10)
+    future = datetime.now(timezone.utc) + timedelta(seconds=10)
     await client.enqueue("f2", _defer_until=future)
     _, _, score2 = store.queued[-1]
     # score around future
@@ -353,7 +350,26 @@ async def test_next_scheduled_run_time_set_correctly():
     job2 = await client.enqueue("f1", _defer_by=d)
     expected = job2.enqueue_time + d
     assert job2.next_scheduled_run_time == expected
-    # Defer_until enqueue: next_scheduled_run_time == provided datetime (UTC)
-    dt = datetime.now(UTC) + timedelta(seconds=15)
+    # Defer_until enqueue: next_scheduled_run_time == provided datetime (timezone.utc)
+    dt = datetime.now(timezone.utc) + timedelta(seconds=15)
     job3 = await client.enqueue("f2", _defer_until=dt)
     assert job3.next_scheduled_run_time == dt
+
+@pytest.mark.asyncio
+async def test_enqueue_with_unique_key_deferral(rrq_client: RRQClient, job_store_for_client_tests: JobStore):
+    unique_key = "deferral_test_key"
+    # First enqueue acquires lock
+    job1 = await rrq_client.enqueue("test_func", _unique_key=unique_key)
+    assert job1 is not None
+    # Second enqueue should defer
+    job2 = await rrq_client.enqueue("test_func", _unique_key=unique_key)
+    assert job2 is not None  # Now allows with defer
+    # Check defer was applied based on remaining lock TTL
+    score = await job_store_for_client_tests.redis.zscore(
+        rrq_client.settings.default_queue_name, job2.id.encode("utf-8")
+    )
+    remaining = await job_store_for_client_tests.redis.ttl(
+        f"{UNIQUE_JOB_LOCK_PREFIX}{unique_key}"
+    )
+    expected_min = int((datetime.now(timezone.utc) + timedelta(seconds=max(0, remaining - 1))).timestamp() * 1000)
+    assert score >= expected_min

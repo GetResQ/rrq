@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import timezone, datetime, timedelta
 from typing import Any, Optional, Sequence
 
 from pydantic import BaseModel, Field, PrivateAttr
@@ -201,13 +201,13 @@ class CronJob(BaseModel):
 
     def schedule_next(self, now: Optional[datetime] = None) -> None:
         """Compute the next run time strictly after *now*."""
-        now = (now or datetime.now(UTC)).replace(second=0, microsecond=0)
+        now = (now or datetime.now(timezone.utc)).replace(second=0, microsecond=0)
         if self._cron is None:
             self._cron = CronSchedule(self.schedule)
         self.next_run_time = self._cron.next_after(now)
 
     def due(self, now: Optional[datetime] = None) -> bool:
-        now = now or datetime.now(UTC)
+        now = now or datetime.now(timezone.utc)
         if self.next_run_time is None:
             self.schedule_next(now)
         return now >= (self.next_run_time or now)

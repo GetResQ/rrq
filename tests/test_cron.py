@@ -1,6 +1,6 @@
 """Tests for the cron functionality in RRQ."""
 
-from datetime import UTC, datetime
+from datetime import timezone, datetime
 
 import pytest
 
@@ -78,36 +78,36 @@ class TestCronSchedule:
     def test_next_after_every_minute(self):
         """Test next_after for every minute schedule."""
         schedule = CronSchedule("* * * * *")
-        now = datetime(2023, 6, 15, 10, 30, 45, tzinfo=UTC)
+        now = datetime(2023, 6, 15, 10, 30, 45, tzinfo=timezone.utc)
         next_run = schedule.next_after(now)
         # Should be next minute boundary
-        expected = datetime(2023, 6, 15, 10, 31, 0, tzinfo=UTC)
+        expected = datetime(2023, 6, 15, 10, 31, 0, tzinfo=timezone.utc)
         assert next_run == expected
 
     def test_next_after_specific_time(self):
         """Test next_after for specific time schedule."""
         schedule = CronSchedule("30 14 * * *")  # 2:30 PM daily
-        now = datetime(2023, 6, 15, 10, 0, 0, tzinfo=UTC)
+        now = datetime(2023, 6, 15, 10, 0, 0, tzinfo=timezone.utc)
         next_run = schedule.next_after(now)
-        expected = datetime(2023, 6, 15, 14, 30, 0, tzinfo=UTC)
+        expected = datetime(2023, 6, 15, 14, 30, 0, tzinfo=timezone.utc)
         assert next_run == expected
 
     def test_next_after_crosses_day_boundary(self):
         """Test next_after when it needs to cross day boundary."""
         schedule = CronSchedule("30 9 * * *")  # 9:30 AM daily
-        now = datetime(2023, 6, 15, 15, 0, 0, tzinfo=UTC)  # 3 PM
+        now = datetime(2023, 6, 15, 15, 0, 0, tzinfo=timezone.utc)  # 3 PM
         next_run = schedule.next_after(now)
-        expected = datetime(2023, 6, 16, 9, 30, 0, tzinfo=UTC)  # Next day
+        expected = datetime(2023, 6, 16, 9, 30, 0, tzinfo=timezone.utc)  # Next day
         assert next_run == expected
 
     def test_next_after_weekday_constraint(self):
         """Test next_after with weekday constraints."""
         schedule = CronSchedule("0 9 * * mon")  # 9 AM on Mondays
         # Start on a Friday
-        now = datetime(2023, 6, 16, 10, 0, 0, tzinfo=UTC)  # Friday
+        now = datetime(2023, 6, 16, 10, 0, 0, tzinfo=timezone.utc)  # Friday
         next_run = schedule.next_after(now)
         # Should be next Monday
-        expected = datetime(2023, 6, 19, 9, 0, 0, tzinfo=UTC)  # Monday
+        expected = datetime(2023, 6, 19, 9, 0, 0, tzinfo=timezone.utc)  # Monday
         assert next_run == expected
 
 
@@ -146,17 +146,17 @@ class TestCronJob:
     def test_schedule_next(self):
         """Test the schedule_next method."""
         job = CronJob(function_name="test_task", schedule="30 14 * * *")
-        now = datetime(2023, 6, 15, 10, 0, 0, tzinfo=UTC)
+        now = datetime(2023, 6, 15, 10, 0, 0, tzinfo=timezone.utc)
 
         job.schedule_next(now)
 
-        expected = datetime(2023, 6, 15, 14, 30, 0, tzinfo=UTC)
+        expected = datetime(2023, 6, 15, 14, 30, 0, tzinfo=timezone.utc)
         assert job.next_run_time == expected
 
     def test_due_method_schedules_if_needed(self):
         """Test that due() schedules next run time if not set."""
         job = CronJob(function_name="test_task", schedule="* * * * *")
-        now = datetime(2023, 6, 15, 10, 30, 0, tzinfo=UTC)
+        now = datetime(2023, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
 
         # next_run_time should be None initially
         assert job.next_run_time is None
@@ -172,8 +172,8 @@ class TestCronJob:
     def test_due_method_with_past_time(self):
         """Test due() method when next_run_time is in the past."""
         job = CronJob(function_name="test_task", schedule="* * * * *")
-        past_time = datetime(2023, 6, 15, 10, 0, 0, tzinfo=UTC)
-        now = datetime(2023, 6, 15, 10, 30, 0, tzinfo=UTC)
+        past_time = datetime(2023, 6, 15, 10, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2023, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
 
         job.next_run_time = past_time
 
@@ -183,8 +183,8 @@ class TestCronJob:
     def test_due_method_with_future_time(self):
         """Test due() method when next_run_time is in the future."""
         job = CronJob(function_name="test_task", schedule="* * * * *")
-        future_time = datetime(2023, 6, 15, 11, 0, 0, tzinfo=UTC)
-        now = datetime(2023, 6, 15, 10, 30, 0, tzinfo=UTC)
+        future_time = datetime(2023, 6, 15, 11, 0, 0, tzinfo=timezone.utc)
+        now = datetime(2023, 6, 15, 10, 30, 0, tzinfo=timezone.utc)
 
         job.next_run_time = future_time
 
@@ -204,10 +204,10 @@ class TestCronScheduleEdgeCases:
         """Test handling of February 29 in leap years."""
         schedule = CronSchedule("0 0 29 2 *")  # Feb 29
         # In a non-leap year, should skip to next occurrence
-        now = datetime(2023, 1, 1, 0, 0, 0, tzinfo=UTC)  # 2023 is not a leap year
+        now = datetime(2023, 1, 1, 0, 0, 0, tzinfo=timezone.utc)  # 2023 is not a leap year
         next_run = schedule.next_after(now)
         # Should be Feb 29, 2024 (next leap year)
-        expected = datetime(2024, 2, 29, 0, 0, 0, tzinfo=UTC)
+        expected = datetime(2024, 2, 29, 0, 0, 0, tzinfo=timezone.utc)
         assert next_run == expected
 
     def test_day_of_month_and_weekday_interaction(self):
@@ -216,11 +216,11 @@ class TestCronScheduleEdgeCases:
         schedule = CronSchedule("0 9 15 * fri")
 
         # Test when 15th is not a Friday
-        now = datetime(2023, 6, 10, 0, 0, 0, tzinfo=UTC)  # June 10, 2023 (Saturday)
+        now = datetime(2023, 6, 10, 0, 0, 0, tzinfo=timezone.utc)  # June 10, 2023 (Saturday)
         next_run = schedule.next_after(now)
 
         # Should be June 15th (Thursday) since it comes before the next Friday
-        expected = datetime(2023, 6, 15, 9, 0, 0, tzinfo=UTC)
+        expected = datetime(2023, 6, 15, 9, 0, 0, tzinfo=timezone.utc)
         assert next_run == expected
 
     def test_end_of_month_handling(self):
@@ -228,11 +228,11 @@ class TestCronScheduleEdgeCases:
         schedule = CronSchedule("0 0 31 * *")  # 31st of month
 
         # Start in February (which doesn't have 31 days)
-        now = datetime(2023, 2, 1, 0, 0, 0, tzinfo=UTC)
+        now = datetime(2023, 2, 1, 0, 0, 0, tzinfo=timezone.utc)
         next_run = schedule.next_after(now)
 
         # Should be March 31st
-        expected = datetime(2023, 3, 31, 0, 0, 0, tzinfo=UTC)
+        expected = datetime(2023, 3, 31, 0, 0, 0, tzinfo=timezone.utc)
         assert next_run == expected
 
     def test_step_values_with_ranges(self):

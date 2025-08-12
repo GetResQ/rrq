@@ -2,6 +2,20 @@
 
 RRQ is a Python library for creating reliable job queues using Redis and `asyncio`, inspired by [ARQ (Async Redis Queue)](https://github.com/samuelcolvin/arq). It focuses on providing at-least-once job processing semantics with features like automatic retries, job timeouts, dead-letter queues, and graceful worker shutdown.
 
+## 🆕 What's New in v0.7.0
+
+- **Comprehensive CLI Tools**: 15+ new commands for monitoring, debugging, and management
+- **Real-time Monitoring Dashboard**: Interactive dashboard with `rrq monitor`
+- **Enhanced DLQ Management**: Sophisticated filtering and requeuing capabilities
+- **Python 3.10 Support**: Expanded compatibility from Python 3.11+ to 3.10+
+- **Bug Fixes**: Critical fix for unique job enqueue failures with proper deferral
+
+## Requirements
+
+- Python 3.10 or higher
+- Redis 5.0 or higher
+- asyncio-compatible environment
+
 ## Key Features
 
 *   **At-Least-Once Semantics**: Uses Redis locks to ensure a job is processed by only one worker at a time. If a worker crashes or shuts down mid-processing, the lock expires, and the job *should* be re-processed (though re-queueing on unclean shutdown isn't implemented here yet - graceful shutdown *does* re-queue).
@@ -171,21 +185,21 @@ cron_jobs = [
         args=["temp_files"],
         kwargs={"max_age_days": 7}
     ),
-    
+
     # Weekly report every Monday at 9 AM
     CronJob(
         function_name="generate_weekly_report",
         schedule="0 9 * * mon",
         unique=True  # Prevent duplicate reports if worker restarts
     ),
-    
+
     # Health check every 15 minutes on a specific queue
     CronJob(
         function_name="system_health_check",
         schedule="*/15 * * * *",
         queue_name="monitoring"
     ),
-    
+
     # Backup database every night at 1 AM
     CronJob(
         function_name="backup_database",
@@ -335,7 +349,7 @@ RRQ's monitoring and statistics commands are designed for operational visibility
   ```bash
   # Fast scan for quick overview
   rrq queue stats --max-scan 500
-  
+
   # Complete scan (may be slow)
   rrq queue stats --max-scan 0
   ```
@@ -346,7 +360,7 @@ RRQ's monitoring and statistics commands are designed for operational visibility
   ```bash
   # Smaller batches for memory-constrained environments
   rrq dlq list --batch-size 50
-  
+
   # Larger batches for better performance
   rrq dlq list --batch-size 200
   ```
@@ -359,19 +373,19 @@ RRQ's monitoring and statistics commands are designed for operational visibility
 
 For comprehensive job lifecycle tracking and historical analytics, consider these architectural additions:
 
-1. **Job History Tracking**: 
+1. **Job History Tracking**:
    - Store completed/failed job summaries in a separate Redis structure or external database
    - Implement job completion event logging for time-series analytics
 
-2. **Active Job Monitoring**: 
+2. **Active Job Monitoring**:
    - Enhanced worker health tracking with job-level visibility
    - Real-time active job registry for immediate status reporting
 
-3. **Throughput Calculation**: 
+3. **Throughput Calculation**:
    - Time-series data collection for accurate throughput metrics
    - Queue-specific performance trend tracking
 
-4. **Scalable Statistics**: 
+4. **Scalable Statistics**:
    - Consider Redis Streams or time-series databases for high-frequency job event tracking
    - Implement sampling strategies for large-scale deployments
 
@@ -389,6 +403,48 @@ RRQ can be configured in several ways, with the following precedence:
 
 **Important Note on `job_registry`**: The `job_registry` attribute in your `RRQSettings` object is **critical** for RRQ to function. It must be an instance of `JobRegistry` and is used to register job handlers. Without a properly configured `job_registry`, workers will not know how to process jobs, and most operations will fail. Ensure it is set in your settings object to map job names to their respective handler functions.
 
+### Comprehensive CLI Command System
+- **New modular CLI architecture** with dedicated command modules for better organization
+- **Enhanced monitoring capabilities** with real-time dashboards and beautiful table output
+- **Extensive DLQ management** commands for inspecting, filtering, and requeuing failed jobs
+- **Job lifecycle management** with detailed inspection and control commands
+- **Queue management** with statistics, purging, and migration capabilities
+- **Debug utilities** for development and testing including stress testing and data generation
+
+## 📚 New CLI Commands
+
+### Monitor Commands
+- `rrq monitor` - Real-time dashboard with queue stats, worker health, and DLQ monitoring
+- `rrq monitor workers` - Detailed worker status and health monitoring
+- `rrq monitor jobs` - Active job tracking and monitoring
+
+### DLQ Commands
+- `rrq dlq list` - List failed jobs with filtering by queue, function, and time
+- `rrq dlq stats` - DLQ statistics including error patterns and queue distribution
+- `rrq dlq inspect` - Detailed inspection of failed jobs
+- `rrq dlq requeue` - Requeue failed jobs with dry-run support
+- `rrq dlq purge` - Clean up old failed jobs
+
+### Queue Commands
+- `rrq queue list` - List all queues with job counts
+- `rrq queue stats` - Detailed queue statistics and throughput metrics
+- `rrq queue inspect` - Inspect pending jobs in queues
+- `rrq queue purge` - Purge jobs from queues with safety confirmations
+- `rrq queue migrate` - Move jobs between queues
+
+### Job Commands
+- `rrq job list` - List jobs with status filtering
+- `rrq job inspect` - Detailed job information including timeline
+- `rrq job result` - Retrieve job results
+- `rrq job cancel` - Cancel active jobs
+- `rrq job retry` - Manually retry failed jobs
+- `rrq job delete` - Delete job records
+
+### Debug Commands
+- `rrq debug generate-jobs` - Generate test jobs for development
+- `rrq debug stress-test` - Stress test the system
+- `rrq debug cleanup` - Clean up test data
+- `rrq debug redis-info` - Redis server information and diagnostics
 
 ## Core Components
 

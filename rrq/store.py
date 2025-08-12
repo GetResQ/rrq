@@ -4,7 +4,7 @@ with the Redis backend for storing and managing RRQ job data and queues.
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import timezone, datetime, timedelta
 from typing import Any, Optional
 
 from redis.asyncio import Redis as AsyncRedis
@@ -294,7 +294,7 @@ class JobStore:
         if count <= 0:
             return []
         queue_key = self._format_queue_key(queue_name)
-        now_ms = int(datetime.now(UTC).timestamp() * 1000)
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         # Fetch jobs with score from -inf up to current time, limit by count
         job_ids_bytes = await self.redis.zrangebyscore(
             queue_key, min=float("-inf"), max=float(now_ms), start=0, num=count
@@ -529,7 +529,7 @@ class JobStore:
                 break
             job_id = job_id_bytes.decode("utf-8")
             # Use current time for re-enqueue score
-            now_ms = int(datetime.now(UTC).timestamp() * 1000)
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
             await self.add_job_to_queue(
                 self._format_queue_key(target_queue),
                 job_id,
@@ -637,7 +637,7 @@ class JobStore:
                          0 means persist indefinitely. < 0 means leave existing TTL.
         """
         job_key = f"{JOB_KEY_PREFIX}{job_id}"
-        completion_time = datetime.now(UTC)
+        completion_time = datetime.now(timezone.utc)
 
         # Serialize result to JSON string
         try:
@@ -762,21 +762,21 @@ class JobStore:
         """Register a queue as active in the monitoring registry"""
         from .constants import ACTIVE_QUEUES_SET
 
-        timestamp = datetime.now(UTC).timestamp()
+        timestamp = datetime.now(timezone.utc).timestamp()
         await self.redis.zadd(ACTIVE_QUEUES_SET, {queue_name: timestamp})
 
     async def register_active_worker(self, worker_id: str) -> None:
         """Register a worker as active in the monitoring registry"""
         from .constants import ACTIVE_WORKERS_SET
 
-        timestamp = datetime.now(UTC).timestamp()
+        timestamp = datetime.now(timezone.utc).timestamp()
         await self.redis.zadd(ACTIVE_WORKERS_SET, {worker_id: timestamp})
 
     async def get_active_queues(self, max_age_seconds: int = 300) -> list[str]:
         """Get list of recently active queues"""
         from .constants import ACTIVE_QUEUES_SET
 
-        cutoff_time = datetime.now(UTC).timestamp() - max_age_seconds
+        cutoff_time = datetime.now(timezone.utc).timestamp() - max_age_seconds
 
         # Remove stale entries and get active ones
         await self.redis.zremrangebyscore(ACTIVE_QUEUES_SET, 0, cutoff_time)
@@ -788,7 +788,7 @@ class JobStore:
         """Get list of recently active workers"""
         from .constants import ACTIVE_WORKERS_SET
 
-        cutoff_time = datetime.now(UTC).timestamp() - max_age_seconds
+        cutoff_time = datetime.now(timezone.utc).timestamp() - max_age_seconds
 
         # Remove stale entries and get active ones
         await self.redis.zremrangebyscore(ACTIVE_WORKERS_SET, 0, cutoff_time)
@@ -804,7 +804,7 @@ class JobStore:
 
         event_data = {
             "event_type": event_type,
-            "timestamp": datetime.now(UTC).timestamp(),
+            "timestamp": datetime.now(timezone.utc).timestamp(),
             **data,
         }
 
@@ -827,6 +827,40 @@ class JobStore:
         except Exception:
             # Handle timeout or other Redis errors gracefully
             return []
+
+    async def get_lock_ttl(self, unique_key: str) -> int:
+        lock_key = f"{UNIQUE_JOB_LOCK_PREFIX}{unique_key}"
+        ttl = await self.redis.ttl(lock_key)
+        try:
+            ttl_int = int(ttl)
+        except (TypeError, ValueError):
+            ttl_int = 0
+        return ttl_int if ttl_int and ttl_int > 0 else 0
+
+    async def get_last_process_time(self, unique_key: str) -> Optional[datetime]:
+        key = f"last_process:{unique_key}"
+        timestamp = await self.redis.get(key)
+        return datetime.fromtimestamp(float(timestamp), timezone.utc) if timestamp else None
+
+    async def set_last_process_time(self, unique_key: str, timestamp: datetime) -> None:
+        key = f"last_process:{unique_key}"
+        # Add TTL to auto-expire the marker; independent of app specifics
+        ttl_seconds = max(60, int(self.settings.expected_job_ttl) * 2)
+        await self.redis.set(key, timestamp.timestamp(), ex=ttl_seconds)
+
+    async def get_unique_lock_holder(self, unique_key: str) -> Optional[str]:
+        """Return the job_id currently holding the unique lock, if any."""
+        lock_key = f"{UNIQUE_JOB_LOCK_PREFIX}{unique_key}"
+        value = await self.redis.get(lock_key)
+        return value.decode("utf-8") if value else None
+
+    async def defer_job(self, job: Job, defer_by: timedelta) -> None:
+        target_queue = job.queue_name or self.settings.default_queue_name
+        queue_key = self._format_queue_key(target_queue)
+        # Use milliseconds since epoch to be consistent with queue scores
+        score_ms = int((datetime.now(timezone.utc) + defer_by).timestamp() * 1000)
+        await self.redis.zadd(queue_key, {job.id.encode("utf-8"): float(score_ms)})
+        # Note: job was already removed from queue during acquisition.
 
     async def batch_get_queue_sizes(self, queue_names: list[str]) -> dict[str, int]:
         """Efficiently get sizes for multiple queues using pipeline"""

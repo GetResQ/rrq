@@ -12,7 +12,7 @@ import signal
 import time
 import uuid
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import timezone, datetime
 from typing import (
     Any,
     Optional,
@@ -661,7 +661,7 @@ class RRQWorker:
         """Moves a job to the Dead Letter Queue (DLQ) and releases its unique lock if present."""
 
         dlq_name = self.settings.default_dlq_name  # Or derive from original queue_name
-        completion_time = datetime.now(UTC)
+        completion_time = datetime.now(timezone.utc)
         try:
             await self.job_store.move_job_to_dlq(
                 job_id=job.id,
@@ -809,7 +809,7 @@ class RRQWorker:
             try:
                 health_data = {
                     "worker_id": self.worker_id,
-                    "timestamp": datetime.now(UTC).isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                     "status": self.status,
                     "active_jobs": len(self._running_tasks),
                     "concurrency_limit": self.settings.worker_concurrency,
@@ -855,7 +855,7 @@ class RRQWorker:
 
     async def _maybe_enqueue_cron_jobs(self) -> None:
         """Enqueue cron jobs that are due to run."""
-        now = datetime.now(UTC)
+        now = datetime.now(timezone.utc)
         for cj in self.cron_jobs:
             if cj.due(now):
                 unique_key = f"cron:{cj.function_name}" if cj.unique else None
@@ -974,7 +974,7 @@ class RRQWorker:
         )
         try:
             job.status = JobStatus.PENDING
-            job.next_scheduled_run_time = datetime.now(UTC)  # Re-queue immediately
+            job.next_scheduled_run_time = datetime.now(timezone.utc)  # Re-queue immediately
             job.last_error = "Job execution interrupted by worker shutdown. Re-queued."
             # Do not increment retries for shutdown interruption
 
@@ -995,7 +995,7 @@ class RRQWorker:
                     job.id,
                     self.settings.default_dlq_name,
                     f"Failed to re-queue during cancellation: {e_requeue}",
-                    datetime.now(UTC),
+                    datetime.now(timezone.utc),
                 )
                 logger.info(
                     f"Successfully moved job {job.id} to DLQ due to re-queueing failure."

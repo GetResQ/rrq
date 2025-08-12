@@ -4,13 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rrq"
-version = "0.5.0"
+version = "0.7.0"
 authors = [{ name = "Mazdak Rezvani", email = "mazdak@me.com" }]
 description = "RRQ is a Python library for creating reliable job queues using Redis and asyncio"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: System :: Distributed Computing",

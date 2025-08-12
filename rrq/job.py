@@ -3,7 +3,7 @@ including the Job model and JobStatus enumeration.
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import timezone, datetime
 from enum import Enum
 from typing import Any, Optional
 
@@ -50,8 +50,8 @@ class Job(BaseModel):
     )
 
     enqueue_time: datetime = Field(
-        default_factory=lambda: datetime.now(UTC),
-        description="Timestamp (UTC) when the job was initially enqueued.",
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Timestamp (timezone.utc) when the job was initially enqueued.",
     )
 
     status: JobStatus = Field(
@@ -62,7 +62,7 @@ class Job(BaseModel):
     )
     next_scheduled_run_time: Optional[datetime] = Field(
         default=None,
-        description="Timestamp (UTC) when the job is next scheduled to run (for retries/deferrals).",
+        description="Timestamp (timezone.utc) when the job is next scheduled to run (for retries/deferrals).",
     )
 
     # Execution control parameters, can be overridden from worker defaults.
@@ -86,7 +86,7 @@ class Job(BaseModel):
     # Fields populated upon job completion or failure.
     completion_time: Optional[datetime] = Field(
         default=None,
-        description="Timestamp (UTC) when the job finished (completed or failed permanently).",
+        description="Timestamp (timezone.utc) when the job finished (completed or failed permanently).",
     )
     result: Optional[Any] = Field(
         default=None,
