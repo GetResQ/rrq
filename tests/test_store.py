@@ -951,3 +951,54 @@ async def test_defer_job(job_store: JobStore):
     score = await job_store.redis.zscore("rrq:queue:test_queue", job.id.encode("utf-8"))
     expected_ms = int((datetime.now(timezone.utc) + defer_by).timestamp() * 1000)
     assert abs(score - expected_ms) < 1500  # allow ~1.5s leeway
+
+
+class TestBatchGetQueueSizes:
+    """Tests for batch_get_queue_sizes method."""
+
+    @pytest.mark.asyncio
+    async def test_batch_get_queue_sizes_empty_list(self, job_store: JobStore):
+        """Test with empty queue names list returns empty dict."""
+        result = await job_store.batch_get_queue_sizes([])
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_batch_get_queue_sizes_with_short_names(self, job_store: JobStore):
+        """Test with short queue names (without prefix)."""
+        # Add jobs to queues using short names
+        await job_store.add_job_to_queue("queue_a", "job1", 1000.0)
+        await job_store.add_job_to_queue("queue_a", "job2", 2000.0)
+        await job_store.add_job_to_queue("queue_b", "job3", 3000.0)
+
+        result = await job_store.batch_get_queue_sizes(["queue_a", "queue_b", "queue_c"])
+
+        assert result["queue_a"] == 2
+        assert result["queue_b"] == 1
+        assert result["queue_c"] == 0  # Non-existent queue
+
+    @pytest.mark.asyncio
+    async def test_batch_get_queue_sizes_with_prefixed_names(self, job_store: JobStore):
+        """Test with already-prefixed queue names (idempotent key formatting)."""
+        # Add jobs using short name
+        await job_store.add_job_to_queue("prefixed_queue", "job1", 1000.0)
+        await job_store.add_job_to_queue("prefixed_queue", "job2", 2000.0)
+
+        # Query using full prefixed name - should still work
+        result = await job_store.batch_get_queue_sizes(["rrq:queue:prefixed_queue"])
+
+        assert result["rrq:queue:prefixed_queue"] == 2
+
+    @pytest.mark.asyncio
+    async def test_batch_get_queue_sizes_mixed_names(self, job_store: JobStore):
+        """Test with mix of short and prefixed queue names."""
+        await job_store.add_job_to_queue("mixed_a", "job1", 1000.0)
+        await job_store.add_job_to_queue("mixed_b", "job2", 2000.0)
+
+        # Mix of short and prefixed names
+        result = await job_store.batch_get_queue_sizes([
+            "mixed_a",
+            "rrq:queue:mixed_b",
+        ])
+
+        assert result["mixed_a"] == 1
+        assert result["rrq:queue:mixed_b"] == 1

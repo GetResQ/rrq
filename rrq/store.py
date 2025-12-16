@@ -864,8 +864,6 @@ class JobStore:
 
     async def batch_get_queue_sizes(self, queue_names: list[str]) -> dict[str, int]:
         """Efficiently get sizes for multiple queues using pipeline"""
-        from .constants import QUEUE_KEY_PREFIX
-
         if not queue_names:
             return {}
 
@@ -873,7 +871,7 @@ class JobStore:
         # No atomicity needed as we're only reading, this improves performance
         async with self.redis.pipeline(transaction=False) as pipe:
             for queue_name in queue_names:
-                queue_key = f"{QUEUE_KEY_PREFIX}{queue_name}"
+                queue_key = self._format_queue_key(queue_name)
                 pipe.zcard(queue_key)
 
             sizes = await pipe.execute()
