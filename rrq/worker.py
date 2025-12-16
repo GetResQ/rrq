@@ -187,6 +187,17 @@ class RRQWorker:
                             f"Worker {self.worker_id} burst mode complete: no more jobs."
                         )
                         break
+                    if fetched_count == 0:
+                        if self.status != "idle (no jobs)":
+                            logger.debug(
+                                f"Worker {self.worker_id} no jobs found. Waiting..."
+                            )
+                            self.status = "idle (no jobs)"
+                        # Avoid tight polling loop when queues are empty
+                        jittered_delay = self._calculate_jittered_delay(
+                            self.settings.default_poll_delay_seconds
+                        )
+                        await asyncio.sleep(jittered_delay)
                 else:
                     if self.status != "idle (concurrency limit)":
                         logger.debug(
@@ -860,6 +871,15 @@ class RRQWorker:
             if cj.due(now):
                 unique_key = f"cron:{cj.function_name}" if cj.unique else None
                 try:
+                    if unique_key:
+                        # For unique cron jobs, skip enqueueing while the unique lock is held
+                        # to avoid accumulating deferred duplicates on every cron tick.
+                        ttl = await self.job_store.get_lock_ttl(unique_key)
+                        if ttl > 0:
+                            logger.debug(
+                                f"Skipping cron job '{cj.function_name}' due to active unique lock (TTL: {ttl}s)."
+                            )
+                            continue
                     await self.client.enqueue(
                         cj.function_name,
                         *cj.args,

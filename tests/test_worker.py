@@ -623,6 +623,7 @@ async def test_worker_health_check_updates(
         assert health_data1["worker_id"] == worker_id
         assert health_data1["status"] in [
             "polling",
+            "idle (no jobs)",
             "idle (concurrency limit)",
             "running",
         ]  # Worker should be active
@@ -928,6 +929,9 @@ async def test_cron_job_enqueue_unique(rrq_settings, job_registry, job_store):
     await worker._maybe_enqueue_cron_jobs()
     queued1 = await job_store.get_queued_job_ids(rrq_settings.default_queue_name, 0, -1)
     assert len(queued1) == 1
+
+    # Simulate another due tick while the unique lock is still held (job not processed yet)
+    cron_job.next_run_time = datetime.now(timezone.utc) - timedelta(minutes=1)
     await worker._maybe_enqueue_cron_jobs()
     queued2 = await job_store.get_queued_job_ids(rrq_settings.default_queue_name, 0, -1)
     assert queued2 == queued1
