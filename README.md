@@ -2,17 +2,16 @@
 
 RRQ is a Python library for creating reliable job queues using Redis and `asyncio`, inspired by [ARQ (Async Redis Queue)](https://github.com/samuelcolvin/arq). It focuses on providing at-least-once job processing semantics with features like automatic retries, job timeouts, dead-letter queues, and graceful worker shutdown.
 
-## 🆕 What's New in v0.7.0
+## 🆕 What's New in v0.7.1
 
 - **Comprehensive CLI Tools**: 15+ new commands for monitoring, debugging, and management
 - **Real-time Monitoring Dashboard**: Interactive dashboard with `rrq monitor`
 - **Enhanced DLQ Management**: Sophisticated filtering and requeuing capabilities
-- **Python 3.10 Support**: Expanded compatibility from Python 3.11+ to 3.10+
 - **Bug Fixes**: Critical fix for unique job enqueue failures with proper deferral
 
 ## Requirements
 
-- Python 3.10 or higher
+- Python 3.11 or higher
 - Redis 5.0 or higher
 - asyncio-compatible environment
 
