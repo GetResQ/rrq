@@ -2,7 +2,13 @@
 
 RRQ is a Python library for creating reliable job queues using Redis and `asyncio`, inspired by [ARQ (Async Redis Queue)](https://github.com/samuelcolvin/arq). It focuses on providing at-least-once job processing semantics with features like automatic retries, job timeouts, dead-letter queues, and graceful worker shutdown.
 
-## 🆕 What's New in v0.7.1
+## 🆕 What's New in v0.8.1
+
+- **Distributed Tracing**: One-line integrations for Datadog, OpenTelemetry, and Logfire
+- **Trace Context Propagation**: Automatic trace context from producer to worker
+- **Prometheus & StatsD Exporters**: New metrics exporters for monitoring
+
+## What's New in v0.7
 
 - **Comprehensive CLI Tools**: 15+ new commands for monitoring, debugging, and management
 - **Real-time Monitoring Dashboard**: Interactive dashboard with `rrq monitor`
@@ -113,6 +119,8 @@ this purpose.
 
 ```python
 # worker_script.py
+import asyncio
+
 from rrq.worker import RRQWorker
 from config import rrq_settings # Import your settings
 from main_setup import job_registry # Import your registry
@@ -122,7 +130,7 @@ worker = RRQWorker(settings=rrq_settings, job_registry=job_registry)
 
 # Run the worker (blocking)
 if __name__ == "__main__":
-    worker.run()
+    asyncio.run(worker.run())
 ```
 
 You can run multiple instances of `worker_script.py` for concurrent processing.
@@ -401,6 +409,41 @@ RRQ can be configured in several ways, with the following precedence:
 5. **.env File**: If `python-dotenv` is installed, RRQ will attempt to load a `.env` file from the current working directory or parent directories. System environment variables take precedence over `.env` variables.
 
 **Important Note on `job_registry`**: The `job_registry` attribute in your `RRQSettings` object is **critical** for RRQ to function. It must be an instance of `JobRegistry` and is used to register job handlers. Without a properly configured `job_registry`, workers will not know how to process jobs, and most operations will fail. Ensure it is set in your settings object to map job names to their respective handler functions.
+
+## Telemetry (Datadog / OTEL / Logfire)
+
+RRQ supports optional distributed tracing for enqueue and job execution. Enable the
+integration in both the producer and worker processes to get end-to-end traces
+across the Redis queue.
+
+### Datadog (ddtrace)
+
+```python
+from rrq.integrations.ddtrace import enable as enable_rrq_ddtrace
+
+enable_rrq_ddtrace(service="myapp-rrq")
+```
+
+This only instruments RRQ spans + propagation; it does **not** call
+`ddtrace.patch_all()`. Configure `ddtrace` in your app as you already do.
+
+### Logfire
+
+```python
+import logfire
+from rrq.integrations.logfire import enable as enable_rrq_logfire
+
+logfire.configure(service_name="myapp-rrq")
+enable_rrq_logfire(service_name="myapp-rrq")
+```
+
+### OpenTelemetry (generic)
+
+```python
+from rrq.integrations.otel import enable as enable_rrq_otel
+
+enable_rrq_otel(service_name="myapp-rrq")
+```
 
 ### Comprehensive CLI Command System
 - **New modular CLI architecture** with dedicated command modules for better organization

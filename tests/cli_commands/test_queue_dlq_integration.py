@@ -347,6 +347,7 @@ class TestQueueDLQIntegration:
         # Check that queue group was added with stats command
         assert "queue" in test_cli.commands
         queue_group = test_cli.commands["queue"]
+        assert isinstance(queue_group, click.Group)
         assert "stats" in queue_group.commands
 
         # The stats command should now include DLQ functionality

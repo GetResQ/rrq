@@ -78,7 +78,7 @@ class RRQSettings(BaseSettings):
         default=10,
         description="Default number of concurrent jobs a single worker process can handle.",
     )
-    worker_health_check_interval_seconds: int = Field(
+    worker_health_check_interval_seconds: float = Field(
         default=60,
         description="Interval (in seconds) at which a worker updates its health check status in Redis.",
     )
@@ -108,7 +108,7 @@ class RRQSettings(BaseSettings):
     )
     expected_job_ttl: int = Field(
         default=30,
-        description="Expected job processing time buffer for locks (in seconds)."
+        description="Expected job processing time buffer for locks (in seconds).",
     )
     metrics_exporter: Optional[str] = Field(
         default=None,

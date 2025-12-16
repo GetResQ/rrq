@@ -583,6 +583,7 @@ class TestDLQCommands:
         # Check that dlq group was added
         assert "dlq" in test_cli.commands
         dlq_group = test_cli.commands["dlq"]
+        assert isinstance(dlq_group, click.Group)
 
         # Check that subcommands were added
         expected_commands = ["list", "stats", "inspect", "requeue"]

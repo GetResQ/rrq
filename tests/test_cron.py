@@ -204,7 +204,9 @@ class TestCronScheduleEdgeCases:
         """Test handling of February 29 in leap years."""
         schedule = CronSchedule("0 0 29 2 *")  # Feb 29
         # In a non-leap year, should skip to next occurrence
-        now = datetime(2023, 1, 1, 0, 0, 0, tzinfo=timezone.utc)  # 2023 is not a leap year
+        now = datetime(
+            2023, 1, 1, 0, 0, 0, tzinfo=timezone.utc
+        )  # 2023 is not a leap year
         next_run = schedule.next_after(now)
         # Should be Feb 29, 2024 (next leap year)
         expected = datetime(2024, 2, 29, 0, 0, 0, tzinfo=timezone.utc)
@@ -216,7 +218,9 @@ class TestCronScheduleEdgeCases:
         schedule = CronSchedule("0 9 15 * fri")
 
         # Test when 15th is not a Friday
-        now = datetime(2023, 6, 10, 0, 0, 0, tzinfo=timezone.utc)  # June 10, 2023 (Saturday)
+        now = datetime(
+            2023, 6, 10, 0, 0, 0, tzinfo=timezone.utc
+        )  # June 10, 2023 (Saturday)
         next_run = schedule.next_after(now)
 
         # Should be June 15th (Thursday) since it comes before the next Friday

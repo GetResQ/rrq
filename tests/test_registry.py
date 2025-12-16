@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import pytest
 
 from rrq.registry import JobRegistry
@@ -43,7 +45,7 @@ def test_register_duplicate_handler_raises_error(registry: JobRegistry):
 
 def test_register_non_callable_raises_error(registry: JobRegistry):
     with pytest.raises(ValueError, match="Handler for 'task_bad' must be a callable."):
-        registry.register("task_bad", 123)  # Not a callable
+        registry.register("task_bad", cast(Any, 123))  # Not a callable
 
 
 # Optional: Test if we enforce async handlers (currently commented out in JobRegistry)

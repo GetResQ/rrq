@@ -163,17 +163,17 @@ async def main():
         _queue_name="high_priority",  # Example custom queue
     )
 
-    if all([job1, job2, job3, job4, job5]):
-        logger.info("Jobs enqueued successfully.")
-        logger.info(f"  - Job 1 (Success): {job1.id}")
-        logger.info(f"  - Job 2 (Failure): {job2.id}")
-        logger.info(f"  - Job 3 (Retry): {job3.id}")
-        logger.info(f"  - Job 4 (Deferred): {job4.id}")
-        logger.info(f"  - Job 5 (CustomQ): {job5.id}")
-    else:
+    if job1 is None or job2 is None or job3 is None or job4 is None or job5 is None:
         logger.error("Some jobs failed to enqueue.")
         await client.close()
         return
+
+    logger.info("Jobs enqueued successfully.")
+    logger.info(f"  - Job 1 (Success): {job1.id}")
+    logger.info(f"  - Job 2 (Failure): {job2.id}")
+    logger.info(f"  - Job 3 (Retry): {job3.id}")
+    logger.info(f"  - Job 4 (Deferred): {job4.id}")
+    logger.info(f"  - Job 5 (CustomQ): {job5.id}")
 
     await client.close()  # Close client connection if no longer needed
 
@@ -247,17 +247,12 @@ async def main():
 
 async def run_worker_async(worker: RRQWorker):
     """Helper function to run the worker's main loop asynchronously."""
-    # We don't use worker.run() here because it's synchronous.
-    # Instead, we directly await the async _run_loop method.
     try:
-        await worker._run_loop()
+        await worker.run()
     except Exception as e:
         logger.error(
-            f"Worker {worker.worker_id} _run_loop exited with error: {e}", exc_info=True
+            f"Worker {worker.worker_id} run exited with error: {e}", exc_info=True
         )
-    finally:
-        # Ensure resources are closed even if _run_loop fails unexpectedly
-        await worker._close_resources()
 
 
 if __name__ == "__main__":

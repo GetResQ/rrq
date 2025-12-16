@@ -1,6 +1,5 @@
 import asyncio
 import time  # Import time for checking retry score
-import uuid
 from contextlib import suppress
 from datetime import timezone, datetime, timedelta
 from typing import Any, AsyncGenerator  # Added Callable
@@ -327,6 +326,7 @@ async def test_worker_handles_job_failure_max_retries_dlq(
     assert final_state is not None
     assert final_state.status == JobStatus.FAILED
     assert final_state.current_retries == max_tries
+    assert final_state.last_error is not None
     assert "Test failure: fail_repeatedly" in final_state.last_error
 
     # Verify job is NOT in the queue (moved to DLQ)
@@ -630,9 +630,9 @@ async def test_worker_health_check_updates(
         ts1_str = health_data1.get("timestamp")
         assert ts1_str is not None
         ts1 = datetime.fromisoformat(ts1_str)
-        assert (datetime.now(timezone.utc) - ts1).total_seconds() < (health_interval * 2), (
-            "Timestamp seems too old"
-        )
+        assert (datetime.now(timezone.utc) - ts1).total_seconds() < (
+            health_interval * 2
+        ), "Timestamp seems too old"
 
         assert ttl1 is not None, "TTL not found for health key"
         assert 0 < ttl1 <= expected_ttl_max, (
@@ -650,9 +650,9 @@ async def test_worker_health_check_updates(
         assert ts2_str is not None
         ts2 = datetime.fromisoformat(ts2_str)
         assert ts2 > ts1, "Timestamp did not update after second interval"
-        assert (datetime.now(timezone.utc) - ts2).total_seconds() < (health_interval * 2), (
-            "Timestamp 2 seems too old"
-        )
+        assert (datetime.now(timezone.utc) - ts2).total_seconds() < (
+            health_interval * 2
+        ), "Timestamp 2 seems too old"
 
         assert ttl2 is not None, "TTL not found for health key (2nd check)"
         assert 0 < ttl2 <= expected_ttl_max, (
@@ -876,16 +876,16 @@ async def test_task_cleanup_and_semaphore(monkeypatch):
     # create a semaphore with value 0 (acquired)
     sem = asyncio.Semaphore(0)
     # create a dummy completed task
-    fut = asyncio.get_event_loop().create_future()
-    fut.set_result(None)
+    task = asyncio.create_task(asyncio.sleep(0))
+    await task
     # add to running tasks
-    worker._running_tasks.add(fut)
+    worker._running_tasks.add(task)
     # cleanup
-    worker._task_cleanup(fut, sem)
+    worker._task_cleanup(task, sem)
     # semaphore should be released => value > 0
     assert sem._value == 1
     # task removed
-    assert fut not in worker._running_tasks
+    assert task not in worker._running_tasks
 
 
 @pytest.mark.asyncio
@@ -912,6 +912,46 @@ async def test_worker_close_calls_job_store_aclose():
     # Call close
     await worker.close()
     assert store.aclose_called, "JobStore.aclose was not called by worker.close"
+
+
+@pytest.mark.asyncio
+async def test_worker_run_closes_resources_on_exit():
+    settings = RRQSettings()
+    registry = JobRegistry()
+    worker = RRQWorker(settings, registry)
+
+    # Avoid manipulating process-level signal handlers during tests.
+    worker._setup_signal_handlers = lambda: None  # type: ignore[assignment]
+
+    async def noop_run_loop():
+        return None
+
+    # Avoid Redis interactions; we only want to verify shutdown cleanup.
+    worker._run_loop = noop_run_loop  # type: ignore[assignment]
+
+    class DummyClient:
+        def __init__(self):
+            self.close_called = False
+
+        async def close(self):
+            self.close_called = True
+
+    class DummyStore:
+        def __init__(self):
+            self.aclose_called = False
+
+        async def aclose(self):
+            self.aclose_called = True
+
+    dummy_client = DummyClient()
+    dummy_store = DummyStore()
+    worker.client = dummy_client
+    worker.job_store = dummy_store
+
+    await worker.run()
+
+    assert dummy_client.close_called, "RRQClient.close was not called by worker.run"
+    assert dummy_store.aclose_called, "JobStore.aclose was not called by worker.run"
 
 
 @pytest.mark.asyncio
@@ -1148,6 +1188,5 @@ async def test_cron_job_execution_end_to_end(
     final_job = await job_store.get_job_definition(job_id)
     assert final_job is not None
     assert final_job.status == JobStatus.COMPLETED
-
 
     # Note: No worker-side rate limiting tests; client-side deferral honors _defer_by and existing unique locks.

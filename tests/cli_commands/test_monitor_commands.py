@@ -170,15 +170,19 @@ class TestDashboard:
             for key in job_keys:
                 yield key
 
+        async def empty_scan(_match: str | None = None):
+            if False:
+                yield b""
+
         # Mock different scan calls
-        def mock_scan_iter(match=None):
-            if "queue" in match:
+        def mock_scan_iter(match: str | None = None):
+            if match is not None and "queue" in match:
                 return mock_queue_scan(match)
-            elif "health" in match:
+            elif match is not None and "health" in match:
                 return mock_worker_scan(match)
-            elif "job" in match:
+            elif match is not None and "job" in match:
                 return mock_job_scan(match)
-            return iter([])
+            return empty_scan(match)
 
         mock_store.redis.scan_iter = mock_scan_iter
         mock_store.redis.zcard = AsyncMock(return_value=5)
@@ -253,15 +257,19 @@ class TestDashboard:
             return
             yield  # Make it an async generator
 
+        async def empty_scan(_match: str | None = None):
+            if False:
+                yield b""
+
         # Mock different scan calls
-        def mock_scan_iter(match=None):
-            if "queue" in match:
+        def mock_scan_iter(match: str | None = None):
+            if match is not None and "queue" in match:
                 return mock_queue_scan(match)
-            elif "health" in match:
+            elif match is not None and "health" in match:
                 return mock_worker_scan(match)
-            elif "job" in match:
+            elif match is not None and "job" in match:
                 return mock_job_scan(match)
-            return iter([])
+            return empty_scan(match)
 
         mock_store.redis.scan_iter = mock_scan_iter
         mock_store.redis.zcard = AsyncMock(return_value=3)

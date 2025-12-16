@@ -102,7 +102,7 @@ class JobStore:
     async def save_job_definition(self, job: Job) -> None:
         """Saves the complete job definition as a Redis hash.
 
-        Handles manual serialization of complex fields (args, kwargs, result).
+        Handles manual serialization of complex fields (args, kwargs, result, trace_context).
 
         Args:
             job: The Job object to save.
@@ -111,7 +111,7 @@ class JobStore:
 
         # Dump model excluding fields handled manually
         job_data_dict = job.model_dump(
-            mode="json", exclude={"job_args", "job_kwargs", "result"}
+            mode="json", exclude={"job_args", "job_kwargs", "result", "trace_context"}
         )
 
         # Manually serialize potentially complex fields to JSON strings
@@ -120,6 +120,9 @@ class JobStore:
             job.job_kwargs if job.job_kwargs is not None else None
         )
         result_json = json.dumps(job.result if job.result is not None else None)
+        trace_context_json = None
+        if job.trace_context is not None:
+            trace_context_json = json.dumps(job.trace_context)
 
         # Combine base fields (converted to string) with manually serialized ones
         final_mapping_for_hset = {
@@ -128,6 +131,8 @@ class JobStore:
         final_mapping_for_hset["job_args"] = job_args_json
         final_mapping_for_hset["job_kwargs"] = job_kwargs_json
         final_mapping_for_hset["result"] = result_json
+        if trace_context_json is not None:
+            final_mapping_for_hset["trace_context"] = trace_context_json
 
         # Ensure ID is present
         if "id" not in final_mapping_for_hset:
@@ -164,10 +169,12 @@ class JobStore:
         job_args_list = None
         job_kwargs_dict = None
         result_obj = None
+        trace_context_obj: Optional[dict[str, str]] = None
 
         job_args_str = job_data_dict_str.pop("job_args", None)
         job_kwargs_str = job_data_dict_str.pop("job_kwargs", None)
         result_str = job_data_dict_str.pop("result", None)
+        trace_context_str = job_data_dict_str.pop("trace_context", None)
 
         if job_args_str and job_args_str.lower() != "null":
             try:
@@ -200,6 +207,19 @@ class JobStore:
                 # If stored via json.dumps, failure here indicates corruption or non-JSON string stored previously.
                 result_obj = None  # Safest fallback is likely None
 
+        if trace_context_str and trace_context_str.lower() != "null":
+            try:
+                parsed = json.loads(trace_context_str)
+                if isinstance(parsed, dict):
+                    trace_context_obj = {
+                        str(k): str(v) for k, v in parsed.items() if v is not None
+                    }
+            except json.JSONDecodeError:
+                logger.error(
+                    f"Failed to JSON decode 'trace_context' for job {job_id} from string: '{trace_context_str}'",
+                    exc_info=True,
+                )
+
         # Validate the remaining dictionary using Pydantic Job model
         try:
             # Pass only the remaining fields to the constructor
@@ -212,6 +232,7 @@ class JobStore:
                 job_kwargs_dict if job_kwargs_dict is not None else {}
             )
             validated_job.result = result_obj
+            validated_job.trace_context = trace_context_obj
 
             logger.debug(f"Successfully retrieved and parsed job {validated_job.id}")
             return validated_job
@@ -443,6 +464,26 @@ class JobStore:
         # Status enum value needs to be accessed
         await self.redis.hset(job_key, "status", status.value.encode("utf-8"))
         logger.debug(f"Updated status of job {job_id} to {status.value}.")
+
+    async def update_job_next_scheduled_run_time(
+        self, job_id: str, run_time: datetime
+    ) -> None:
+        """Updates only the next scheduled run time field for a job.
+
+        This is primarily used to keep job metadata accurate when re-queuing jobs
+        for retries or deferrals via atomic operations.
+        """
+        job_key = f"{JOB_KEY_PREFIX}{job_id}"
+        dt = run_time
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        elif dt.tzinfo != timezone.utc:
+            dt = dt.astimezone(timezone.utc)
+        await self.redis.hset(
+            job_key,
+            "next_scheduled_run_time",
+            dt.isoformat().encode("utf-8"),
+        )
 
     async def increment_job_retries(self, job_id: str) -> int:
         """Atomically increments the 'current_retries' field for a job.
@@ -840,7 +881,11 @@ class JobStore:
     async def get_last_process_time(self, unique_key: str) -> Optional[datetime]:
         key = f"last_process:{unique_key}"
         timestamp = await self.redis.get(key)
-        return datetime.fromtimestamp(float(timestamp), timezone.utc) if timestamp else None
+        return (
+            datetime.fromtimestamp(float(timestamp), timezone.utc)
+            if timestamp
+            else None
+        )
 
     async def set_last_process_time(self, unique_key: str, timestamp: datetime) -> None:
         key = f"last_process:{unique_key}"

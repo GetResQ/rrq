@@ -452,7 +452,7 @@ class DebugCommands(AsyncCommand):
                 console.print(f"Delay: {delay}s")
 
         finally:
-            await client.aclose()
+            await client.close()
 
     async def _clear_data(
         self, settings_object_path: str, confirm: bool, pattern: str
@@ -548,4 +548,4 @@ class DebugCommands(AsyncCommand):
             console.print(f"\nStress test complete: {total_jobs} jobs submitted")
 
         finally:
-            await client.aclose()
+            await client.close()

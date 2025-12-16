@@ -105,3 +105,9 @@ class Job(BaseModel):
         default=None,
         description="The name of the Dead Letter Queue this job will be moved to if it fails permanently.",
     )
+
+    # Distributed tracing context carrier (serialized by JobStore).
+    trace_context: Optional[dict[str, str]] = Field(
+        default=None,
+        description="Optional distributed tracing propagation carrier to continue traces from enqueue to execution.",
+    )

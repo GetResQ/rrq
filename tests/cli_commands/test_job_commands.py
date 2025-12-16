@@ -464,6 +464,7 @@ class TestJobCommands:
         # Check that job group was added
         assert "job" in test_cli.commands
         job_group = test_cli.commands["job"]
+        assert isinstance(job_group, click.Group)
 
         # Check that subcommands were added
         expected_commands = ["show", "list", "replay", "cancel", "trace"]

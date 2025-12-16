@@ -502,7 +502,8 @@ def _run_single_worker(
     """Helper function to run a single RRQ worker instance."""
     rrq_settings = _load_app_settings(settings_object_path)
 
-    if not rrq_settings.job_registry:
+    job_registry = rrq_settings.job_registry
+    if job_registry is None:
         click.echo(
             click.style(
                 "ERROR: No 'job_registry'. You must provide a JobRegistry instance in settings.",
@@ -511,15 +512,16 @@ def _run_single_worker(
             err=True,
         )
         sys.exit(1)
+    assert job_registry is not None
 
     logger.debug(
-        f"Registered handlers (from effective registry): {rrq_settings.job_registry.get_registered_functions()}"
+        f"Registered handlers (from effective registry): {job_registry.get_registered_functions()}"
     )
     logger.debug(f"Effective RRQ settings for worker: {rrq_settings}")
 
     worker_instance = RRQWorker(
         settings=rrq_settings,
-        job_registry=rrq_settings.job_registry,
+        job_registry=job_registry,
         queues=queues_arg,
         burst=burst,
     )

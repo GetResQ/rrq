@@ -3,7 +3,7 @@
 import asyncio
 from collections import defaultdict, deque
 from datetime import datetime
-from typing import Dict, List
+from typing import Any, TypedDict
 
 import click
 from rich.align import Align
@@ -20,6 +20,8 @@ from rrq.constants import (
     DLQ_KEY_PREFIX,
 )
 from rrq.cli_commands.base import AsyncCommand, load_app_settings, get_job_store
+from rrq.settings import RRQSettings
+from rrq.store import JobStore
 from ..utils import (
     console,
     format_duration,
@@ -30,6 +32,12 @@ from ..utils import (
 
 # Error truncation lengths for consistency with DLQ commands
 ERROR_DISPLAY_LENGTH = 50  # For consistent display across DLQ and monitor
+
+
+class DLQStats(TypedDict):
+    total_jobs: int
+    newest_error: str | None
+    top_errors: dict[str, int]
 
 
 class MonitorCommands(AsyncCommand):
@@ -56,12 +64,12 @@ class MonitorCommands(AsyncCommand):
             multiple=True,
             help="Specific queues to monitor (default: all)",
         )
-        def monitor(settings_object_path: str, refresh: float, queues: tuple):
+        def monitor(settings_object_path: str, refresh: float, queues: tuple[str, ...]):
             """Launch real-time monitoring dashboard"""
             self.make_async(self._monitor)(settings_object_path, refresh, queues)
 
     async def _monitor(
-        self, settings_object_path: str, refresh: float, queues: tuple
+        self, settings_object_path: str, refresh: float, queues: tuple[str, ...]
     ) -> None:
         """Run the monitoring dashboard"""
         settings = load_app_settings(settings_object_path)
@@ -76,26 +84,44 @@ class MonitorCommands(AsyncCommand):
 class Dashboard:
     """Real-time monitoring dashboard"""
 
-    def __init__(self, settings, refresh_interval: float, queue_filter: tuple):
-        self.settings = settings
+    def __init__(
+        self,
+        settings: RRQSettings,
+        refresh_interval: float,
+        queue_filter: tuple[str, ...] | None,
+    ):
+        self.settings: RRQSettings = settings
         self.refresh_interval = refresh_interval
-        self.queue_filter = list(queue_filter) if queue_filter else None
-        self.job_store = None
+        self.queue_filter: list[str] | None = (
+            list(queue_filter) if queue_filter else None
+        )
+        self.job_store: JobStore | None = None
 
         # Metrics storage
-        self.queue_sizes = defaultdict(lambda: deque(maxlen=60))  # 60 data points
-        self.processing_rates = defaultdict(lambda: deque(maxlen=60))
-        self.error_counts = defaultdict(int)
-        self.dlq_stats = {"total_jobs": 0, "newest_error": None, "top_errors": {}}
+        self.queue_sizes: defaultdict[str, deque[int]] = defaultdict(
+            lambda: deque(maxlen=60)
+        )  # 60 data points
+        self.processing_rates: defaultdict[str, deque[float]] = defaultdict(
+            lambda: deque(maxlen=60)
+        )
+        self.error_counts: defaultdict[str, int] = defaultdict(int)
+        self.dlq_stats: DLQStats = {
+            "total_jobs": 0,
+            "newest_error": None,
+            "top_errors": {},
+        }
         self.last_update = datetime.now()
 
         # Event streaming for real-time updates
         self._last_event_id = "0"
         self._event_buffer = deque(maxlen=100)
+        self.workers: list[dict[str, Any]] = []
+        self.recent_jobs: list[dict[str, Any]] = []
 
     async def run(self):
         """Run the dashboard"""
-        self.job_store = await get_job_store(self.settings)
+        job_store = await get_job_store(self.settings)
+        self.job_store = job_store
 
         try:
             layout = self.create_layout()
@@ -108,7 +134,7 @@ class Dashboard:
                     self.update_layout(layout)
                     await asyncio.sleep(self.refresh_interval)
         finally:
-            await self.job_store.aclose()
+            await job_store.aclose()
 
     def create_layout(self) -> Layout:
         """Create the dashboard layout"""
@@ -143,6 +169,12 @@ class Dashboard:
 
         return layout
 
+    def _require_job_store(self) -> JobStore:
+        job_store = self.job_store
+        if job_store is None:
+            raise RuntimeError("Dashboard job_store is not initialized")
+        return job_store
+
     async def update_metrics(self):
         """Update all metrics using hybrid monitoring approach"""
         try:
@@ -170,8 +202,9 @@ class Dashboard:
 
     async def _process_monitoring_events(self):
         """Process real-time monitoring events from Redis streams"""
+        job_store = self._require_job_store()
         try:
-            events = await self.job_store.consume_monitor_events(
+            events = await job_store.consume_monitor_events(
                 last_id=self._last_event_id,
                 count=50,
                 block=10,  # Short non-blocking read
@@ -203,17 +236,19 @@ class Dashboard:
 
     async def _refresh_queue_size(self, queue_name: str):
         """Immediately refresh size for a specific queue"""
+        job_store = self._require_job_store()
         try:
             queue_key = f"{QUEUE_KEY_PREFIX}{queue_name}"
-            size = await self.job_store.redis.zcard(queue_key)
+            size = await job_store.redis.zcard(queue_key)
             self.queue_sizes[queue_name].append(size)
         except Exception:
             pass
 
     async def _refresh_worker_status(self, worker_id: str):
         """Immediately refresh status for a specific worker"""
+        job_store = self._require_job_store()
         try:
-            health_data, ttl = await self.job_store.get_worker_health(worker_id)
+            health_data, ttl = await job_store.get_worker_health(worker_id)
             if health_data:
                 # Update worker in current list
                 for i, worker in enumerate(self.workers):
@@ -231,19 +266,20 @@ class Dashboard:
         except Exception:
             pass
 
-    async def _get_recent_jobs(self, limit: int = 10) -> List[Dict]:
+    async def _get_recent_jobs(self, limit: int = 10) -> list[dict[str, Any]]:
         """Get recently processed jobs"""
+        job_store = self._require_job_store()
         jobs = []
         job_pattern = f"{JOB_KEY_PREFIX}*"
 
         # Sample recent jobs
         count = 0
-        async for key in self.job_store.redis.scan_iter(match=job_pattern):
+        async for key in job_store.redis.scan_iter(match=job_pattern):
             if count >= limit * 2:  # Sample more to find recent ones
                 break
 
             job_id = key.decode().replace(JOB_KEY_PREFIX, "")
-            job_dict = await self.job_store.get_job_data_dict(job_id)
+            job_dict = await job_store.get_job_data_dict(job_id)
             if job_dict:
                 # Only include recently updated jobs
                 if "completed_at" in job_dict or "started_at" in job_dict:
@@ -267,14 +303,13 @@ class Dashboard:
 
         return jobs[:limit]
 
-    async def _update_queue_metrics_optimized(self) -> Dict[str, int]:
+    async def _update_queue_metrics_optimized(self) -> dict[str, int]:
         """Hybrid queue metrics collection using active registries and efficient batch operations"""
+        job_store = self._require_job_store()
         # Use the hybrid monitoring approach: get active queues from registry
         try:
             # Get recently active queues from the registry (O(log N) operation)
-            active_queue_names = await self.job_store.get_active_queues(
-                max_age_seconds=300
-            )
+            active_queue_names = await job_store.get_active_queues(max_age_seconds=300)
 
             # Apply filtering if specified
             if self.queue_filter:
@@ -284,9 +319,7 @@ class Dashboard:
 
             # Use batch operation to get queue sizes efficiently
             if active_queue_names:
-                queue_data = await self.job_store.batch_get_queue_sizes(
-                    active_queue_names
-                )
+                queue_data = await job_store.batch_get_queue_sizes(active_queue_names)
             else:
                 queue_data = {}
 
@@ -300,24 +333,23 @@ class Dashboard:
 
         return queue_data
 
-    async def _legacy_scan_queue_metrics(self) -> Dict[str, int]:
+    async def _legacy_scan_queue_metrics(self) -> dict[str, int]:
         """Legacy scan-based queue metrics as fallback"""
+        job_store = self._require_job_store()
         queue_keys = []
         queue_pattern = f"{QUEUE_KEY_PREFIX}*"
 
         # Perform limited scan (max 100 keys at a time)
         scan_count = 0
         try:
-            async for key in self.job_store.redis.scan_iter(
-                match=queue_pattern, count=50
-            ):
+            async for key in job_store.redis.scan_iter(match=queue_pattern, count=50):
                 queue_keys.append(key)
                 scan_count += 1
                 if scan_count >= 100:  # Limit scan operations
                     break
         except TypeError:
             # Handle mocks that don't support count parameter
-            async for key in self.job_store.redis.scan_iter(match=queue_pattern):
+            async for key in job_store.redis.scan_iter(match=queue_pattern):
                 queue_keys.append(key)
                 scan_count += 1
                 if scan_count >= 100:  # Limit scan operations
@@ -328,23 +360,22 @@ class Dashboard:
         for key in queue_keys:
             queue_name = key.decode().replace(QUEUE_KEY_PREFIX, "")
             if not self.queue_filter or queue_name in self.queue_filter:
-                size = await self.job_store.redis.zcard(key)
+                size = await job_store.redis.zcard(key)
                 queue_data[queue_name] = size
 
         return queue_data
 
-    async def _update_worker_metrics_optimized(self):
+    async def _update_worker_metrics_optimized(self) -> None:
         """Hybrid worker metrics collection using active registries"""
+        job_store = self._require_job_store()
         try:
             # Use the hybrid monitoring approach: get active workers from registry
-            active_worker_ids = await self.job_store.get_active_workers(
-                max_age_seconds=60
-            )
+            active_worker_ids = await job_store.get_active_workers(max_age_seconds=60)
 
             # Get worker health data efficiently
             workers = []
             for worker_id in active_worker_ids:
-                health_data, ttl = await self.job_store.get_worker_health(worker_id)
+                health_data, ttl = await job_store.get_worker_health(worker_id)
 
                 if health_data:
                     workers.append(
@@ -368,23 +399,22 @@ class Dashboard:
 
         self.workers = workers
 
-    async def _legacy_scan_worker_metrics(self) -> list:
+    async def _legacy_scan_worker_metrics(self) -> list[dict[str, Any]]:
         """Legacy scan-based worker metrics as fallback"""
+        job_store = self._require_job_store()
         worker_keys = []
         health_pattern = f"{HEALTH_KEY_PREFIX}*"
 
         scan_count = 0
         try:
-            async for key in self.job_store.redis.scan_iter(
-                match=health_pattern, count=50
-            ):
+            async for key in job_store.redis.scan_iter(match=health_pattern, count=50):
                 worker_keys.append(key)
                 scan_count += 1
                 if scan_count >= 50:  # Limit worker scans
                     break
         except TypeError:
             # Handle mocks that don't support count parameter
-            async for key in self.job_store.redis.scan_iter(match=health_pattern):
+            async for key in job_store.redis.scan_iter(match=health_pattern):
                 worker_keys.append(key)
                 scan_count += 1
                 if scan_count >= 50:  # Limit worker scans
@@ -394,7 +424,7 @@ class Dashboard:
         workers = []
         for key in worker_keys:
             worker_id = key.decode().replace(HEALTH_KEY_PREFIX, "")
-            health_data, ttl = await self.job_store.get_worker_health(worker_id)
+            health_data, ttl = await job_store.get_worker_health(worker_id)
 
             if health_data:
                 workers.append(
@@ -410,8 +440,9 @@ class Dashboard:
 
         return workers
 
-    async def _get_recent_jobs_optimized(self, limit: int = 10) -> List[Dict]:
+    async def _get_recent_jobs_optimized(self, limit: int = 10) -> list[dict[str, Any]]:
         """Optimized recent jobs collection with limited scanning"""
+        job_store = self._require_job_store()
         jobs = []
         job_pattern = f"{JOB_KEY_PREFIX}*"
 
@@ -419,16 +450,14 @@ class Dashboard:
         job_keys = []
         scan_count = 0
         try:
-            async for key in self.job_store.redis.scan_iter(
-                match=job_pattern, count=20
-            ):
+            async for key in job_store.redis.scan_iter(match=job_pattern, count=20):
                 job_keys.append(key)
                 scan_count += 1
                 if scan_count >= limit * 3:  # Scan 3x the needed amount max
                     break
         except TypeError:
             # Handle mocks that don't support count parameter
-            async for key in self.job_store.redis.scan_iter(match=job_pattern):
+            async for key in job_store.redis.scan_iter(match=job_pattern):
                 job_keys.append(key)
                 scan_count += 1
                 if scan_count >= limit * 3:  # Scan 3x the needed amount max
@@ -439,7 +468,7 @@ class Dashboard:
             recent_jobs = []
             for key in job_keys:
                 job_id = key.decode().replace(JOB_KEY_PREFIX, "")
-                job_dict = await self.job_store.get_job_data_dict(job_id)
+                job_dict = await job_store.get_job_data_dict(job_id)
                 if job_dict:
                     try:
                         # Only include recently updated jobs
@@ -686,30 +715,33 @@ class Dashboard:
 
     async def _update_dlq_stats(self):
         """Update DLQ statistics"""
+        job_store = self._require_job_store()
         dlq_name = self.settings.default_dlq_name
         dlq_key = f"{DLQ_KEY_PREFIX}{dlq_name}"
 
         # Get total DLQ job count
-        self.dlq_stats["total_jobs"] = await self.job_store.redis.llen(dlq_key)
+        total_jobs = int(await job_store.redis.llen(dlq_key))
+        self.dlq_stats["total_jobs"] = total_jobs
 
-        if self.dlq_stats["total_jobs"] > 0:
+        if total_jobs > 0:
             # Get some recent DLQ jobs for error analysis
-            job_ids = await self.job_store.redis.lrange(dlq_key, 0, 9)  # Get first 10
-            job_ids = [job_id.decode("utf-8") for job_id in job_ids]
+            job_ids = await job_store.redis.lrange(dlq_key, 0, 9)  # Get first 10
+            job_ids = [
+                job_id.decode("utf-8") if isinstance(job_id, bytes) else str(job_id)
+                for job_id in job_ids
+            ]
 
-            errors = []
-            newest_time = 0
+            errors: list[str] = []
+            newest_time: float = 0.0
 
             for job_id in job_ids:
-                job_data = await self.job_store.get_job(job_id)
+                job_data = await job_store.get_job(job_id)
                 if job_data:
                     error = job_data.get("last_error", "Unknown error")
                     completion_time = job_data.get("completion_time", 0)
 
                     if isinstance(completion_time, str):
                         try:
-                            from datetime import datetime
-
                             completion_time = datetime.fromisoformat(
                                 completion_time.replace("Z", "+00:00")
                             ).timestamp()
@@ -717,7 +749,7 @@ class Dashboard:
                             completion_time = 0
 
                     if completion_time > newest_time:
-                        newest_time = completion_time
+                        newest_time = float(completion_time)
                         self.dlq_stats["newest_error"] = (
                             error[:ERROR_DISPLAY_LENGTH] + "..."
                             if len(error) > ERROR_DISPLAY_LENGTH
@@ -731,7 +763,7 @@ class Dashboard:
                     )
 
             # Count error types
-            error_counts = {}
+            error_counts: dict[str, int] = {}
             for error in errors:
                 error_counts[error] = error_counts.get(error, 0) + 1
 

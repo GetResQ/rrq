@@ -94,11 +94,12 @@ def format_duration(seconds: float | None) -> str:
 
 def format_bytes(size: int) -> str:
     """Format byte size for display"""
+    size_float = float(size)
     for unit in ["B", "KB", "MB", "GB", "TB"]:
-        if size < 1024.0:
-            return f"{size:.1f}{unit}"
-        size /= 1024.0
-    return f"{size:.1f}PB"
+        if size_float < 1024.0:
+            return f"{size_float:.1f}{unit}"
+        size_float /= 1024.0
+    return f"{size_float:.1f}PB"
 
 
 def print_error(message: str) -> None:

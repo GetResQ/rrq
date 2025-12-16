@@ -63,7 +63,10 @@ def auto_discover_commands(package_path: str) -> list[type[BaseCommand]]:
     # Get the package module
     try:
         package = importlib.import_module(package_path)
-        package_dir = os.path.dirname(package.__file__)
+        package_file = package.__file__
+        if package_file is None:
+            return commands
+        package_dir = os.path.dirname(package_file)
     except ImportError:
         # Return empty list for non-existent packages
         return commands

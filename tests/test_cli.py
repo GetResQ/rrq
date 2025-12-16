@@ -90,6 +90,7 @@ def test_load_app_settings_failure_module_not_found():
 
     with pytest.raises(SystemExit) as e:
         _load_app_settings("non_existent_module.settings_object")
+    assert isinstance(e.value, SystemExit)
     assert e.value.code == 1
     # Ideally, capture click.echo output to verify the error message
 
@@ -110,6 +111,7 @@ def test_load_app_settings_failure_object_not_found(tmp_path):
 
     with pytest.raises(SystemExit) as e:
         _load_app_settings("fakemodule.config.NON_EXISTENT_OBJECT")
+    assert isinstance(e.value, SystemExit)
     assert e.value.code == 1
 
     sys.path = original_sys_path
@@ -464,6 +466,7 @@ def test_load_app_settings_invalid(monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc:
         _load_app_settings("nonexistent.module.Settings")
     captured = capsys.readouterr()
+    assert isinstance(exc.value, SystemExit)
     assert exc.value.code == 1
     assert "Could not import settings object" in captured.err
 
@@ -492,11 +495,13 @@ class FakeProcess:
 
 def test_terminate_worker_already_terminated(caplog):
     import logging
+    import subprocess
+    from typing import Any, cast
 
     logger = logging.getLogger("test_logger2")
     caplog.set_level(logging.DEBUG, logger=logger.name)
     proc = FakeProcess(pid=1234, returncode=0)
-    terminate_worker_process(proc, logger)
+    terminate_worker_process(cast(subprocess.Popen[Any], proc), logger)
     # should log that process already terminated
     assert "already terminated" in caplog.text
 

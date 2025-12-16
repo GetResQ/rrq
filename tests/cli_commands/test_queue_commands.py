@@ -353,6 +353,7 @@ class TestQueueCommands:
         # Check that queue group was added
         assert "queue" in test_cli.commands
         queue_group = test_cli.commands["queue"]
+        assert isinstance(queue_group, click.Group)
 
         # Check that subcommands were added
         expected_commands = ["list", "stats", "inspect"]

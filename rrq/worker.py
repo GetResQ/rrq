@@ -29,6 +29,7 @@ from .registry import JobRegistry
 from .settings import RRQSettings
 from .store import JobStore
 from .cron import CronJob
+from .telemetry import get_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -83,9 +84,9 @@ class RRQWorker:
         self._semaphore = asyncio.Semaphore(self.settings.worker_concurrency)
         self._running_tasks: set[asyncio.Task] = set()
         self._shutdown_event = asyncio.Event()
-        self._loop = None  # Will be set in run()
-        self._health_check_task: Optional[asyncio.Task] = None
-        self._cron_task: Optional[asyncio.Task] = None
+        self._loop: asyncio.AbstractEventLoop | None = None  # Will be set in run()
+        self._health_check_task: asyncio.Task | None = None
+        self._cron_task: asyncio.Task | None = None
         self.status: str = "initializing"  # Worker status (e.g., initializing, running, polling, idle, stopped)
         logger.info(
             f"Initializing RRQWorker {self.worker_id} for queues: {self.queues}"
@@ -145,8 +146,18 @@ class RRQWorker:
         self.status = "running"
         self._loop = asyncio.get_running_loop()
         self._setup_signal_handlers()
+        telemetry = get_telemetry()
         try:
             await self._call_startup_hook()
+            try:
+                telemetry.worker_started(
+                    worker_id=self.worker_id, queues=list(self.queues)
+                )
+            except Exception as e_telemetry:
+                logger.error(
+                    f"Worker {self.worker_id} error during telemetry startup: {e_telemetry}",
+                    exc_info=True,
+                )
             await self._run_loop()
         except asyncio.CancelledError:
             logger.info(f"Worker {self.worker_id} run cancelled.")
@@ -154,6 +165,20 @@ class RRQWorker:
             logger.info(f"Worker {self.worker_id} shutting down cleanly.")
             await self._call_shutdown_hook()
             self.status = "stopped"
+            try:
+                telemetry.worker_stopped(worker_id=self.worker_id)
+            except Exception as e_telemetry:
+                logger.error(
+                    f"Worker {self.worker_id} error during telemetry shutdown: {e_telemetry}",
+                    exc_info=True,
+                )
+            try:
+                await self.close()
+            except Exception as e_close:
+                logger.error(
+                    f"Worker {self.worker_id} error closing resources during shutdown: {e_close}",
+                    exc_info=True,
+                )
             logger.info(f"Worker {self.worker_id} stopped.")
 
     async def _run_loop(self) -> None:
@@ -162,11 +187,13 @@ class RRQWorker:
         Continuously polls queues for jobs, manages concurrency, and handles shutdown.
         """
         logger.info(f"Worker {self.worker_id} starting run loop.")
-        self._health_check_task = self._loop.create_task(self._heartbeat_loop())
+        loop = self._loop
+        assert loop is not None
+        self._health_check_task = loop.create_task(self._heartbeat_loop())
         if self.cron_jobs:
             for cj in self.cron_jobs:
                 cj.schedule_next()
-            self._cron_task = self._loop.create_task(self._cron_loop())
+            self._cron_task = loop.create_task(self._cron_loop())
 
         while not self._shutdown_event.is_set():
             try:
@@ -234,7 +261,7 @@ class RRQWorker:
             with suppress(asyncio.CancelledError):
                 await self._cron_task
 
-    async def _poll_for_jobs(self, count: int) -> None:
+    async def _poll_for_jobs(self, count: int) -> int:
         """Polls configured queues round-robin and attempts to start processing jobs.
 
         Args:
@@ -362,7 +389,9 @@ class RRQWorker:
 
             # Create and track the execution task
             # The semaphore will be released when this task completes
-            task = self._loop.create_task(self._execute_job(job, queue_name))
+            loop = self._loop
+            assert loop is not None
+            task = loop.create_task(self._execute_job(job, queue_name))
             self._running_tasks.add(task)
             task.add_done_callback(lambda t: self._task_cleanup(t, self._semaphore))
             logger.info(
@@ -434,93 +463,182 @@ class RRQWorker:
             if job.job_timeout_seconds is not None
             else self.settings.default_job_timeout_seconds
         )
+        attempt = job.current_retries + 1
+        telemetry = get_telemetry()
+
+        span_cm = telemetry.job_span(
+            job=job,
+            worker_id=self.worker_id,
+            queue_name=queue_name,
+            attempt=attempt,
+            timeout_seconds=float(actual_job_timeout),
+        )
 
         try:
-            # --- Find Handler ---
-            handler = self.job_registry.get_handler(job.function_name)
-            if not handler:
-                raise ValueError(
-                    f"No handler registered for function '{job.function_name}'"
-                )
+            with span_cm as span:
+                try:
+                    # --- Find Handler ---
+                    handler = self.job_registry.get_handler(job.function_name)
+                    if not handler:
+                        raise ValueError(
+                            f"No handler registered for function '{job.function_name}'"
+                        )
 
-            # --- Prepare Context ---
-            context = {
-                "job_id": job.id,
-                "job_try": job.current_retries + 1,  # Attempt number (1-based)
-                "enqueue_time": job.enqueue_time,
-                "settings": self.settings,
-                "worker_id": self.worker_id,
-                "queue_name": queue_name,
-                "rrq_client": self.client,
-            }
+                    # --- Prepare Context ---
+                    context = {
+                        "job_id": job.id,
+                        "job_try": attempt,  # Attempt number (1-based)
+                        "enqueue_time": job.enqueue_time,
+                        "settings": self.settings,
+                        "worker_id": self.worker_id,
+                        "queue_name": queue_name,
+                        "rrq_client": self.client,
+                    }
 
-            # --- Execute Handler ---
-            result = None
-            exc: Optional[BaseException] = None  # Stores caught exception
+                    # --- Execute Handler ---
+                    result = None
+                    exc: Optional[BaseException] = None  # Stores caught exception
 
-            try:  # Inner try for handler execution and its specific exceptions
-                logger.debug(f"Calling handler '{job.function_name}' for job {job.id}")
-                result = await asyncio.wait_for(
-                    handler(context, *job.job_args, **job.job_kwargs),
-                    timeout=float(actual_job_timeout),
-                )
-                logger.debug(f"Handler for job {job.id} returned successfully.")
-            except TimeoutError as e_timeout:  # Specifically from wait_for
-                exc = e_timeout
-                logger.warning(
-                    f"Job {job.id} execution timed out after {actual_job_timeout}s."
-                )
-            except RetryJob as e_retry:  # Handler explicitly requests retry
-                exc = e_retry
-                logger.info(f"Job {job.id} requested retry: {e_retry}")
-            except Exception as e_other:  # Any other exception from the handler itself
-                exc = e_other
-                logger.error(
-                    f"Job {job.id} handler '{job.function_name}' raised unhandled exception:",
-                    exc_info=e_other,
-                )
+                    try:  # Inner try for handler execution and its specific exceptions
+                        logger.debug(
+                            f"Calling handler '{job.function_name}' for job {job.id}"
+                        )
+                        result = await asyncio.wait_for(
+                            handler(context, *job.job_args, **job.job_kwargs),
+                            timeout=float(actual_job_timeout),
+                        )
+                        logger.debug(f"Handler for job {job.id} returned successfully.")
+                    except TimeoutError as e_timeout:  # Specifically from wait_for
+                        exc = e_timeout
+                        logger.warning(
+                            f"Job {job.id} execution timed out after {actual_job_timeout}s."
+                        )
+                    except RetryJob as e_retry:  # Handler explicitly requests retry
+                        exc = e_retry
+                        logger.info(f"Job {job.id} requested retry: {e_retry}")
+                    except (
+                        Exception
+                    ) as e_other:  # Any other exception from the handler itself
+                        exc = e_other
+                        logger.error(
+                            f"Job {job.id} handler '{job.function_name}' raised unhandled exception:",
+                            exc_info=e_other,
+                        )
 
-            # --- Process Outcome ---
-            duration = time.monotonic() - start_time
-            if exc is None:  # Success
-                await self._handle_job_success(job, result)
-                logger.info(f"Job {job.id} completed successfully in {duration:.2f}s.")
-            elif isinstance(exc, RetryJob):
-                await self._process_retry_job(job, exc, queue_name)
-                # Logging done within _process_retry_job
-            elif isinstance(exc, asyncio.TimeoutError):
-                error_msg = (
-                    str(exc)
-                    if str(exc)
-                    else f"Job timed out after {actual_job_timeout}s."
-                )
-                await self._handle_job_timeout(job, queue_name, error_msg)
-                # Logging done within _handle_job_timeout
-            else:  # Other unhandled exception from handler
-                await self._process_other_failure(job, exc, queue_name)
-                # Logging done within _process_other_failure
+                    # --- Process Outcome ---
+                    duration = time.monotonic() - start_time
+                    if exc is None:  # Success
+                        await self._handle_job_success(job, result)
+                        span.success(duration_seconds=duration)
+                        logger.info(
+                            f"Job {job.id} completed successfully in {duration:.2f}s."
+                        )
+                    elif isinstance(exc, RetryJob):
+                        anticipated_retry_count = job.current_retries + 1
+                        delay_seconds = exc.defer_seconds
+                        if (
+                            delay_seconds is None
+                            and anticipated_retry_count < job.max_retries
+                        ):
+                            temp_job_for_backoff = Job(
+                                id=job.id,
+                                function_name=job.function_name,
+                                current_retries=anticipated_retry_count,
+                                max_retries=job.max_retries,
+                            )
+                            delay_seconds = (
+                                self._calculate_backoff_ms(temp_job_for_backoff)
+                                / 1000.0
+                            )
+                        await self._process_retry_job(job, exc, queue_name)
+                        if anticipated_retry_count >= job.max_retries:
+                            span.dlq(
+                                duration_seconds=duration,
+                                reason="max_retries",
+                                error=exc,
+                            )
+                        else:
+                            span.retry(
+                                duration_seconds=duration,
+                                delay_seconds=delay_seconds,
+                                reason=str(exc) or None,
+                            )
+                    elif isinstance(exc, asyncio.TimeoutError):
+                        error_msg = (
+                            str(exc)
+                            if str(exc)
+                            else f"Job timed out after {actual_job_timeout}s."
+                        )
+                        await self._handle_job_timeout(job, queue_name, error_msg)
+                        span.timeout(
+                            duration_seconds=duration,
+                            timeout_seconds=float(actual_job_timeout),
+                            error_message=error_msg,
+                        )
+                    else:  # Other unhandled exception from handler
+                        anticipated_retry_count = job.current_retries + 1
+                        delay_seconds = None
+                        if anticipated_retry_count < job.max_retries:
+                            delay_seconds = (
+                                self._calculate_backoff_ms(
+                                    Job(
+                                        id=job.id,
+                                        function_name=job.function_name,
+                                        current_retries=anticipated_retry_count,
+                                        max_retries=job.max_retries,
+                                    )
+                                )
+                                / 1000.0
+                            )
+                        await self._process_other_failure(job, exc, queue_name)
+                        if anticipated_retry_count >= job.max_retries:
+                            span.dlq(
+                                duration_seconds=duration,
+                                reason="max_retries",
+                                error=exc,
+                            )
+                        else:
+                            span.retry(
+                                duration_seconds=duration,
+                                delay_seconds=delay_seconds,
+                                reason=str(exc) or None,
+                            )
 
-        except ValueError as ve:  # Catches "handler not found"
-            logger.error(f"Job {job.id} fatal error: {ve}. Moving to DLQ.")
-            await self._handle_fatal_job_error(job, queue_name, str(ve))
-        except asyncio.CancelledError:
-            # Catches cancellation of this _execute_job task (e.g., worker shutdown)
-            logger.warning(
-                f"Job {job.id} execution was cancelled (likely worker shutdown). Handling cancellation."
-            )
-            await self._handle_job_cancellation_on_shutdown(job, queue_name)
-            # Do not re-raise; cancellation is handled.
-        except (
-            Exception
-        ) as critical_exc:  # Safety net for unexpected errors in this method
-            logger.critical(
-                f"Job {job.id} encountered an unexpected critical error during execution logic: {critical_exc}",
-                exc_info=critical_exc,
-            )
-            # Fallback: Try to move to DLQ to avoid losing the job entirely
-            await self._handle_fatal_job_error(
-                job, queue_name, f"Critical worker error: {critical_exc}"
-            )
+                except ValueError as ve:  # Catches "handler not found"
+                    logger.error(f"Job {job.id} fatal error: {ve}. Moving to DLQ.")
+                    await self._handle_fatal_job_error(job, queue_name, str(ve))
+                    span.dlq(
+                        duration_seconds=time.monotonic() - start_time,
+                        reason=str(ve),
+                        error=ve,
+                    )
+                except asyncio.CancelledError:
+                    # Catches cancellation of this _execute_job task (e.g., worker shutdown)
+                    logger.warning(
+                        f"Job {job.id} execution was cancelled (likely worker shutdown). Handling cancellation."
+                    )
+                    await self._handle_job_cancellation_on_shutdown(job, queue_name)
+                    span.cancelled(
+                        duration_seconds=time.monotonic() - start_time,
+                        reason="shutdown",
+                    )
+                    # Do not re-raise; cancellation is handled.
+                except (
+                    Exception
+                ) as critical_exc:  # Safety net for unexpected errors in this method
+                    logger.critical(
+                        f"Job {job.id} encountered an unexpected critical error during execution logic: {critical_exc}",
+                        exc_info=critical_exc,
+                    )
+                    # Fallback: Try to move to DLQ to avoid losing the job entirely
+                    await self._handle_fatal_job_error(
+                        job, queue_name, f"Critical worker error: {critical_exc}"
+                    )
+                    span.dlq(
+                        duration_seconds=time.monotonic() - start_time,
+                        reason="critical_worker_error",
+                        error=critical_exc,
+                    )
         finally:
             # CRITICAL: Ensure the lock is released regardless of outcome
             await self.job_store.release_job_lock(job.id)
@@ -603,6 +721,15 @@ class RRQWorker:
             new_retry_count = await self.job_store.atomic_retry_job(
                 job.id, target_queue, retry_at_score, str(exc), JobStatus.RETRYING
             )
+            try:
+                next_run_time = datetime.fromtimestamp(
+                    float(retry_at_score) / 1000.0, tz=timezone.utc
+                )
+                await self.job_store.update_job_next_scheduled_run_time(
+                    job.id, next_run_time
+                )
+            except Exception:
+                pass
 
             logger.info(
                 f"{log_prefix} explicitly retrying in {defer_seconds:.2f}s "
@@ -657,6 +784,15 @@ class RRQWorker:
             new_retry_count = await self.job_store.atomic_retry_job(
                 job.id, target_queue, retry_at_score, last_error_str, JobStatus.RETRYING
             )
+            try:
+                next_run_time = datetime.fromtimestamp(
+                    float(retry_at_score) / 1000.0, tz=timezone.utc
+                )
+                await self.job_store.update_job_next_scheduled_run_time(
+                    job.id, next_run_time
+                )
+            except Exception:
+                pass
 
             logger.info(
                 f"{log_prefix} failed, retrying in {defer_ms / 1000.0:.2f}s "
@@ -743,9 +879,12 @@ class RRQWorker:
 
     def _setup_signal_handlers(self) -> None:
         """Sets up POSIX signal handlers for graceful shutdown."""
+        loop = self._loop
+        if loop is None:
+            return
         for sig in self.SIGNALS:
             try:
-                self._loop.add_signal_handler(sig, self._request_shutdown)
+                loop.add_signal_handler(sig, self._request_shutdown)
                 logger.debug(
                     f"Worker {self.worker_id} registered signal handler for {sig.name}."
                 )
@@ -816,6 +955,7 @@ class RRQWorker:
     async def _heartbeat_loop(self) -> None:
         """Periodically updates the worker's health status key in Redis with a TTL."""
         logger.debug(f"Worker {self.worker_id} starting heartbeat loop.")
+        telemetry = get_telemetry()
         while not self._shutdown_event.is_set():
             try:
                 health_data = {
@@ -831,6 +971,9 @@ class RRQWorker:
                 )  # Add buffer
                 await self.job_store.set_worker_health(
                     self.worker_id, health_data, int(ttl)
+                )
+                telemetry.worker_heartbeat(
+                    worker_id=self.worker_id, health_data=health_data
                 )
                 # Logger call moved into set_worker_health
             except Exception as e:
@@ -994,7 +1137,9 @@ class RRQWorker:
         )
         try:
             job.status = JobStatus.PENDING
-            job.next_scheduled_run_time = datetime.now(timezone.utc)  # Re-queue immediately
+            job.next_scheduled_run_time = datetime.now(
+                timezone.utc
+            )  # Re-queue immediately
             job.last_error = "Job execution interrupted by worker shutdown. Re-queued."
             # Do not increment retries for shutdown interruption
 

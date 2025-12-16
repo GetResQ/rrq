@@ -47,7 +47,10 @@ async def job_store(
 @pytest.mark.asyncio
 async def test_save_and_get_job_definition(job_store: JobStore):
     job = Job(
-        function_name="test_func", job_args=[1, "arg2"], job_kwargs={"key": "value"}
+        function_name="test_func",
+        job_args=[1, "arg2"],
+        job_kwargs={"key": "value"},
+        trace_context={"traceparent": "00-abc-123-01"},
     )
     job_id = job.id
 
@@ -60,6 +63,7 @@ async def test_save_and_get_job_definition(job_store: JobStore):
     assert retrieved_job.job_args == [1, "arg2"]
     assert retrieved_job.job_kwargs == {"key": "value"}
     assert retrieved_job.status == JobStatus.PENDING
+    assert retrieved_job.trace_context == {"traceparent": "00-abc-123-01"}
     assert isinstance(retrieved_job.enqueue_time, datetime)
     if retrieved_job.enqueue_time.tzinfo is not None:
         assert retrieved_job.enqueue_time.tzinfo == timezone.utc
@@ -154,6 +158,22 @@ async def test_update_job_status(job_store: JobStore):
     retrieved_job_completed = await job_store.get_job_definition(job.id)
     assert retrieved_job_completed is not None
     assert retrieved_job_completed.status == JobStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_update_job_next_scheduled_run_time(job_store: JobStore):
+    job = Job(function_name="next_run_time_test")
+    await job_store.save_job_definition(job)
+
+    next_run = datetime.now(timezone.utc) + timedelta(seconds=5)
+    await job_store.update_job_next_scheduled_run_time(job.id, next_run)
+
+    retrieved = await job_store.get_job_definition(job.id)
+    assert retrieved is not None
+    assert retrieved.next_scheduled_run_time is not None
+    assert retrieved.next_scheduled_run_time.timestamp() == pytest.approx(
+        next_run.timestamp(), abs=1
+    )
 
 
 @pytest.mark.asyncio
@@ -731,6 +751,7 @@ class TestPipelineExceptionHandling:
 
         # Get initial job state
         initial_job = await job_store.get_job_definition(job.id)
+        assert initial_job is not None
         assert initial_job.status == JobStatus.PENDING
 
         # Mock pipeline to fail after partial execution
@@ -754,6 +775,7 @@ class TestPipelineExceptionHandling:
 
         # Verify job state hasn't changed (transaction rollback)
         final_job = await job_store.get_job_definition(job.id)
+        assert final_job is not None
         assert final_job.status == JobStatus.PENDING  # Should remain unchanged
 
     @pytest.mark.asyncio
@@ -781,7 +803,10 @@ class TestPipelineExceptionHandling:
 
                     with pytest.raises(RedisError):
                         await job_store.move_job_to_dlq(
-                            job.id, "test_dlq", f"Error {index}", datetime.now(timezone.utc)
+                            job.id,
+                            "test_dlq",
+                            f"Error {index}",
+                            datetime.now(timezone.utc),
                         )
                     return f"failed_{index}"
             else:
@@ -906,6 +931,7 @@ class TestPipelineExceptionHandling:
 
         # Verify job is in initial state
         initial_job = await job_store.get_job_definition(job.id)
+        assert initial_job is not None
         assert initial_job.status == JobStatus.PENDING
         assert initial_job.last_error is None
 
@@ -917,6 +943,7 @@ class TestPipelineExceptionHandling:
 
         # Verify all changes were applied atomically
         updated_job = await job_store.get_job_definition(job.id)
+        assert updated_job is not None
         assert updated_job.status == JobStatus.FAILED
         assert updated_job.last_error == "Test error message"
         assert updated_job.completion_time is not None
@@ -926,6 +953,7 @@ class TestPipelineExceptionHandling:
         dlq_jobs = await job_store.redis.lrange(dlq_key, 0, -1)
         assert job.id.encode("utf-8") in dlq_jobs
 
+
 @pytest.mark.asyncio
 async def test_get_lock_ttl(job_store: JobStore):
     unique_key = "ttl_test"
@@ -934,6 +962,7 @@ async def test_get_lock_ttl(job_store: JobStore):
     remaining = await job_store.get_lock_ttl(unique_key)
     assert 0 < remaining <= ttl
 
+
 @pytest.mark.asyncio
 async def test_get_set_last_process_time(job_store: JobStore):
     unique_key = "process_time_test"
@@ -941,6 +970,7 @@ async def test_get_set_last_process_time(job_store: JobStore):
     await job_store.set_last_process_time(unique_key, ts)
     retrieved = await job_store.get_last_process_time(unique_key)
     assert retrieved == ts
+
 
 @pytest.mark.asyncio
 async def test_defer_job(job_store: JobStore):
@@ -970,7 +1000,9 @@ class TestBatchGetQueueSizes:
         await job_store.add_job_to_queue("queue_a", "job2", 2000.0)
         await job_store.add_job_to_queue("queue_b", "job3", 3000.0)
 
-        result = await job_store.batch_get_queue_sizes(["queue_a", "queue_b", "queue_c"])
+        result = await job_store.batch_get_queue_sizes(
+            ["queue_a", "queue_b", "queue_c"]
+        )
 
         assert result["queue_a"] == 2
         assert result["queue_b"] == 1
@@ -995,10 +1027,12 @@ class TestBatchGetQueueSizes:
         await job_store.add_job_to_queue("mixed_b", "job2", 2000.0)
 
         # Mix of short and prefixed names
-        result = await job_store.batch_get_queue_sizes([
-            "mixed_a",
-            "rrq:queue:mixed_b",
-        ])
+        result = await job_store.batch_get_queue_sizes(
+            [
+                "mixed_a",
+                "rrq:queue:mixed_b",
+            ]
+        )
 
         assert result["mixed_a"] == 1
         assert result["rrq:queue:mixed_b"] == 1

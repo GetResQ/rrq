@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rrq"
-version = "0.7.1"
+version = "0.8.1"
 authors = [{ name = "Mazdak Rezvani", email = "mazdak@me.com" }]
 description = "RRQ is a Python library for creating reliable job queues using Redis and asyncio"
 readme = "README.md"
@@ -31,7 +31,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3.5", "pytest-asyncio>=1.0.0", "pytest-cov>=6.0.0"]
+dev = [
+    "pytest>=8.3.5",
+    "pytest-asyncio>=1.0.0",
+    "pytest-cov>=6.0.0",
+    "ruff==0.14.9",
+    "ty==0.0.1-alpha.26",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/getresq/rrq"
@@ -43,9 +49,3 @@ rrq = "rrq.cli:rrq"
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
-
-[tool.pyrefly]
-python_interpreter = ".venv/bin/python"
-
-[dependency-groups]
-dev = []

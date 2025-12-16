@@ -190,7 +190,7 @@ async def _populate_test_data(job_store: JobStore):
     # Insert worker health data
     for worker in worker_data:
         await job_store.set_worker_health(
-            worker["worker_id"],
+            str(worker["worker_id"]),
             worker,
             60,  # TTL
         )
@@ -329,15 +329,12 @@ def create_test_worker_data(
 
 # Mock the load_app_settings function for tests
 @pytest.fixture(autouse=True)
-def mock_load_settings(mock_settings):
+def mock_load_settings(mock_settings: RRQSettings, monkeypatch: pytest.MonkeyPatch):
     """Auto-mock load_app_settings for all CLI tests"""
-    import rrq.cli_commands.base
+    import rrq.cli_commands.base as cli_base
 
-    original_load = rrq.cli_commands.base.load_app_settings
-
-    def mock_load(_settings_path=None):
+    def mock_load(_settings_path: str | None = None) -> RRQSettings:
         return mock_settings
 
-    rrq.cli_commands.base.load_app_settings = mock_load
+    monkeypatch.setattr(cli_base, "load_app_settings", mock_load)
     yield mock_load
-    rrq.cli_commands.base.load_app_settings = original_load

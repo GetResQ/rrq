@@ -155,7 +155,7 @@ class TestDebugCommands:
 
         # Mock client
         mock_client = MagicMock()
-        mock_client.aclose = AsyncMock()
+        mock_client.close = AsyncMock()
         mock_client.enqueue = AsyncMock(return_value="test_job_123")
 
         # Mock client class directly
@@ -200,7 +200,7 @@ class TestDebugCommands:
 
         # Mock client
         mock_client = MagicMock()
-        mock_client.aclose = AsyncMock()
+        mock_client.close = AsyncMock()
         mock_client.enqueue = AsyncMock(return_value="test_job_456")
 
         # Mock client class directly
@@ -289,7 +289,7 @@ class TestDebugCommands:
 
         # Mock client
         mock_client = MagicMock()
-        mock_client.aclose = AsyncMock()
+        mock_client.close = AsyncMock()
         mock_client.enqueue = AsyncMock(
             side_effect=lambda **kwargs: f"job_{time.time()}"
         )
@@ -335,6 +335,7 @@ class TestDebugCommands:
         # Check that debug group was added
         assert "debug" in test_cli.commands
         debug_group = test_cli.commands["debug"]
+        assert isinstance(debug_group, click.Group)
 
         # Check that subcommands were added
         expected_commands = [
@@ -447,7 +448,9 @@ class TestDebugHelpers:
         assert "queues" in health_data
         assert "timestamp" in health_data
         assert health_data["status"] in ["running", "idle", "polling"]
-        assert len(health_data["queues"]) == 2
+        queues = health_data["queues"]
+        assert isinstance(queues, list)
+        assert len(queues) == 2
 
 
 class TestStressTest:

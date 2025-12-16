@@ -1,7 +1,7 @@
 """Queue management and statistics commands"""
 
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import click
 
@@ -390,7 +390,7 @@ class QueueCommands(AsyncCommand):
 
     async def _get_queue_statistics(
         self, job_store: JobStore, queue_name: str, max_scan: int = 1000
-    ) -> Dict[str, any]:
+    ) -> Dict[str, Any]:
         """Get detailed statistics for a queue"""
         stats = {
             "total": 0,

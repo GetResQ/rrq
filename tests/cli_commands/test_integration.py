@@ -211,8 +211,8 @@ class TestCommandInteroperability:
         mock_store.redis.pipeline = MagicMock(return_value=mock_pipeline)
 
         # Mock scan_iter for queue command
-        async def mock_scan_iter(match=None):
-            if "queue" in match:
+        async def mock_scan_iter(match: str | None = None):
+            if match is not None and "queue" in match:
                 yield b"rrq:queue:test_queue"
 
         mock_store.redis.scan_iter = mock_scan_iter
@@ -390,10 +390,10 @@ class TestEndToEndWorkflow:
         mock_store.redis.pipeline = MagicMock(return_value=mock_pipeline)
 
         # Mock for queue list
-        async def mock_scan_iter(match=None):
-            if "queue" in match:
+        async def mock_scan_iter(match: str | None = None):
+            if match is not None and "queue" in match:
                 yield b"rrq:queue:test_queue"
-            elif "job" in match:
+            elif match is not None and "job" in match:
                 yield b"rrq:job:test_job_001"
 
         mock_store.redis.scan_iter = mock_scan_iter
