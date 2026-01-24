@@ -465,6 +465,41 @@ class JobStore:
         await self.redis.hset(job_key, "status", status.value.encode("utf-8"))
         logger.debug(f"Updated status of job {job_id} to {status.value}.")
 
+    async def mark_job_started(
+        self, job_id: str, worker_id: str, start_time: datetime
+    ) -> None:
+        """Mark a job as active and set its start time and worker ID."""
+        job_key = f"{JOB_KEY_PREFIX}{job_id}"
+        dt = start_time
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        elif dt.tzinfo != timezone.utc:
+            dt = dt.astimezone(timezone.utc)
+        update_data = {
+            "status": JobStatus.ACTIVE.value.encode("utf-8"),
+            "start_time": dt.isoformat().encode("utf-8"),
+            "worker_id": worker_id.encode("utf-8"),
+        }
+        await self.redis.hset(job_key, mapping=update_data)
+        logger.debug(f"Marked job {job_id} as ACTIVE at {dt.isoformat()}.")
+
+    async def get_job_status(self, job_id: str) -> Optional[str]:
+        """Retrieves the status field for a job from Redis.
+
+        Args:
+            job_id: The ID of the job to retrieve.
+
+        Returns:
+            The status string if present, otherwise None.
+        """
+        job_key = f"{JOB_KEY_PREFIX}{job_id}"
+        status = await self.redis.hget(job_key, "status")
+        if status is None:
+            return None
+        if isinstance(status, bytes):
+            return status.decode("utf-8")
+        return str(status)
+
     async def update_job_next_scheduled_run_time(
         self, job_id: str, run_time: datetime
     ) -> None:

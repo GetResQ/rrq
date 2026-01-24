@@ -77,6 +77,49 @@ class JobSpan(AbstractContextManager["JobSpan"]):
         pass
 
 
+class ExecutorSpan(AbstractContextManager["ExecutorSpan"]):
+    """Context manager for an executor span."""
+
+    def __enter__(self) -> "ExecutorSpan":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:  # type: ignore[override]
+        self.close()
+        return False
+
+    def success(self, *, duration_seconds: float) -> None:
+        pass
+
+    def retry(
+        self,
+        *,
+        duration_seconds: float,
+        delay_seconds: Optional[float] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        pass
+
+    def timeout(
+        self,
+        *,
+        duration_seconds: float,
+        timeout_seconds: Optional[float] = None,
+        error_message: Optional[str] = None,
+    ) -> None:
+        pass
+
+    def error(self, *, duration_seconds: float, error: BaseException) -> None:
+        pass
+
+    def cancelled(
+        self, *, duration_seconds: float, reason: Optional[str] = None
+    ) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
 class Telemetry:
     """Base telemetry implementation (no-op by default)."""
 
@@ -98,6 +141,18 @@ class Telemetry:
     ) -> JobSpan:
         return _NOOP_JOB_SPAN
 
+    def executor_span(
+        self,
+        *,
+        job_id: str,
+        function_name: str,
+        queue_name: str,
+        attempt: int,
+        trace_context: Optional[dict[str, str]],
+        worker_id: Optional[str],
+    ) -> "ExecutorSpan":
+        return _NOOP_EXECUTOR_SPAN
+
     def worker_started(self, *, worker_id: str, queues: list[str]) -> None:
         pass
 
@@ -110,6 +165,7 @@ class Telemetry:
 
 _NOOP_ENQUEUE_SPAN = EnqueueSpan()
 _NOOP_JOB_SPAN = JobSpan()
+_NOOP_EXECUTOR_SPAN = ExecutorSpan()
 _telemetry: Telemetry = Telemetry()
 
 

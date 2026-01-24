@@ -3,7 +3,7 @@
 import asyncio
 import importlib
 import logging
-from abc import ABC, abstractmethod
+from abc import ABC
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
@@ -55,45 +55,12 @@ class RRQHook(ABC):
         pass
 
 
-class MetricsExporter(ABC):
-    """Base class for metrics exporters"""
-
-    def __init__(self, settings: RRQSettings):
-        self.settings = settings
-
-    @abstractmethod
-    async def export_counter(
-        self, name: str, value: float, labels: dict[str, str] | None = None
-    ) -> None:
-        """Export a counter metric"""
-        pass
-
-    @abstractmethod
-    async def export_gauge(
-        self, name: str, value: float, labels: dict[str, str] | None = None
-    ) -> None:
-        """Export a gauge metric"""
-        pass
-
-    @abstractmethod
-    async def export_histogram(
-        self, name: str, value: float, labels: dict[str, str] | None = None
-    ) -> None:
-        """Export a histogram metric"""
-        pass
-
-    async def close(self) -> None:
-        """Close any exporter resources."""
-        return None
-
-
 class HookManager:
     """Manages hooks and exporters for RRQ"""
 
     def __init__(self, settings: RRQSettings):
         self.settings = settings
         self.hooks: list[RRQHook] = []
-        self.exporters: dict[str, MetricsExporter] = {}
         self._initialized = False
 
     async def initialize(self) -> None:
@@ -110,16 +77,6 @@ class HookManager:
             except Exception as e:
                 logger.error(f"Failed to load hook {handler_path}: {e}")
 
-        # Load metrics exporter
-        exporter_type = self.settings.metrics_exporter
-        if exporter_type is not None:
-            try:
-                exporter = self._load_exporter(exporter_type)
-                self.exporters[exporter_type] = exporter
-                logger.info(f"Loaded metrics exporter: {exporter_type}")
-            except Exception as e:
-                logger.error(f"Failed to load exporter {exporter_type}: {e}")
-
         self._initialized = True
 
     def _load_hook(self, handler_path: str) -> RRQHook:
@@ -132,32 +89,6 @@ class HookManager:
             raise ValueError(f"{handler_path} is not a subclass of RRQHook")
 
         return hook_class(self.settings)
-
-    def _load_exporter(self, exporter_type: str) -> MetricsExporter:
-        """Load a metrics exporter"""
-        # Built-in exporters
-        if exporter_type == "prometheus":
-            from .exporters.prometheus import PrometheusExporter
-
-            return PrometheusExporter(self.settings)
-        elif exporter_type == "statsd":
-            from .exporters.statsd import StatsdExporter
-
-            return StatsdExporter(self.settings)
-        return self._load_custom_exporter(exporter_type)
-
-    def _load_custom_exporter(self, exporter_path: str) -> MetricsExporter:
-        """Load a metrics exporter from a module path."""
-        module_path, class_name = exporter_path.rsplit(".", 1)
-        module = importlib.import_module(module_path)
-        exporter_class = getattr(module, class_name)
-
-        if not isinstance(exporter_class, type) or not issubclass(
-            exporter_class, MetricsExporter
-        ):
-            raise ValueError(f"{exporter_path} is not a subclass of MetricsExporter")
-
-        return exporter_class(self.settings)
 
     async def trigger_event(self, event_name: str, *args: Any, **kwargs: Any) -> None:
         """Trigger an event on all hooks"""
@@ -193,35 +124,9 @@ class HookManager:
             )
             logger.error(f"Error in hook {method_name}: {e}")
 
-    async def export_metric(
-        self,
-        metric_type: str,
-        name: str,
-        value: float,
-        labels: dict[str, str] | None = None,
-    ) -> None:
-        """Export a metric to all configured exporters"""
-        if not self._initialized:
-            await self.initialize()
-
-        for exporter in self.exporters.values():
-            try:
-                if metric_type == "counter":
-                    await exporter.export_counter(name, value, labels)
-                elif metric_type == "gauge":
-                    await exporter.export_gauge(name, value, labels)
-                elif metric_type == "histogram":
-                    await exporter.export_histogram(name, value, labels)
-            except Exception as e:
-                logger.error(f"Error exporting metric {name}: {e}")
-
     async def close(self) -> None:
-        """Close all exporters"""
-        for exporter in self.exporters.values():
-            try:
-                await exporter.close()
-            except Exception as e:
-                logger.error(f"Error closing exporter: {e}")
+        """Close any hook resources."""
+        return None
 
 
 # Example hook implementation

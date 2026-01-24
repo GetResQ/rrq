@@ -396,7 +396,7 @@ class TestDebugHelpers:
         function_name = random.choice(function_names)
         queue_name = random.choice(queue_names)
         status = random.choice(statuses)
-        created_at = now - timedelta(hours=random.randint(0, 24))
+        enqueue_time = now - timedelta(hours=random.randint(0, 24))
 
         job_data = {
             "id": job_id,
@@ -410,7 +410,7 @@ class TestDebugHelpers:
                     "priority": random.choice(["high", "medium", "low"]),
                 }
             ),
-            "created_at": created_at.timestamp(),
+            "enqueue_time": enqueue_time.timestamp(),
             "retries": random.randint(0, 3),
             "max_retries": 3,
         }

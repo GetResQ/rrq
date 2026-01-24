@@ -8,18 +8,30 @@ RRQ provides a comprehensive command-line interface (CLI) for managing workers, 
 Run an RRQ worker process.
 
 **Options:**
-- `--settings` (optional): Specify the Python path to your settings object (e.g., `myapp.worker_config.rrq_settings`). If not provided, it will use the `RRQ_SETTINGS` environment variable or default to a basic `RRQSettings` object.
+- `--config` (optional): Path to RRQ TOML config (e.g., `rrq.toml`). If not provided, uses `RRQ_CONFIG` or `rrq.toml` in the current directory.
 - `--queue` (optional, multiple): Specify queue(s) to poll. Defaults to the `default_queue_name` in settings.
-- `--burst` (flag): Run the worker in burst mode to process one job or batch and then exit. Cannot be used with `--num-workers > 1`.
-- `--num-workers` (optional, integer): Number of parallel worker processes to start. Defaults to the number of CPU cores available on the machine. Cannot be used with `--burst` mode.
+- `--burst` (flag): Run the worker in burst mode to process one job or batch and then exit.
 
 ### `rrq worker watch`
 Run an RRQ worker with auto-restart on file changes.
 
 **Options:**
 - `--path` (optional): Directory path to watch for changes. Defaults to the current directory.
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 - `--queue` (optional, multiple): Same as above.
+- `--pattern` (optional, multiple): Glob pattern(s) to include when watching for changes (e.g., `*.py`). Defaults to `*.py` and `*.toml`.
+- `--ignore-pattern` (optional, multiple): Glob pattern(s) to ignore when watching for changes (e.g., `*.md`).
+
+**Notes:**
+- Watch mode forces executor `pool_size = 1` to keep restarts light-weight.
+
+## Executor Management
+
+### `rrq executor python`
+Run the Python stdio executor runtime (for out-of-process Python handlers).
+
+**Options:**
+- `--settings` (optional): Python executor settings object path (e.g., `myapp.executor_config.python_executor_settings`). If not provided, uses `RRQ_EXECUTOR_SETTINGS`.
 
 ## Health Monitoring
 
@@ -27,7 +39,7 @@ Run an RRQ worker with auto-restart on file changes.
 Perform a health check on active RRQ workers.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 
 ## Queue Management
 
@@ -35,21 +47,21 @@ Perform a health check on active RRQ workers.
 List all active queues with job counts and timestamps.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 - `--show-empty` (flag): Show queues with no pending jobs.
 
 ### `rrq queue stats`
 Show detailed statistics for queues including throughput and wait times.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 - `--queue` (optional, multiple): Specific queue(s) to show stats for.
 
 ### `rrq queue inspect <queue_name>`
 Inspect jobs in a specific queue with pagination.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 - `--limit` (optional): Number of jobs to show (default: 20).
 - `--offset` (optional): Offset for pagination (default: 0).
 
@@ -59,14 +71,14 @@ Inspect jobs in a specific queue with pagination.
 Show detailed information about a specific job.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 - `--raw` (flag): Show raw job data as JSON.
 
 ### `rrq job list`
 List jobs with filtering options.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 - `--status` (optional): Filter by job status (pending, active, completed, failed, retrying).
 - `--queue` (optional): Filter by queue name.
 - `--function` (optional): Filter by function name.
@@ -76,20 +88,20 @@ List jobs with filtering options.
 Replay a job with the same parameters.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 - `--queue` (optional): Override target queue.
 
 ### `rrq job cancel <job_id>`
 Cancel a pending job.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 
 ### `rrq job trace <job_id>`
 Show job execution timeline with durations.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 
 ## Real-time Monitoring
 
@@ -97,7 +109,7 @@ Show job execution timeline with durations.
 Launch real-time monitoring dashboard with live statistics.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 - `--refresh` (optional): Refresh interval in seconds (default: 1.0).
 - `--queues` (optional, multiple): Specific queues to monitor.
 
@@ -115,7 +127,7 @@ Launch real-time monitoring dashboard with live statistics.
 List jobs in the Dead Letter Queue with filtering options.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 - `--dlq-name` (optional): Name of the DLQ to inspect (defaults to settings.default_dlq_name).
 - `--queue` (optional): Filter by original queue name.
 - `--function` (optional): Filter by function name.
@@ -127,21 +139,21 @@ List jobs in the Dead Letter Queue with filtering options.
 Show DLQ statistics and error patterns.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 - `--dlq-name` (optional): Name of the DLQ to analyze (defaults to settings.default_dlq_name).
 
 ### `rrq dlq inspect <job_id>`
 Inspect a specific job in the DLQ.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 - `--raw` (flag): Show raw job data as JSON.
 
 ### `rrq dlq requeue`
 Requeue jobs from DLQ back to a live queue with filtering.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 - `--dlq-name` (optional): Name of the DLQ (defaults to settings.default_dlq_name).
 - `--target-queue` (optional): Target queue name (defaults to settings.default_queue_name).
 - `--queue` (optional): Filter by original queue name.
@@ -157,7 +169,7 @@ Requeue jobs from DLQ back to a live queue with filtering.
 Generate fake jobs for testing.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 - `--count` (optional): Number of jobs to generate (default: 100).
 - `--queue` (optional, multiple): Queue names to use.
 - `--status` (optional, multiple): Job statuses to create.
@@ -168,7 +180,7 @@ Generate fake jobs for testing.
 Generate fake worker heartbeats for testing.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 - `--count` (optional): Number of workers to simulate (default: 5).
 - `--duration` (optional): Duration to simulate workers in seconds (default: 60).
 
@@ -176,7 +188,7 @@ Generate fake worker heartbeats for testing.
 Submit a test job.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 - `--args` (optional): JSON string of positional arguments.
 - `--kwargs` (optional): JSON string of keyword arguments.
 - `--queue` (optional): Queue name.
@@ -186,7 +198,7 @@ Submit a test job.
 Clear test data from Redis.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 - `--confirm` (flag): Confirm deletion without prompt.
 - `--pattern` (optional): Pattern to match for deletion (default: test_*).
 
@@ -194,18 +206,18 @@ Clear test data from Redis.
 Run stress test by creating jobs continuously.
 
 **Options:**
-- `--settings` (optional): Same as above.
+- `--config` (optional): Same as above.
 - `--jobs-per-second` (optional): Jobs to create per second (default: 10).
 - `--duration` (optional): Duration in seconds (default: 60).
 - `--queues` (optional, multiple): Queue names to use.
 
 ## Settings Configuration
 
-All CLI commands accept the `--settings` parameter to specify your application's RRQ configuration. The settings are resolved in the following order:
+All CLI commands (except executor runtimes) accept the `--config` parameter to specify your RRQ TOML configuration. The config is resolved in the following order:
 
-1. **`--settings` parameter**: Direct path to settings object (e.g., `myapp.config.rrq_settings`)
-2. **`RRQ_SETTINGS` environment variable**: Path to settings object
-3. **Default settings**: Uses `redis://localhost:6379/0` and default configuration
+1. **`--config` parameter**: Direct path to TOML (e.g., `rrq.toml`)
+2. **`RRQ_CONFIG` environment variable**: Path to TOML
+3. **`rrq.toml` in the current working directory**
 
 ### Example Usage
 
@@ -213,11 +225,11 @@ All CLI commands accept the `--settings` parameter to specify your application's
 # Use default settings (localhost Redis)
 rrq queue list
 
-# Use custom settings
-rrq queue list --settings myapp.config.rrq_settings
+# Use custom config
+rrq queue list --config rrq.toml
 
 # Use environment variable
-export RRQ_SETTINGS=myapp.config.rrq_settings
+export RRQ_CONFIG=rrq.toml
 rrq monitor
 
 # Debug workflow

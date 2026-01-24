@@ -8,7 +8,8 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 
 from rrq.constants import JOB_KEY_PREFIX, QUEUE_KEY_PREFIX
-from rrq.cli_commands.base import AsyncCommand, load_app_settings, get_job_store
+from rrq.job import JobStatus
+from rrq.cli_commands.base import AsyncCommand, load_rrq_settings, get_job_store
 from ..utils import (
     console,
     create_progress,
@@ -16,6 +17,7 @@ from ..utils import (
     format_duration,
     format_status,
     format_timestamp,
+    parse_timestamp,
     print_error,
     print_json,
     print_success,
@@ -39,27 +41,27 @@ class JobCommands(AsyncCommand):
         @job_group.command("show")
         @click.argument("job_id")
         @click.option(
-            "--settings",
-            "settings_object_path",
+            "--config",
+            "config_path",
             type=str,
-            help="Python settings path (e.g., myapp.settings.rrq_settings)",
+            help="Path to RRQ TOML config (e.g., rrq.toml)",
         )
         @click.option(
             "--raw",
             is_flag=True,
             help="Show raw job data as JSON",
         )
-        def show_job(job_id: str, settings_object_path: str, raw: bool):
+        def show_job(job_id: str, config_path: str | None, raw: bool):
             """Show detailed information about a job"""
-            self.make_async(self._show_job)(job_id, settings_object_path, raw)
+            self.make_async(self._show_job)(job_id, config_path, raw)
 
         # List jobs
         @job_group.command("list")
         @click.option(
-            "--settings",
-            "settings_object_path",
+            "--config",
+            "config_path",
             type=str,
-            help="Python settings path (e.g., myapp.settings.rrq_settings)",
+            help="Path to RRQ TOML config (e.g., rrq.toml)",
         )
         @click.option(
             "--status",
@@ -81,7 +83,7 @@ class JobCommands(AsyncCommand):
             help="Number of jobs to show",
         )
         def list_jobs(
-            settings_object_path: str,
+            config_path: str | None,
             status: Optional[str],
             queue: Optional[str],
             function: Optional[str],
@@ -89,57 +91,55 @@ class JobCommands(AsyncCommand):
         ):
             """List jobs with filters"""
             self.make_async(self._list_jobs)(
-                settings_object_path, status, queue, function, limit
+                config_path, status, queue, function, limit
             )
 
         # Replay a job
         @job_group.command("replay")
         @click.argument("job_id")
         @click.option(
-            "--settings",
-            "settings_object_path",
+            "--config",
+            "config_path",
             type=str,
-            help="Python settings path (e.g., myapp.settings.rrq_settings)",
+            help="Path to RRQ TOML config (e.g., rrq.toml)",
         )
         @click.option(
             "--queue",
             help="Override target queue",
         )
-        def replay_job(job_id: str, settings_object_path: str, queue: Optional[str]):
+        def replay_job(job_id: str, config_path: str | None, queue: Optional[str]):
             """Replay a job with the same parameters"""
-            self.make_async(self._replay_job)(job_id, settings_object_path, queue)
+            self.make_async(self._replay_job)(job_id, config_path, queue)
 
         # Cancel a job
         @job_group.command("cancel")
         @click.argument("job_id")
         @click.option(
-            "--settings",
-            "settings_object_path",
+            "--config",
+            "config_path",
             type=str,
-            help="Python settings path (e.g., myapp.settings.rrq_settings)",
+            help="Path to RRQ TOML config (e.g., rrq.toml)",
         )
-        def cancel_job(job_id: str, settings_object_path: str):
+        def cancel_job(job_id: str, config_path: str | None):
             """Cancel a pending job"""
-            self.make_async(self._cancel_job)(job_id, settings_object_path)
+            self.make_async(self._cancel_job)(job_id, config_path)
 
         # Show job trace/timeline
         @job_group.command("trace")
         @click.argument("job_id")
         @click.option(
-            "--settings",
-            "settings_object_path",
+            "--config",
+            "config_path",
             type=str,
-            help="Python settings path (e.g., myapp.settings.rrq_settings)",
+            help="Path to RRQ TOML config (e.g., rrq.toml)",
         )
-        def trace_job(job_id: str, settings_object_path: str):
+        def trace_job(job_id: str, config_path: str | None):
             """Show job execution timeline"""
-            self.make_async(self._trace_job)(job_id, settings_object_path)
+            self.make_async(self._trace_job)(job_id, config_path)
 
-    async def _show_job(
-        self, job_id: str, settings_object_path: str, raw: bool
-    ) -> None:
+    async def _show_job(self, job_id: str, config_path: str | None, raw: bool) -> None:
         """Show detailed job information"""
-        settings = load_app_settings(settings_object_path)
+        settings = load_rrq_settings(config_path)
         job_store = await get_job_store(settings)
 
         try:
@@ -169,27 +169,27 @@ class JobCommands(AsyncCommand):
             ]
 
             # Add timestamps
-            if "created_at" in job_dict:
-                created_at = float(job_dict["created_at"])
+            enqueue_time = parse_timestamp(job_dict.get("enqueue_time"))
+            if enqueue_time is not None:
                 info_lines.append(
-                    f"[bold]Created:[/bold] {format_timestamp(created_at)}"
+                    f"[bold]Enqueued:[/bold] {format_timestamp(enqueue_time)}"
                 )
 
-            if "started_at" in job_dict:
-                started_at = float(job_dict["started_at"])
+            start_time = parse_timestamp(job_dict.get("start_time"))
+            if start_time is not None:
                 info_lines.append(
-                    f"[bold]Started:[/bold] {format_timestamp(started_at)}"
+                    f"[bold]Started:[/bold] {format_timestamp(start_time)}"
                 )
 
-            if "completed_at" in job_dict:
-                completed_at = float(job_dict["completed_at"])
+            completion_time = parse_timestamp(job_dict.get("completion_time"))
+            if completion_time is not None:
                 info_lines.append(
-                    f"[bold]Completed:[/bold] {format_timestamp(completed_at)}"
+                    f"[bold]Completed:[/bold] {format_timestamp(completion_time)}"
                 )
 
                 # Calculate duration
-                if "started_at" in job_dict:
-                    duration = completed_at - float(job_dict["started_at"])
+                if start_time is not None:
+                    duration = completion_time - start_time
                     info_lines.append(
                         f"[bold]Duration:[/bold] {format_duration(duration)}"
                     )
@@ -247,14 +247,14 @@ class JobCommands(AsyncCommand):
 
     async def _list_jobs(
         self,
-        settings_object_path: str,
+        config_path: str | None,
         status: Optional[str],
         queue: Optional[str],
         function: Optional[str],
         limit: int,
     ) -> None:
         """List jobs with filters"""
-        settings = load_app_settings(settings_object_path)
+        settings = load_rrq_settings(config_path)
         job_store = await get_job_store(settings)
 
         try:
@@ -274,7 +274,7 @@ class JobCommands(AsyncCommand):
             table.add_column("Function", style="yellow")
             table.add_column("Queue", style="blue")
             table.add_column("Status", justify="center")
-            table.add_column("Created", style="dim")
+            table.add_column("Enqueued", style="dim")
             table.add_column("Duration", justify="right")
 
             # Fetch and filter jobs
@@ -303,8 +303,11 @@ class JobCommands(AsyncCommand):
 
                     progress.update(task, advance=1)
 
-            # Sort by created_at
-            jobs.sort(key=lambda x: float(x[1].get("created_at", 0)), reverse=True)
+            # Sort by enqueue_time
+            jobs.sort(
+                key=lambda x: parse_timestamp(x[1].get("enqueue_time")) or 0,
+                reverse=True,
+            )
 
             # Limit results
             jobs = jobs[:limit]
@@ -313,21 +316,21 @@ class JobCommands(AsyncCommand):
             for job_id, job_dict in jobs:
                 # Calculate duration
                 duration = None
-                if job_dict.get("completed_at") and job_dict.get("started_at"):
-                    duration = float(job_dict["completed_at"]) - float(
-                        job_dict["started_at"]
-                    )
-                elif job_dict.get("started_at") and job_dict.get("status") == "active":
+                start_time = parse_timestamp(job_dict.get("start_time"))
+                completion_time = parse_timestamp(job_dict.get("completion_time"))
+                if completion_time is not None and start_time is not None:
+                    duration = completion_time - start_time
+                elif start_time is not None and job_dict.get("status") == "active":
                     import time
 
-                    duration = time.time() - float(job_dict["started_at"])
+                    duration = time.time() - start_time
 
                 table.add_row(
                     job_id[:8] + "...",
                     truncate_string(job_dict.get("function_name", "unknown"), 30),
                     job_dict.get("queue_name", "unknown"),
                     format_status(job_dict.get("status", "unknown")),
-                    format_timestamp(float(job_dict.get("created_at", 0))),
+                    format_timestamp(job_dict.get("enqueue_time")),
                     format_duration(duration) if duration else "N/A",
                 )
 
@@ -340,10 +343,10 @@ class JobCommands(AsyncCommand):
             await job_store.aclose()
 
     async def _replay_job(
-        self, job_id: str, settings_object_path: str, queue: Optional[str]
+        self, job_id: str, config_path: str | None, queue: Optional[str]
     ) -> None:
         """Replay a job"""
-        settings = load_app_settings(settings_object_path)
+        settings = load_rrq_settings(config_path)
         job_store = await get_job_store(settings)
 
         try:
@@ -377,9 +380,9 @@ class JobCommands(AsyncCommand):
         finally:
             await job_store.aclose()
 
-    async def _cancel_job(self, job_id: str, settings_object_path: str) -> None:
+    async def _cancel_job(self, job_id: str, config_path: str | None) -> None:
         """Cancel a pending job"""
-        settings = load_app_settings(settings_object_path)
+        settings = load_rrq_settings(config_path)
         job_store = await get_job_store(settings)
 
         try:
@@ -392,7 +395,7 @@ class JobCommands(AsyncCommand):
 
             # Check status
             status = job_dict.get("status", "")
-            if status != "pending":
+            if status.lower() != "pending":
                 print_error(f"Can only cancel pending jobs. Job is currently: {status}")
                 return
 
@@ -405,7 +408,9 @@ class JobCommands(AsyncCommand):
                 if removed:
                     # Update job status
                     job_key = f"{JOB_KEY_PREFIX}{job_id}"
-                    await job_store.redis.hset(job_key, "status", "cancelled")
+                    await job_store.redis.hset(
+                        job_key, "status", JobStatus.CANCELLED.value
+                    )
                     print_success(f"Job '{job_id}' cancelled successfully")
                 else:
                     print_error("Failed to remove job from queue")
@@ -415,9 +420,9 @@ class JobCommands(AsyncCommand):
         finally:
             await job_store.aclose()
 
-    async def _trace_job(self, job_id: str, settings_object_path: str) -> None:
+    async def _trace_job(self, job_id: str, config_path: str | None) -> None:
         """Show job execution timeline"""
-        settings = load_app_settings(settings_object_path)
+        settings = load_rrq_settings(config_path)
         job_store = await get_job_store(settings)
 
         try:
@@ -437,22 +442,24 @@ class JobCommands(AsyncCommand):
             # Add events
             events = []
 
-            # Job created
-            if "created_at" in job_dict:
+            # Job enqueued
+            enqueue_time = parse_timestamp(job_dict.get("enqueue_time"))
+            if enqueue_time is not None:
                 events.append(
                     (
-                        "Created",
-                        float(job_dict["created_at"]),
+                        "Enqueued",
+                        enqueue_time,
                         f"Function: {job_dict.get('function_name', 'unknown')}",
                     )
                 )
 
             # Job started
-            if "started_at" in job_dict:
+            start_time = parse_timestamp(job_dict.get("start_time"))
+            if start_time is not None:
                 events.append(
                     (
                         "Started",
-                        float(job_dict["started_at"]),
+                        start_time,
                         f"Worker: {job_dict.get('worker_id', 'unknown')}",
                     )
                 )
@@ -472,18 +479,17 @@ class JobCommands(AsyncCommand):
                         )
 
             # Job completed/failed
-            if "completed_at" in job_dict:
+            completion_time = parse_timestamp(job_dict.get("completion_time"))
+            if completion_time is not None:
                 status = job_dict.get("status", "unknown")
                 if status == "completed":
-                    events.append(
-                        ("Completed", float(job_dict["completed_at"]), "Success")
-                    )
+                    events.append(("Completed", completion_time, "Success"))
                 else:
                     error_msg = job_dict.get("error", "Unknown error")
                     events.append(
                         (
                             "Failed",
-                            float(job_dict["completed_at"]),
+                            completion_time,
                             truncate_string(error_msg, 50),
                         )
                     )

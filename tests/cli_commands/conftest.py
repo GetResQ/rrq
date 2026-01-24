@@ -1,7 +1,7 @@
 """Test fixtures for CLI commands"""
 
+import importlib
 import json
-import time
 from datetime import datetime, timedelta
 from typing import AsyncGenerator, Dict
 from unittest.mock import AsyncMock, MagicMock
@@ -11,7 +11,6 @@ import pytest_asyncio
 from click.testing import CliRunner
 
 from rrq.constants import JOB_KEY_PREFIX, QUEUE_KEY_PREFIX
-from rrq.registry import JobRegistry
 from rrq.settings import RRQSettings
 from rrq.store import JobStore
 
@@ -31,22 +30,8 @@ def redis_url_for_cli() -> str:
 @pytest.fixture
 def mock_settings(redis_url_for_cli):
     """Mock RRQ settings for testing"""
-    registry = JobRegistry()
-
-    # Register some test functions
-    def test_function(arg1: str, arg2: int = 10):
-        return f"Processed {arg1} with {arg2}"
-
-    def slow_function(duration: int = 1):
-        time.sleep(duration)
-        return f"Completed after {duration}s"
-
-    registry.register("test_function", test_function)
-    registry.register("slow_function", slow_function)
-
     return RRQSettings(
         redis_dsn=redis_url_for_cli,
-        job_registry=registry,
         default_queue_name="test_queue",
         default_dlq_name="test_dlq",
     )
@@ -85,7 +70,7 @@ async def _populate_test_data(job_store: JobStore):
             "status": "pending",
             "args": json.dumps(["arg1", "arg2"]),
             "kwargs": json.dumps({"key": "value"}),
-            "created_at": (now - timedelta(minutes=5)).timestamp(),
+            "enqueue_time": (now - timedelta(minutes=5)).timestamp(),
             "retries": 0,
             "max_retries": 3,
         },
@@ -96,9 +81,9 @@ async def _populate_test_data(job_store: JobStore):
             "status": "completed",
             "args": json.dumps([2]),
             "kwargs": json.dumps({}),
-            "created_at": (now - timedelta(minutes=10)).timestamp(),
-            "started_at": (now - timedelta(minutes=8)).timestamp(),
-            "completed_at": (now - timedelta(minutes=6)).timestamp(),
+            "enqueue_time": (now - timedelta(minutes=10)).timestamp(),
+            "start_time": (now - timedelta(minutes=8)).timestamp(),
+            "completion_time": (now - timedelta(minutes=6)).timestamp(),
             "result": json.dumps({"success": True, "result": "Completed after 2s"}),
             "worker_id": "worker_001",
             "retries": 0,
@@ -111,9 +96,9 @@ async def _populate_test_data(job_store: JobStore):
             "status": "failed",
             "args": json.dumps(["invalid"]),
             "kwargs": json.dumps({}),
-            "created_at": (now - timedelta(minutes=15)).timestamp(),
-            "started_at": (now - timedelta(minutes=13)).timestamp(),
-            "completed_at": (now - timedelta(minutes=12)).timestamp(),
+            "enqueue_time": (now - timedelta(minutes=15)).timestamp(),
+            "start_time": (now - timedelta(minutes=13)).timestamp(),
+            "completion_time": (now - timedelta(minutes=12)).timestamp(),
             "error": "Invalid argument provided",
             "traceback": "Traceback (most recent call last):\n  File ...\nValueError: Invalid argument",
             "worker_id": "worker_002",
@@ -127,8 +112,8 @@ async def _populate_test_data(job_store: JobStore):
             "status": "retrying",
             "args": json.dumps(["retry_me"]),
             "kwargs": json.dumps({}),
-            "created_at": (now - timedelta(minutes=20)).timestamp(),
-            "started_at": (now - timedelta(minutes=18)).timestamp(),
+            "enqueue_time": (now - timedelta(minutes=20)).timestamp(),
+            "start_time": (now - timedelta(minutes=18)).timestamp(),
             "error": "Temporary failure",
             "retries": 1,
             "max_retries": 3,
@@ -140,8 +125,8 @@ async def _populate_test_data(job_store: JobStore):
             "status": "active",
             "args": json.dumps([10]),
             "kwargs": json.dumps({}),
-            "created_at": (now - timedelta(minutes=2)).timestamp(),
-            "started_at": (now - timedelta(minutes=1)).timestamp(),
+            "enqueue_time": (now - timedelta(minutes=2)).timestamp(),
+            "start_time": (now - timedelta(minutes=1)).timestamp(),
             "worker_id": "worker_001",
             "retries": 0,
             "max_retries": 3,
@@ -156,7 +141,7 @@ async def _populate_test_data(job_store: JobStore):
         # Add pending jobs to queues
         if job_data["status"] == "pending":
             queue_key = f"{QUEUE_KEY_PREFIX}{job_data['queue_name']}"
-            priority = job_data["created_at"]
+            priority = job_data["enqueue_time"]
             await job_store.redis.zadd(queue_key, {job_data["id"]: priority})
 
     # Create test workers
@@ -215,15 +200,15 @@ def sample_jobs():
             "function_name": "process_data",
             "queue_name": "default",
             "status": "completed",
-            "created_at": (now - timedelta(hours=1)).timestamp(),
-            "completed_at": now.timestamp(),
+            "enqueue_time": (now - timedelta(hours=1)).timestamp(),
+            "completion_time": now.timestamp(),
         },
         {
             "id": "test_job_002",
             "function_name": "send_email",
             "queue_name": "urgent",
             "status": "failed",
-            "created_at": (now - timedelta(hours=2)).timestamp(),
+            "enqueue_time": (now - timedelta(hours=2)).timestamp(),
             "error": "SMTP connection failed",
         },
         {
@@ -231,7 +216,7 @@ def sample_jobs():
             "function_name": "generate_report",
             "queue_name": "default",
             "status": "pending",
-            "created_at": (now - timedelta(minutes=30)).timestamp(),
+            "enqueue_time": (now - timedelta(minutes=30)).timestamp(),
         },
     ]
 
@@ -275,7 +260,7 @@ def create_test_job_data(
         "status": status,
         "args": json.dumps(kwargs.get("args", [])),
         "kwargs": json.dumps(kwargs.get("kwargs", {})),
-        "created_at": kwargs.get("created_at", now.timestamp()),
+        "enqueue_time": kwargs.get("enqueue_time", now.timestamp()),
         "retries": kwargs.get("retries", 0),
         "max_retries": kwargs.get("max_retries", 3),
     }
@@ -284,10 +269,10 @@ def create_test_job_data(
     if status in ["completed", "failed"]:
         job_data.update(
             {
-                "started_at": kwargs.get(
-                    "started_at", (now - timedelta(minutes=2)).timestamp()
+                "start_time": kwargs.get(
+                    "start_time", (now - timedelta(minutes=2)).timestamp()
                 ),
-                "completed_at": kwargs.get("completed_at", now.timestamp()),
+                "completion_time": kwargs.get("completion_time", now.timestamp()),
                 "worker_id": kwargs.get("worker_id", "test_worker"),
             }
         )
@@ -301,8 +286,8 @@ def create_test_job_data(
     elif status == "active":
         job_data.update(
             {
-                "started_at": kwargs.get(
-                    "started_at", (now - timedelta(minutes=1)).timestamp()
+                "start_time": kwargs.get(
+                    "start_time", (now - timedelta(minutes=1)).timestamp()
                 ),
                 "worker_id": kwargs.get("worker_id", "test_worker"),
             }
@@ -327,14 +312,23 @@ def create_test_worker_data(
     }
 
 
-# Mock the load_app_settings function for tests
+# Mock the load_rrq_settings function for tests
 @pytest.fixture(autouse=True)
 def mock_load_settings(mock_settings: RRQSettings, monkeypatch: pytest.MonkeyPatch):
-    """Auto-mock load_app_settings for all CLI tests"""
+    """Auto-mock load_rrq_settings for all CLI tests"""
     import rrq.cli_commands.base as cli_base
 
     def mock_load(_settings_path: str | None = None) -> RRQSettings:
         return mock_settings
 
-    monkeypatch.setattr(cli_base, "load_app_settings", mock_load)
+    monkeypatch.setattr(cli_base, "load_rrq_settings", mock_load)
+    for module_name in (
+        "rrq.cli_commands.commands.debug",
+        "rrq.cli_commands.commands.dlq",
+        "rrq.cli_commands.commands.jobs",
+        "rrq.cli_commands.commands.monitor",
+        "rrq.cli_commands.commands.queues",
+    ):
+        module = importlib.import_module(module_name)
+        monkeypatch.setattr(module, "load_rrq_settings", mock_load)
     yield mock_load

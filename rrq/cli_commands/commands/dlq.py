@@ -8,8 +8,8 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from rrq.cli_commands.base import AsyncCommand, get_job_store, load_app_settings
-from rrq.cli_commands.utils import format_timestamp
+from rrq.cli_commands.base import AsyncCommand, get_job_store, load_rrq_settings
+from rrq.cli_commands.utils import format_timestamp, parse_timestamp
 from rrq.constants import DLQ_KEY_PREFIX, JOB_KEY_PREFIX
 
 # Error truncation lengths for consistency
@@ -30,12 +30,12 @@ class DLQCommands(AsyncCommand):
 
         @dlq_group.command("list")
         @click.option(
-            "--settings",
-            "settings_object_path",
+            "--config",
+            "config_path",
             type=str,
             required=False,
             default=None,
-            help="Python path to settings object",
+            help="Path to RRQ TOML config (e.g., rrq.toml)",
         )
         @click.option(
             "--queue",
@@ -69,7 +69,7 @@ class DLQCommands(AsyncCommand):
             help="Batch size for fetching jobs (optimization for large DLQs)",
         )
         def list_dlq_jobs(
-            settings_object_path: str,
+            config_path: str | None,
             original_queue: Optional[str],
             function_name: Optional[str],
             limit: int,
@@ -80,7 +80,7 @@ class DLQCommands(AsyncCommand):
         ):
             """List jobs in the Dead Letter Queue"""
             return self.make_async(self._list_dlq_jobs_async)(
-                settings_object_path,
+                config_path,
                 original_queue,
                 function_name,
                 limit,
@@ -92,12 +92,12 @@ class DLQCommands(AsyncCommand):
 
         @dlq_group.command("stats")
         @click.option(
-            "--settings",
-            "settings_object_path",
+            "--config",
+            "config_path",
             type=str,
             required=False,
             default=None,
-            help="Python path to settings object",
+            help="Path to RRQ TOML config (e.g., rrq.toml)",
         )
         @click.option(
             "--dlq-name",
@@ -105,20 +105,18 @@ class DLQCommands(AsyncCommand):
             required=False,
             help="Name of the DLQ to analyze (defaults to settings.default_dlq_name)",
         )
-        def dlq_stats(settings_object_path: str, dlq_name: Optional[str]):
+        def dlq_stats(config_path: str | None, dlq_name: Optional[str]):
             """Show DLQ statistics and error patterns"""
-            return self.make_async(self._dlq_stats_async)(
-                settings_object_path, dlq_name
-            )
+            return self.make_async(self._dlq_stats_async)(config_path, dlq_name)
 
         @dlq_group.command("requeue")
         @click.option(
-            "--settings",
-            "settings_object_path",
+            "--config",
+            "config_path",
             type=str,
             required=False,
             default=None,
-            help="Python path to settings object",
+            help="Path to RRQ TOML config (e.g., rrq.toml)",
         )
         @click.option(
             "--dlq-name",
@@ -167,7 +165,7 @@ class DLQCommands(AsyncCommand):
             help="Show what would be requeued without actually doing it",
         )
         def requeue_dlq_jobs(
-            settings_object_path: str,
+            config_path: str | None,
             dlq_name: Optional[str],
             target_queue: Optional[str],
             original_queue: Optional[str],
@@ -179,7 +177,7 @@ class DLQCommands(AsyncCommand):
         ):
             """Requeue jobs from DLQ back to a live queue with filtering"""
             return self.make_async(self._requeue_dlq_jobs_async)(
-                settings_object_path,
+                config_path,
                 dlq_name,
                 target_queue,
                 original_queue,
@@ -193,18 +191,18 @@ class DLQCommands(AsyncCommand):
         @dlq_group.command("inspect")
         @click.argument("job_id")
         @click.option(
-            "--settings",
-            "settings_object_path",
+            "--config",
+            "config_path",
             type=str,
             required=False,
             default=None,
-            help="Python path to settings object",
+            help="Path to RRQ TOML config (e.g., rrq.toml)",
         )
         @click.option("--raw", is_flag=True, help="Show raw job data as JSON")
-        def inspect_dlq_job(job_id: str, settings_object_path: str, raw: bool):
+        def inspect_dlq_job(job_id: str, config_path: str | None, raw: bool):
             """Inspect a specific job in the DLQ"""
             return self.make_async(self._inspect_dlq_job_async)(
-                job_id, settings_object_path, raw
+                job_id, config_path, raw
             )
 
     async def _get_dlq_jobs(
@@ -243,7 +241,9 @@ class DLQCommands(AsyncCommand):
                 jobs.append(job_data)
 
         # Sort by completion time (newest first)
-        jobs.sort(key=lambda x: x.get("completion_time", 0), reverse=True)
+        jobs.sort(
+            key=lambda x: parse_timestamp(x.get("completion_time")) or 0, reverse=True
+        )
 
         # Apply pagination
         return jobs[offset : offset + limit]
@@ -350,9 +350,12 @@ class DLQCommands(AsyncCommand):
 
     def _extract_completion_times(self, jobs: List[Dict]) -> List[float]:
         """Extract completion times from jobs"""
-        return [
-            job.get("completion_time", 0) for job in jobs if job.get("completion_time")
-        ]
+        completion_times: list[float] = []
+        for job in jobs:
+            parsed = parse_timestamp(job.get("completion_time"))
+            if parsed is not None:
+                completion_times.append(parsed)
+        return completion_times
 
     def _extract_retries(self, jobs: List[Dict]) -> List[int]:
         """Extract retry counts from jobs"""
@@ -429,7 +432,7 @@ class DLQCommands(AsyncCommand):
 
     async def _list_dlq_jobs_async(
         self,
-        settings_object_path: str,
+        config_path: str | None,
         original_queue: Optional[str],
         function_name: Optional[str],
         limit: int,
@@ -439,7 +442,7 @@ class DLQCommands(AsyncCommand):
         batch_size: int = 100,
     ):
         """Async implementation for listing DLQ jobs"""
-        settings = load_app_settings(settings_object_path)
+        settings = load_rrq_settings(config_path)
         job_store = await get_job_store(settings)
 
         try:
@@ -551,11 +554,9 @@ class DLQCommands(AsyncCommand):
         if end_idx < total_jobs:
             console.print(f"[dim]Use --offset {offset + limit} to see more")
 
-    async def _dlq_stats_async(
-        self, settings_object_path: str, dlq_name: Optional[str]
-    ):
+    async def _dlq_stats_async(self, config_path: str | None, dlq_name: Optional[str]):
         """Async implementation for DLQ statistics"""
-        settings = load_app_settings(settings_object_path)
+        settings = load_rrq_settings(config_path)
         job_store = await get_job_store(settings)
 
         try:
@@ -641,7 +642,7 @@ class DLQCommands(AsyncCommand):
 
     async def _requeue_dlq_jobs_async(
         self,
-        settings_object_path: str,
+        config_path: str | None,
         dlq_name: Optional[str],
         target_queue: Optional[str],
         original_queue: Optional[str],
@@ -652,7 +653,7 @@ class DLQCommands(AsyncCommand):
         dry_run: bool,
     ):
         """Async implementation for requeuing DLQ jobs"""
-        settings = load_app_settings(settings_object_path)
+        settings = load_rrq_settings(config_path)
         job_store = await get_job_store(settings)
 
         try:
@@ -767,10 +768,10 @@ class DLQCommands(AsyncCommand):
             console.print(f"[dim]... and {len(matching_jobs) - 10} more jobs")
 
     async def _inspect_dlq_job_async(
-        self, job_id: str, settings_object_path: str, raw: bool
+        self, job_id: str, config_path: str | None, raw: bool
     ):
         """Async implementation for inspecting a DLQ job"""
-        settings = load_app_settings(settings_object_path)
+        settings = load_rrq_settings(config_path)
         job_store = await get_job_store(settings)
 
         try:

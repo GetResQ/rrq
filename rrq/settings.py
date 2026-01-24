@@ -1,14 +1,11 @@
-"""This module defines the configuration settings for the RRQ (Reliable Redis Queue) system
-using Pydantic's BaseSettings.
+"""Configuration models for RRQ.
 
-Settings can be loaded from environment variables (with a prefix of `RRQ_`) or
-from a .env file. Sensible defaults are provided for most settings.
+Settings are loaded from TOML files via rrq.config and validated with Pydantic.
 """
 
-from typing import Awaitable, Callable, List, Optional
+from typing import List, Literal
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, Field
 
 from .constants import (
     DEFAULT_DLQ_NAME,
@@ -20,24 +17,27 @@ from .constants import (
     DEFAULT_RESULT_TTL_SECONDS,
     DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
 )
-from .registry import JobRegistry
 from .cron import CronJob
 
 
-class RRQSettings(BaseSettings):
+class ExecutorConfig(BaseModel):
+    """Configuration for external executors (stdio)."""
+
+    type: Literal["stdio"] = "stdio"
+    cmd: list[str] | None = None
+    pool_size: int | None = None
+    env: dict[str, str] | None = None
+    cwd: str | None = None
+    response_timeout_seconds: float | None = None
+
+
+class RRQSettings(BaseModel):
     """Configuration settings for the RRQ (Reliable Redis Queue) system.
 
     These settings control various aspects of the client, worker, and job store behavior,
     such as Redis connection, queue names, timeouts, retry policies, and worker concurrency.
     """
 
-    # Startup and Shutdown Hooks
-    on_startup: Optional[Callable[[], Awaitable[None]]] = Field(
-        default=None, description="Async callable to run on worker startup."
-    )
-    on_shutdown: Optional[Callable[[], Awaitable[None]]] = Field(
-        default=None, description="Async callable to run on worker shutdown."
-    )
     redis_dsn: str = Field(
         default="redis://localhost:6379/0",
         description="Redis Data Source Name (DSN) for connecting to the Redis server.",
@@ -76,7 +76,22 @@ class RRQSettings(BaseSettings):
     )
     worker_concurrency: int = Field(
         default=10,
-        description="Default number of concurrent jobs a single worker process can handle.",
+        description=(
+            "Effective number of concurrent jobs a single worker process can handle. "
+            "This value is derived from executor pool sizes at runtime."
+        ),
+    )
+    default_executor_name: str = Field(
+        default="python",
+        description="Default executor name for jobs without an explicit executor prefix.",
+    )
+    executors: dict[str, ExecutorConfig] = Field(
+        default_factory=dict,
+        description="External executor configurations keyed by executor name.",
+    )
+    executor_routes: dict[str, str] = Field(
+        default_factory=dict,
+        description="Optional routing map from queue name to executor name.",
     )
     worker_health_check_interval_seconds: float = Field(
         default=60,
@@ -94,10 +109,6 @@ class RRQSettings(BaseSettings):
         default=10.0,
         description="Grace period (in seconds) for active job tasks to finish during worker shutdown.",
     )
-    job_registry: Optional[JobRegistry] = Field(
-        default=None,
-        description="Job registry instance, typically provided by the application.",
-    )
     cron_jobs: list[CronJob] = Field(
         default_factory=list,
         description="Optional list of cron job specifications to run periodically.",
@@ -110,14 +121,6 @@ class RRQSettings(BaseSettings):
         default=30,
         description="Expected job processing time buffer for locks (in seconds).",
     )
-    metrics_exporter: Optional[str] = Field(
-        default=None,
-        description="Metrics exporter type ('prometheus', 'statsd') or module path to custom exporter.",
-    )
-    model_config = SettingsConfigDict(
-        env_prefix="RRQ_",
-        extra="ignore",
-        # For local dev, you might want to load from a .env file:
-        # env_file=".env",
-        # env_file_encoding='utf-8'
-    )
+    model_config = {
+        "extra": "ignore",
+    }

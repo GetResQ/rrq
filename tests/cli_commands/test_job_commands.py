@@ -46,9 +46,9 @@ class TestJobCommands:
             b"status": b"completed",
             b"args": b'["arg1", "arg2"]',
             b"kwargs": b'{"key": "value"}',
-            b"created_at": b"1234567890.0",
-            b"started_at": b"1234567895.0",
-            b"completed_at": b"1234567900.0",
+            b"enqueue_time": b"1234567890.0",
+            b"start_time": b"1234567895.0",
+            b"completion_time": b"1234567900.0",
             b"result": b'{"success": true}',
             b"retries": b"0",
             b"max_retries": b"3",
@@ -60,9 +60,9 @@ class TestJobCommands:
             "status": "completed",
             "args": '["arg1", "arg2"]',
             "kwargs": '{"key": "value"}',
-            "created_at": "1234567890.0",
-            "started_at": "1234567895.0",
-            "completed_at": "1234567900.0",
+            "enqueue_time": "1234567890.0",
+            "start_time": "1234567895.0",
+            "completion_time": "1234567900.0",
             "result": '{"success": true}',
             "retries": "0",
             "max_retries": "3",
@@ -171,29 +171,29 @@ class TestJobCommands:
             b"function_name": b"test_function",
             b"queue_name": b"test_queue",
             b"status": b"completed",
-            b"created_at": b"1234567890.0",
-            b"completed_at": b"1234567900.0",
-            b"started_at": b"1234567895.0",
+            b"enqueue_time": b"1234567890.0",
+            b"completion_time": b"1234567900.0",
+            b"start_time": b"1234567895.0",
         }
         job_data_2 = {
             b"function_name": b"send_email",
             b"queue_name": b"urgent",
             b"status": b"failed",
-            b"created_at": b"1234567880.0",
+            b"enqueue_time": b"1234567880.0",
         }
         job_data_dict_1 = {
             "function_name": "test_function",
             "queue_name": "test_queue",
             "status": "completed",
-            "created_at": "1234567890.0",
-            "completed_at": "1234567900.0",
-            "started_at": "1234567895.0",
+            "enqueue_time": "1234567890.0",
+            "completion_time": "1234567900.0",
+            "start_time": "1234567895.0",
         }
         job_data_dict_2 = {
             "function_name": "send_email",
             "queue_name": "urgent",
             "status": "failed",
-            "created_at": "1234567880.0",
+            "enqueue_time": "1234567880.0",
         }
 
         mock_store.redis.hgetall = AsyncMock(side_effect=[job_data_1, job_data_2])
@@ -238,13 +238,13 @@ class TestJobCommands:
             b"function_name": b"test_function",
             b"queue_name": b"test_queue",
             b"status": b"failed",
-            b"created_at": b"1234567890.0",
+            b"enqueue_time": b"1234567890.0",
         }
         job_data_dict = {
             "function_name": "test_function",
             "queue_name": "test_queue",
             "status": "failed",
-            "created_at": "1234567890.0",
+            "enqueue_time": "1234567890.0",
         }
         mock_store.redis.hgetall = AsyncMock(return_value=job_data)
         mock_store.get_job_data_dict = AsyncMock(return_value=job_data_dict)
@@ -411,9 +411,9 @@ class TestJobCommands:
         # Mock job data with timeline
         job_data = {
             b"function_name": b"test_function",
-            b"created_at": b"1234567890.0",
-            b"started_at": b"1234567895.0",
-            b"completed_at": b"1234567900.0",
+            b"enqueue_time": b"1234567890.0",
+            b"start_time": b"1234567895.0",
+            b"completion_time": b"1234567900.0",
             b"status": b"completed",
             b"worker_id": b"worker_001",
             b"retries": b"1",
@@ -422,9 +422,9 @@ class TestJobCommands:
         }
         job_data_dict = {
             "function_name": "test_function",
-            "created_at": "1234567890.0",
-            "started_at": "1234567895.0",
-            "completed_at": "1234567900.0",
+            "enqueue_time": "1234567890.0",
+            "start_time": "1234567895.0",
+            "completion_time": "1234567900.0",
             "status": "completed",
             "worker_id": "worker_001",
             "retries": "1",
@@ -445,7 +445,7 @@ class TestJobCommands:
 
         assert result.exit_code == 0
         assert "Job Timeline" in result.output
-        assert "Created" in result.output
+        assert "Enqueued" in result.output
         assert "Started" in result.output
         assert "Completed" in result.output
         assert "Total Duration" in result.output
@@ -522,9 +522,9 @@ class TestJobDataParsing:
         """Test parsing job timeline events"""
 
         job_data = {
-            "created_at": "1234567890.0",
-            "started_at": "1234567895.0",
-            "completed_at": "1234567900.0",
+            "enqueue_time": "1234567890.0",
+            "start_time": "1234567895.0",
+            "completion_time": "1234567900.0",
             "retries": "1",
             "retry_0_at": "1234567893.0",
         }
@@ -532,11 +532,11 @@ class TestJobDataParsing:
         # Parse timeline events
         events = []
 
-        if "created_at" in job_data:
-            events.append(("Created", float(job_data["created_at"])))
+        if "enqueue_time" in job_data:
+            events.append(("Enqueued", float(job_data["enqueue_time"])))
 
-        if "started_at" in job_data:
-            events.append(("Started", float(job_data["started_at"])))
+        if "start_time" in job_data:
+            events.append(("Started", float(job_data["start_time"])))
 
         retries = int(job_data.get("retries", 0))
         for i in range(retries):
@@ -544,14 +544,14 @@ class TestJobDataParsing:
             if retry_key in job_data:
                 events.append((f"Retry {i + 1}", float(job_data[retry_key])))
 
-        if "completed_at" in job_data:
-            events.append(("Completed", float(job_data["completed_at"])))
+        if "completion_time" in job_data:
+            events.append(("Completed", float(job_data["completion_time"])))
 
         # Sort events by timestamp
         events.sort(key=lambda x: x[1])
 
         assert len(events) == 4
-        assert events[0][0] == "Created"
+        assert events[0][0] == "Enqueued"
         assert events[1][0] == "Retry 1"
         assert events[2][0] == "Started"
         assert events[3][0] == "Completed"
@@ -559,8 +559,8 @@ class TestJobDataParsing:
     def test_job_duration_calculation(self):
         """Test job duration calculation"""
         # Simulate duration calculation
-        started_at = 1234567895.0
-        completed_at = 1234567900.0
+        start_time = 1234567895.0
+        completion_time = 1234567900.0
 
-        duration = completed_at - started_at
+        duration = completion_time - start_time
         assert duration == 5.0

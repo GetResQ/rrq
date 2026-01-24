@@ -270,11 +270,11 @@ class TestCommandInteroperability:
 
     def test_settings_loading_consistency(self):
         """Test that all commands use consistent settings loading"""
-        from rrq.cli_commands.base import load_app_settings
+        from rrq.cli_commands.base import load_rrq_settings
 
         # Test with None (should use defaults or env)
-        settings1 = load_app_settings(None)
-        settings2 = load_app_settings(None)
+        settings1 = load_rrq_settings(None)
+        settings2 = load_rrq_settings(None)
 
         # Should return consistent settings
         assert settings1.redis_dsn == settings2.redis_dsn
@@ -404,12 +404,12 @@ class TestEndToEndWorkflow:
         job_data = {
             b"function_name": b"test_function",
             b"status": b"pending",
-            b"created_at": b"1234567890.0",
+            b"enqueue_time": b"1234567890.0",
         }
         job_data_dict = {
             "function_name": "test_function",
             "status": "pending",
-            "created_at": "1234567890.0",
+            "enqueue_time": "1234567890.0",
         }
         mock_store.redis.hgetall = AsyncMock(return_value=job_data)
         mock_store.get_job_data_dict = AsyncMock(return_value=job_data_dict)

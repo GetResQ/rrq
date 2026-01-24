@@ -1,25 +1,41 @@
 # RRQ: Reliable Redis Queue
 
-RRQ is a Python library for creating reliable job queues using Redis and `asyncio`, inspired by [ARQ (Async Redis Queue)](https://github.com/samuelcolvin/arq). It focuses on providing at-least-once job processing semantics with features like automatic retries, job timeouts, dead-letter queues, and graceful worker shutdown.
+RRQ is a Redis-backed job queue **system** with a Python orchestrator and a
+language-agnostic executor protocol. Producers can enqueue jobs from Python,
+Rust, Go, or anything that can speak the job schema. Executors can be written
+in any language that can read/write the stdio protocol. Python remains a
+first-class runtime, but the core architecture is multi-language.
 
-## 🆕 What's New in v0.8.1
+## 🆕 What's New in v0.9
+
+- **New Architecture**: Separated worker scheduler from executor, allowing for jobs to be queued and processed from any system, not just Python
+
+## What's New in v0.8
 
 - **Distributed Tracing**: One-line integrations for Datadog, OpenTelemetry, and Logfire
 - **Trace Context Propagation**: Automatic trace context from producer to worker
-- **Prometheus & StatsD Exporters**: New metrics exporters for monitoring
-
-## What's New in v0.7
-
 - **Comprehensive CLI Tools**: 15+ new commands for monitoring, debugging, and management
 - **Real-time Monitoring Dashboard**: Interactive dashboard with `rrq monitor`
 - **Enhanced DLQ Management**: Sophisticated filtering and requeuing capabilities
-- **Bug Fixes**: Critical fix for unique job enqueue failures with proper deferral
+
+## Big Picture
+
+RRQ is split into three layers:
+
+1. **Orchestrator (Python worker)** — polls Redis, manages retries/timeouts/DLQ,
+   and routes jobs to executor pools.
+2. **Executors (stdio protocol)** — long-lived processes that execute jobs in any
+   language (Python, Rust, Go, etc.).
+3. **Producers (SDKs)** — enqueue jobs directly into Redis from any language.
+
+The orchestrator reads `rrq.toml` and does **not** import your application
+modules. Python handlers run in the Python executor runtime, not inside the
+orchestrator process.
 
 ## Requirements
 
-- Python 3.11 or higher
+- Python 3.11 or higher (for the orchestrator and Python SDK)
 - Redis 5.0 or higher
-- asyncio-compatible environment
 
 ## Key Features
 
@@ -32,7 +48,7 @@ RRQ is a Python library for creating reliable job queues using Redis and `asynci
 *   **Graceful Shutdown**: Workers listen for SIGINT/SIGTERM and attempt to finish active jobs within a grace period before exiting. Interrupted jobs are re-queued.
 *   **Worker Health Checks**: Workers periodically update a health key in Redis with a TTL, allowing monitoring systems to track active workers.
 *   **Deferred Execution**: Jobs can be scheduled to run at a future time using `_defer_by` or `_defer_until`.
-*   **Cron Jobs**: Periodic jobs can be defined in `RRQSettings.cron_jobs` using a simple cron syntax.
+*   **Cron Jobs**: Periodic jobs can be defined in `rrq.toml` (`rrq.cron_jobs`) using a simple cron syntax.
 *   **Comprehensive Monitoring**: Built-in CLI tools for monitoring queues, inspecting jobs, and debugging with real-time dashboards and beautiful table output.
 *   **Development Tools**: Debug commands for generating test data, stress testing, and cleaning up development environments.
 
@@ -51,7 +67,86 @@ RRQ is a Python library for creating reliable job queues using Redis and `asynci
 
 ## Basic Usage
 
-*(See [`rrq_example.py`](https://github.com/GetResQ/rrq/tree/master/example) in the project root for a runnable example)*
+*(See `examples/python/rrq_example.py` and `examples/rust/` for runnable examples)*
+
+## Architecture
+
+The scheduler/orchestrator is a Python worker that reads `rrq.toml` and spawns
+executor runtimes (Python stdio, Rust, etc.). Python handlers run inside the
+Python executor runtime (not inside the worker process), keeping orchestration
+and execution cleanly separated. The Python executor loads a
+`PythonExecutorSettings` object (job registry + optional startup/shutdown hooks)
+from `RRQ_EXECUTOR_SETTINGS`.
+
+```
+┌─────────────────────────┐       enqueue        ┌──────────────────────────┐
+│  Producer SDKs          │  ───────────────▶    │  Redis                   │
+│  (Python / Rust / Go)   │                      │  - queues (ZSET)         │
+└─────────────────────────┘                      │  - job hashes            │
+                                                 │  - results / DLQ         │
+                                                 └──────────┬───────────────┘
+                                                            │ poll/lock
+                                                            ▼
+                                                ┌──────────────────────────┐
+                                                │ RRQ Worker Orchestrator  │
+                                                │ (rrq worker run/watch)   │
+                                                │ - reads rrq.toml         │
+                                                │ - retries / timeouts     │
+                                                │ - cancellation / DLQ     │
+                                                │ - routing                │
+                                                └──────────┬───────────────┘
+                                                           │ stdio protocol
+                              ┌────────────────────────────┴────────────────────────────┐
+                              │                                                         │
+                              ▼                                                         ▼
+                 ┌──────────────────────────┐                              ┌──────────────────────────┐
+                 │ Python executor runtime  │                              │ Rust / Go executor       │
+                 │ (rrq executor python)    │                              │ (rrq_executor)           │
+                 │ - loads PythonExecutor   │                              │ - stdio protocol         │
+                 │   Settings + hooks       │                              │                          │
+                 └──────────┬───────────────┘                              └──────────┬───────────────┘
+                            │ ExecutionOutcome                                        │ ExecutionOutcome
+                            └─────────────────────────────────────────────────────────┘
+                                                           │
+                                                           ▼
+                                                ┌──────────────────────────┐
+                                                │ Redis (job updates)      │
+                                                └──────────────────────────┘
+```
+
+### resq-agent integration (Python handlers)
+
+`resq-agent` provides a `PythonExecutorSettings` object at
+`app.config.rrq.python_executor_settings`. This object registers all Python
+handlers and supplies optional startup/shutdown hooks (DB + RRQ client
+initialization). The worker and executor both read `rrq.toml`:
+
+- Worker/orchestrator: `rrq worker run/watch --config rrq.toml`
+- Python executor: `RRQ_EXECUTOR_SETTINGS=app.config.rrq.python_executor_settings`
+
+Reference protocol docs: `docs/EXECUTOR_PROTOCOL.md`  
+Reference implementations: `reference/python` and `reference/rust`
+
+## Examples
+
+- Python producer/consumer/perf: `examples/python/`
+- Rust producer: `examples/rust/producer`
+- Rust producer crate (reference): `reference/rust/rrq-producer`
+- Rust protocol crate (reference): `reference/rust/rrq-protocol`
+- Rust stdio executor (reference): `reference/rust/rrq-executor`
+
+### Integration Script
+
+Run the end-to-end integration script (Python-only, Rust-only, mixed):
+
+```
+uv run python examples/integration_test.py --flush --count 1000
+```
+
+Flags:
+- `--redis-dsn` (default: `redis://localhost:6379/3`)
+- `--log-interval` (seconds between progress logs)
+- `--no-build-rust` or `--rust-executor-cmd "..."` to control the Rust executor binary
 
 **1. Define Handlers:**
 
@@ -71,38 +166,61 @@ async def my_task(ctx, message: str):
     return {"result": f"Processed: {message}"}
 ```
 
-**2. Register Handlers:**
+**2. Register Handlers (Python executor):**
 
 ```python
-# main_setup.py (or wherever you initialize)
+# executor_config.py
+import os
+from pathlib import Path
+
+from rrq.config import load_toml_settings
+from rrq.executor_settings import PythonExecutorSettings
 from rrq.registry import JobRegistry
-from . import handlers # Assuming handlers.py is in the same directory
+
+from . import handlers  # Assuming handlers.py is in the same directory
 
 job_registry = JobRegistry()
 job_registry.register("process_message", handlers.my_task)
+
+# Load the same TOML config as the worker/orchestrator.
+config_path = Path(os.getenv("RRQ_EXECUTOR_CONFIG", "rrq.toml"))
+rrq_settings = load_toml_settings(str(config_path))
+
+python_executor_settings = PythonExecutorSettings(
+    rrq_settings=rrq_settings,
+    job_registry=job_registry,
+)
 ```
 
-**3. Configure Settings:**
+**3. Create `rrq.toml` (worker/orchestrator config):**
 
-```python
-# config.py
-from rrq.settings import RRQSettings
+```toml
+[rrq]
+redis_dsn = "redis://localhost:6379/1"
+default_executor_name = "python"
 
-# Loads from environment variables (RRQ_REDIS_DSN, etc.) or uses defaults
-rrq_settings = RRQSettings()
-# Or override directly:
-# rrq_settings = RRQSettings(redis_dsn="redis://localhost:6379/1")
+[rrq.executors.python]
+type = "stdio"
+cmd = ["rrq", "executor", "python", "--settings", "myapp.executor_config.python_executor_settings"]
+pool_size = 1
 ```
 
-**4. Enqueue Jobs:**
+Set `RRQ_EXECUTOR_CONFIG` if the Python executor should load a different TOML
+path than the default `rrq.toml`.
+
+If `pool_size` is omitted, RRQ defaults it to the host CPU count. The worker
+concurrency is derived from the sum of executor pool sizes at runtime.
+
+**4. Enqueue Jobs (Python producer):**
 
 ```python
 # enqueue_script.py
 import asyncio
 from rrq.client import RRQClient
-from config import rrq_settings # Import your settings
+from rrq.config import load_toml_settings
 
 async def enqueue_jobs():
+    rrq_settings = load_toml_settings("rrq.toml")
     client = RRQClient(settings=rrq_settings)
     await client.enqueue("process_message", "Hello RRQ!")
     await client.enqueue("process_message", "retry_me")
@@ -114,30 +232,59 @@ if __name__ == "__main__":
 
 **5. Run a Worker:**
 
-Note: You don't need to run a worker as the Command Line Interface `rrq` is used for
-this purpose.
-
-```python
-# worker_script.py
-import asyncio
-
-from rrq.worker import RRQWorker
-from config import rrq_settings # Import your settings
-from main_setup import job_registry # Import your registry
-
-# Create worker instance
-worker = RRQWorker(settings=rrq_settings, job_registry=job_registry)
-
-# Run the worker (blocking)
-if __name__ == "__main__":
-    asyncio.run(worker.run())
+```bash
+rrq worker run --config rrq.toml
 ```
 
-You can run multiple instances of `worker_script.py` for concurrent processing.
+The worker orchestrator will spawn the configured executor processes as needed.
+
+## Multi-runtime Executors (Python + Rust)
+
+RRQ can route jobs to non-Python executors using a prefix in the function name:
+
+```
+executor#handler
+```
+
+Example: `rust#send_email`. If no prefix is provided, RRQ uses the default
+executor (Python by default).
+Executors communicate over stdio JSON Lines (v1).
+
+**Configure executors (`rrq.toml`):**
+
+```toml
+[rrq]
+default_executor_name = "python"
+redis_dsn = "redis://localhost:6379/1"
+
+[rrq.executors.python]
+type = "stdio"
+cmd = ["rrq", "executor", "python", "--settings", "myapp.executor_config.python_executor_settings"]
+
+[rrq.executors.rust]
+type = "stdio"
+cmd = ["/opt/rrq-executor", "--stdio"]
+
+# Optional queue-based routing
+[rrq.routing]
+media = "rust"
+```
+
+**Enqueue a Rust job:**
+
+```python
+await client.enqueue("rust#send_email", user_id=123)
+```
+
+**Run the Python stdio executor (optional):**
+
+```bash
+rrq executor python --settings myapp.executor_config.python_executor_settings
+```
 
 ## Cron Jobs
 
-Add instances of `CronJob` to `RRQSettings.cron_jobs` to run periodic jobs. The
+Configure cron jobs in `rrq.toml` (`rrq.cron_jobs`) to run periodic jobs. The
 `schedule` string follows the typical five-field cron format `minute hour day-of-month month day-of-week`.
 It supports the most common features from Unix cron:
 
@@ -151,76 +298,45 @@ Jobs are evaluated in the server's timezone and run with minute resolution.
 
 ### Cron Schedule Examples
 
-```python
-# Every minute
-"* * * * *"
-
-# Every hour at minute 30
-"30 * * * *"
-
-# Every day at 2:30 AM
-"30 2 * * *"
-
-# Every Monday at 9:00 AM
-"0 9 * * mon"
-
-# Every 15 minutes
-"*/15 * * * *"
-
-# Every weekday at 6:00 PM
-"0 18 * * mon-fri"
-
-# First day of every month at midnight
-"0 0 1 * *"
-
-# Every 2 hours during business hours on weekdays
-"0 9-17/2 * * mon-fri"
+```
+* * * * *       # Every minute
+30 * * * *      # Every hour at minute 30
+30 2 * * *      # Every day at 2:30 AM
+0 9 * * mon     # Every Monday at 9:00 AM
+*/15 * * * *    # Every 15 minutes
+0 18 * * mon-fri # Every weekday at 6:00 PM
+0 0 1 * *       # First day of every month at midnight
+0 9-17/2 * * mon-fri # Every 2 hours during business hours on weekdays
 ```
 
 ### Defining Cron Jobs
 
-```python
-from rrq.settings import RRQSettings
-from rrq.cron import CronJob
+```toml
+[[rrq.cron_jobs]]
+function_name = "daily_cleanup"
+schedule = "0 2 * * *"
+args = ["temp_files"]
+kwargs = { max_age_days = 7 }
 
-# Define your cron jobs
-cron_jobs = [
-    # Daily cleanup at 2 AM
-    CronJob(
-        function_name="daily_cleanup",
-        schedule="0 2 * * *",
-        args=["temp_files"],
-        kwargs={"max_age_days": 7}
-    ),
+[[rrq.cron_jobs]]
+function_name = "generate_weekly_report"
+schedule = "0 9 * * mon"
+unique = true
 
-    # Weekly report every Monday at 9 AM
-    CronJob(
-        function_name="generate_weekly_report",
-        schedule="0 9 * * mon",
-        unique=True  # Prevent duplicate reports if worker restarts
-    ),
+[[rrq.cron_jobs]]
+function_name = "system_health_check"
+schedule = "*/15 * * * *"
+queue_name = "monitoring"
 
-    # Health check every 15 minutes on a specific queue
-    CronJob(
-        function_name="system_health_check",
-        schedule="*/15 * * * *",
-        queue_name="monitoring"
-    ),
-
-    # Backup database every night at 1 AM
-    CronJob(
-        function_name="backup_database",
-        schedule="0 1 * * *",
-        kwargs={"backup_type": "incremental"}
-    ),
-]
-
-# Add to your settings
-rrq_settings = RRQSettings(
-    redis_dsn="redis://localhost:6379/0",
-    cron_jobs=cron_jobs
-)
+[[rrq.cron_jobs]]
+function_name = "backup_database"
+schedule = "0 1 * * *"
+kwargs = { backup_type = "incremental" }
 ```
+
+If you embed RRQ programmatically, you can also build `CronJob` objects and
+pass them into `RRQSettings`, but the TOML file is the source of truth for the
+worker/orchestrator.
 
 ### Cron Job Handlers
 
@@ -243,13 +359,16 @@ async def generate_weekly_report(ctx):
 
 # Register your handlers
 from rrq.registry import JobRegistry
+from rrq.executor_settings import PythonExecutorSettings
 
 job_registry = JobRegistry()
 job_registry.register("daily_cleanup", daily_cleanup)
 job_registry.register("generate_weekly_report", generate_weekly_report)
 
-# Add the registry to your settings
-rrq_settings.job_registry = job_registry
+python_executor_settings = PythonExecutorSettings(
+    rrq_settings=rrq_settings,
+    job_registry=job_registry,
+)
 ```
 
 **Note:** Cron jobs are automatically enqueued by the worker when they become due. The worker checks for due cron jobs every 30 seconds and enqueues them as regular jobs to be processed.
@@ -317,17 +436,20 @@ RRQ provides a comprehensive command-line interface (CLI) for managing workers, 
 # Use default settings (localhost Redis)
 rrq queue list
 
-# Use custom settings
-rrq queue list --settings myapp.config.rrq_settings
+# Use custom config
+rrq queue list --config rrq.toml
 
 # Use environment variable
-export RRQ_SETTINGS=myapp.config.rrq_settings
+export RRQ_CONFIG=rrq.toml
 rrq monitor
 
 # Debug workflow
 rrq debug generate-jobs --count 100 --queue urgent
 rrq queue inspect urgent --limit 10
 rrq monitor --queues urgent --refresh 0.5
+
+# Run Python stdio executor (optional)
+rrq executor python --settings myapp.executor_config.python_executor_settings
 
 # DLQ management workflow
 rrq dlq list --queue urgent --limit 10      # List failed jobs from urgent queue
@@ -400,21 +522,36 @@ The current implementation prioritizes operational simplicity and immediate visi
 
 ## Configuration
 
-RRQ can be configured in several ways, with the following precedence:
+### Worker / Orchestrator (TOML)
 
-1. **Command-Line Argument (`--settings`)**: Directly specify the settings object path via the CLI. This takes the highest precedence.
-2. **Environment Variable (`RRQ_SETTINGS`)**: Set the `RRQ_SETTINGS` environment variable to point to your settings object path. Used if `--settings` is not provided.
-3. **Default Settings**: If neither of the above is provided, RRQ will instantiate a default `RRQSettings` object, which can still be influenced by environment variables starting with `RRQ_`.
-4. **Environment Variables (Prefix `RRQ_`)**: Individual settings can be overridden by environment variables starting with `RRQ_`, which are automatically picked up by the `RRQSettings` object.
-5. **.env File**: If `python-dotenv` is installed, RRQ will attempt to load a `.env` file from the current working directory or parent directories. System environment variables take precedence over `.env` variables.
+RRQ workers load configuration from TOML with the following precedence:
 
-**Important Note on `job_registry`**: The `job_registry` attribute in your `RRQSettings` object is **critical** for RRQ to function. It must be an instance of `JobRegistry` and is used to register job handlers. Without a properly configured `job_registry`, workers will not know how to process jobs, and most operations will fail. Ensure it is set in your settings object to map job names to their respective handler functions.
+1. **Command-Line Argument (`--config`)**: Directly specify the TOML path.
+2. **Environment Variable (`RRQ_CONFIG`)**: Path to the TOML file.
+3. **`rrq.toml` in the current working directory**.
+
+If `python-dotenv` is installed, `.env` files are loaded to populate environment
+variables (system env vars take precedence).
+
+### Python Executor Runtime
+
+The Python executor runtime loads a `PythonExecutorSettings` object that includes
+the `JobRegistry` and the `RRQSettings` loaded from TOML:
+
+```
+rrq executor python --settings myapp.executor_config.python_executor_settings
+```
+
+You can also set `RRQ_EXECUTOR_SETTINGS` to that object path. The executor will
+read `RRQ_EXECUTOR_CONFIG` (or `rrq.toml` by default) to load the same settings
+as the orchestrator.
 
 ## Telemetry (Datadog / OTEL / Logfire)
 
-RRQ supports optional distributed tracing for enqueue and job execution. Enable the
-integration in both the producer and worker processes to get end-to-end traces
-across the Redis queue.
+RRQ supports optional distributed tracing for enqueue, orchestration, and executor
+runtime spans. Enable the integration in the producer, worker, and executor
+processes to get end-to-end traces across the Redis queue. The Python executor
+automatically emits `rrq.executor` spans when telemetry is enabled.
 
 ### Datadog (ddtrace)
 
@@ -426,6 +563,19 @@ enable_rrq_ddtrace(service="myapp-rrq")
 
 This only instruments RRQ spans + propagation; it does **not** call
 `ddtrace.patch_all()`. Configure `ddtrace` in your app as you already do.
+
+#### Datadog + Rust executors (cross-language)
+
+The Rust reference executor only extracts **W3C** `traceparent`/`tracestate`.
+If your Python producer uses Datadog-only propagation, Rust spans will **not**
+join the original trace. You have a few options:
+
+- Standardize on W3C propagation end-to-end (e.g., use the RRQ OTEL integration
+  in Python and point your OTLP exporter at Datadog).
+- Configure your Datadog setup to emit W3C headers for propagation (if your
+  Datadog version supports it).
+- Extend the Rust executor to extract Datadog headers instead of (or in
+  addition to) W3C.
 
 ### Logfire
 
@@ -444,6 +594,36 @@ from rrq.integrations.otel import enable as enable_rrq_otel
 
 enable_rrq_otel(service_name="myapp-rrq")
 ```
+
+Common OTEL env vars:
+
+```
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+OTEL_SERVICE_NAME=myapp-rrq
+```
+
+### Rust executor (OpenTelemetry)
+
+The Rust reference executor supports OTEL spans when built with the `otel`
+feature. It will use `trace_context` from RRQ (W3C `traceparent`/`tracestate`)
+as the parent context.
+
+```
+cd reference/rust/rrq-executor
+cargo run --example stdio_executor --features otel
+```
+
+Set your OTLP endpoint via standard env vars (for example
+`OTEL_EXPORTER_OTLP_ENDPOINT`).
+
+### Propagation compatibility
+
+Cross-language tracing requires the same propagation format everywhere.
+The Rust reference executor extracts **W3C** `traceparent`/`tracestate`.
+If your producer uses Datadog-only propagation, Rust spans will not join the
+parent trace. For full end-to-end traces across Python and Rust, standardize on
+W3C (e.g., use the RRQ OTEL integration in Python).
 
 ### Comprehensive CLI Command System
 - **New modular CLI architecture** with dedicated command modules for better organization
@@ -490,9 +670,11 @@ enable_rrq_otel(service_name="myapp-rrq")
 
 ## Core Components
 
-*   **`RRQClient` (`client.py`)**: Used to enqueue jobs onto specific queues. Supports deferring jobs (by time delta or specific datetime), assigning custom job IDs, and enforcing job uniqueness via keys.
-*   **`RRQWorker` (`worker.py`)**: The process that polls queues, fetches jobs, executes the corresponding handler functions, and manages the job lifecycle based on success, failure, retries, or timeouts. Handles graceful shutdown via signals (SIGINT, SIGTERM).
-*   **`JobRegistry` (`registry.py`)**: A simple registry to map string function names (used when enqueuing) to the actual asynchronous handler functions the worker should execute.
-*   **`JobStore` (`store.py`)**: An abstraction layer handling all direct interactions with Redis. It manages job definitions (Hashes), queues (Sorted Sets), processing locks (Strings with TTL), unique job locks, and worker health checks.
-*   **`Job` (`job.py`)**: A Pydantic model representing a job, containing its ID, handler name, arguments, status, retry counts, timestamps, results, etc.
-*   **`JobStatus` (`job.py`)**: An Enum defining the possible states of a job (`PENDING`, `ACTIVE`, `COMPLETED`, `FAILED`, `DEFERRED`). `
+*   **`RRQClient` (`client.py`)**: Enqueues jobs onto queues. Supports deferral, custom IDs, and unique keys.
+*   **`RRQWorker` (`worker.py`)**: Orchestrator that polls queues, enforces retries/timeouts/DLQ, and routes jobs to executors. Handles graceful shutdown via signals (SIGINT, SIGTERM).
+*   **`StdioExecutor` (`executor.py`)**: Communicates with external runtimes (Python/Rust/Go) over the stdio protocol.
+*   **`PythonExecutor` (`executor.py`)**: Executes Python handlers using a `JobRegistry` inside the Python executor runtime.
+*   **`JobRegistry` (`registry.py`)**: Maps handler names to Python callables for the Python executor runtime.
+*   **`JobStore` (`store.py`)**: Redis access layer for job hashes, queues, locks, DLQ, and worker health.
+*   **`Job` (`job.py`)**: Pydantic model for job data (IDs, args, status, retries, timestamps).
+*   **`JobStatus` (`job.py`)**: Job states (`PENDING`, `ACTIVE`, `COMPLETED`, `FAILED`, `RETRYING`, `CANCELLED`).

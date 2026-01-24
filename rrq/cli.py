@@ -1,25 +1,26 @@
 """RRQ: Reliable Redis Queue Command Line Interface"""
 
 import asyncio
-import importlib
 import logging
 import os
 import signal
 import subprocess
 import sys
-import time
+from typing import cast
+from fnmatch import fnmatch
 
 # import multiprocessing # No longer needed directly, os.cpu_count() is sufficient
 from contextlib import suppress
 
 import click
 import redis.exceptions
-from watchfiles import awatch
+from watchfiles import DefaultFilter, awatch
 
 from .constants import HEALTH_KEY_PREFIX
-from .settings import RRQSettings
+from .config import load_toml_settings, resolve_config_source
 from .store import JobStore
 from .worker import RRQWorker
+from .executor import build_executors_from_settings, resolve_executor_pool_sizes
 
 # Attempt to import dotenv components for .env file loading
 try:
@@ -32,94 +33,26 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-# Helper to load settings for commands
-def _resolve_settings_source(
-    settings_object_path: str | None = None,
-) -> tuple[str | None, str]:
-    """Resolve the settings path and its source.
-
-    Returns:
-        A tuple of (settings_path, source_description)
-    """
-    if settings_object_path is not None:
-        return settings_object_path, "--settings parameter"
-
-    env_setting = os.getenv("RRQ_SETTINGS")
-    if env_setting is not None:
-        # Check if a .env file exists to give more specific info
-        if DOTENV_AVAILABLE and find_dotenv(usecwd=True):
-            # We can't definitively know if it came from .env or system env,
-            # but we can indicate both are possible
-            return env_setting, "RRQ_SETTINGS env var (system or .env)"
-        return env_setting, "RRQ_SETTINGS env var"
-
-    return None, "built-in defaults"
-
-
-def _load_app_settings(settings_object_path: str | None = None) -> RRQSettings:
-    """Load the settings object from the given path.
-    If not provided, the RRQ_SETTINGS environment variable will be used.
-    If the environment variable is not set, will create a default settings object.
-    RRQ Setting objects, automatically pick up ENVIRONMENT variables starting with RRQ_.
-
-    This function will also attempt to load a .env file if python-dotenv is installed
-    and a .env file is found. System environment variables take precedence over .env variables.
-
-    Args:
-        settings_object_path: A string representing the path to the settings object. (e.g. "myapp.worker_config.rrq_settings").
-
-    Returns:
-        The RRQSettings object.
-    """
+def _load_toml_settings(config_path: str | None = None):
     if DOTENV_AVAILABLE:
         dotenv_path = find_dotenv(usecwd=True)
         if dotenv_path:
             logger.debug(f"Loading .env file at: {dotenv_path}...")
             load_dotenv(dotenv_path=dotenv_path, override=False)
-
     try:
-        if settings_object_path is None:
-            settings_object_path = os.getenv("RRQ_SETTINGS")
-
-        if settings_object_path is None:
-            return RRQSettings()
-
-        # Split into module path and object name
-        parts = settings_object_path.split(".")
-        settings_object_name = parts[-1]
-        settings_object_module_path = ".".join(parts[:-1])
-
-        # Import the module
-        settings_object_module = importlib.import_module(settings_object_module_path)
-
-        # Get the object
-        settings_object = getattr(settings_object_module, settings_object_name)
-
-        return settings_object
-    except ImportError:
+        return load_toml_settings(config_path)
+    except Exception as exc:
         click.echo(
-            click.style(
-                f"ERROR: Could not import settings object '{settings_object_path}'. Make sure it is in PYTHONPATH.",
-                fg="red",
-            ),
-            err=True,
-        )
-        sys.exit(1)
-    except Exception as e:
-        click.echo(
-            click.style(
-                f"ERROR: Unexpected error processing settings object '{settings_object_path}': {e}",
-                fg="red",
-            ),
+            click.style(f"ERROR: {exc}", fg="red"),
             err=True,
         )
         sys.exit(1)
 
 
 # --- Health Check ---
-async def check_health_async_impl(settings_object_path: str | None = None) -> bool:
+async def check_health_async_impl(config_path: str | None = None) -> bool:
     """Performs health check for RRQ workers."""
-    rrq_settings = _load_app_settings(settings_object_path)
+    rrq_settings = _load_toml_settings(config_path)
 
     logger.info("Performing RRQ worker health check...")
     job_store = None
@@ -200,14 +133,17 @@ async def check_health_async_impl(settings_object_path: str | None = None) -> bo
 # --- Process Management ---
 def start_rrq_worker_subprocess(
     is_detached: bool = False,
-    settings_object_path: str | None = None,
+    config_path: str | None = None,
     queues: list[str] | None = None,
+    watch_mode: bool = False,
 ) -> subprocess.Popen | None:
     """Start an RRQ worker process, optionally for specific queues."""
-    command = ["rrq", "worker", "run", "--num-workers", "1"]
+    command = ["rrq", "worker", "run"]
+    if watch_mode:
+        command.append("--watch-mode")
 
-    if settings_object_path:
-        command.extend(["--settings", settings_object_path])
+    if config_path:
+        command.extend(["--config", config_path])
 
     # Add queue filters if specified
     if queues:
@@ -215,6 +151,7 @@ def start_rrq_worker_subprocess(
             command.extend(["--queue", q])
 
     logger.info(f"Starting worker subprocess with command: {' '.join(command)}")
+    env = os.environ.copy()
     if is_detached:
         process = subprocess.Popen(
             command,
@@ -222,6 +159,7 @@ def start_rrq_worker_subprocess(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
+            env=env,
         )
         logger.info(f"RRQ worker started in background with PID: {process.pid}")
     else:
@@ -230,6 +168,7 @@ def start_rrq_worker_subprocess(
             start_new_session=True,
             stdout=sys.stdout,
             stderr=sys.stderr,
+            env=env,
         )
 
     return process
@@ -277,8 +216,10 @@ def terminate_worker_process(
 
 async def watch_rrq_worker_impl(
     watch_path: str,
-    settings_object_path: str | None = None,
+    config_path: str | None = None,
     queues: list[str] | None = None,
+    include_patterns: list[str] | None = None,
+    ignore_patterns: list[str] | None = None,
 ) -> None:
     abs_watch_path = os.path.abspath(watch_path)
     click.echo(f"Watching for file changes in {abs_watch_path}...")
@@ -286,14 +227,11 @@ async def watch_rrq_worker_impl(
     # Load settings and display source
     click.echo("Loading RRQ Settings... ", nl=False)
 
-    if settings_object_path:
-        click.echo(f"from --settings parameter ({settings_object_path}).")
-    elif os.getenv("RRQ_SETTINGS"):
-        click.echo(f"from RRQ_SETTINGS env var ({os.getenv('RRQ_SETTINGS')}).")
-    elif DOTENV_AVAILABLE and find_dotenv(usecwd=True):
-        click.echo("found in .env file.")
+    config_path, source = resolve_config_source(config_path)
+    if config_path is None:
+        click.echo("missing RRQ config (provide --config or RRQ_CONFIG).")
     else:
-        click.echo("using defaults.")
+        click.echo(f"from {source} ({config_path}).")
     worker_process: subprocess.Popen | None = None
     loop = asyncio.get_event_loop()
     shutdown_event = asyncio.Event()
@@ -309,13 +247,42 @@ async def watch_rrq_worker_impl(
     signal.signal(signal.SIGINT, sig_handler)
     signal.signal(signal.SIGTERM, sig_handler)
 
+    default_filter = DefaultFilter()
+    default_watch_patterns = ["*.py", "*.toml"]
+    if include_patterns is None:
+        include_patterns = default_watch_patterns
+    ignore_patterns = ignore_patterns or []
+
+    def matches_pattern(path_value: str, patterns: list[str]) -> bool:
+        if not patterns:
+            return False
+        normalized = path_value.replace(os.sep, "/")
+        base_name = os.path.basename(normalized)
+        return any(
+            fnmatch(normalized, pattern) or fnmatch(base_name, pattern)
+            for pattern in patterns
+        )
+
+    def watch_filter(change, path: str) -> bool:  # type: ignore[no-untyped-def]
+        if not default_filter(change, path):
+            return False
+        rel_path = cast(str, os.path.relpath(os.fsdecode(path), abs_watch_path))
+        if ignore_patterns and matches_pattern(rel_path, ignore_patterns):
+            return False
+        if include_patterns:
+            return matches_pattern(rel_path, include_patterns)
+        return True
+
     try:
         worker_process = start_rrq_worker_subprocess(
             is_detached=False,
-            settings_object_path=settings_object_path,
+            config_path=config_path,
             queues=queues,
+            watch_mode=True,
         )
-        async for changes in awatch(abs_watch_path, stop_event=shutdown_event):
+        async for changes in awatch(
+            abs_watch_path, stop_event=shutdown_event, watch_filter=watch_filter
+        ):
             if shutdown_event.is_set():
                 break
             if not changes:
@@ -329,8 +296,9 @@ async def watch_rrq_worker_impl(
                 break
             worker_process = start_rrq_worker_subprocess(
                 is_detached=False,
-                settings_object_path=settings_object_path,
+                config_path=config_path,
                 queues=queues,
+                watch_mode=True,
             )
     except Exception as e:
         click.echo(
@@ -357,8 +325,7 @@ def rrq():
     """RRQ: Reliable Redis Queue Command Line Interface.
 
     Provides tools for running RRQ workers, checking system health,
-    and managing jobs. Requires an application-specific settings object
-    for most operations.
+    and managing jobs. Requires an RRQ TOML config for most operations.
     """
     pass
 
@@ -401,6 +368,32 @@ def worker_cli():
     pass
 
 
+@rrq.group("executor")
+def executor_cli():
+    """Run RRQ executor runtimes."""
+    pass
+
+
+@executor_cli.command("python")
+@click.option(
+    "--settings",
+    "settings_object_path",
+    type=str,
+    required=False,
+    default=None,
+    help=(
+        "Python executor settings object path "
+        "(e.g., myapp.worker_config.python_executor_settings). "
+        "Alternatively, this can be specified as RRQ_EXECUTOR_SETTINGS env variable."
+    ),
+)
+def executor_python_command(settings_object_path: str) -> None:
+    """Run the Python stdio executor runtime."""
+    from .executor_runtime import run_python_executor
+
+    asyncio.run(run_python_executor(settings_object_path))
+
+
 @worker_cli.command("run")
 @click.option(
     "--burst",
@@ -415,115 +408,72 @@ def worker_cli():
     help="Queue(s) to poll. Defaults to settings.default_queue_name.",
 )
 @click.option(
-    "--settings",
-    "settings_object_path",
+    "--config",
+    "config_path",
     type=str,
     required=False,
     default=None,
     help=(
-        "Python settings path for application worker settings "
-        "(e.g., myapp.worker_config.rrq_settings). "
-        "Alternatively, this can be specified as RRQ_SETTINGS env variable. "
-        "The specified settings object must include a `job_registry: JobRegistry`."
+        "Path to RRQ TOML config (e.g., rrq.toml). "
+        "Alternatively, this can be specified as RRQ_CONFIG env variable."
     ),
 )
 @click.option(
-    "--num-workers",
-    type=int,
-    default=None,
-    help="Number of parallel worker processes to start. Defaults to the number of CPU cores.",
+    "--watch-mode",
+    is_flag=True,
+    hidden=True,
+    help="Internal flag used by the watch command to cap executor pool sizes.",
 )
 def worker_run_command(
     burst: bool,
     queues: tuple[str, ...],
-    settings_object_path: str,
-    num_workers: int | None,
+    config_path: str | None,
+    watch_mode: bool,
 ):
-    """Run RRQ worker processes.
-    Requires an application-specific settings object.
+    """Run an RRQ worker process.
+    Requires an RRQ TOML config.
     """
-    if num_workers is None:
-        num_workers = (
-            os.cpu_count() or 1
-        )  # Default to CPU cores, or 1 if cpu_count() is None
-        click.echo(
-            f"No --num-workers specified, defaulting to {num_workers} (CPU cores)."
-        )
-    elif num_workers <= 0:
-        click.echo(
-            click.style("ERROR: --num-workers must be a positive integer.", fg="red"),
-            err=True,
-        )
-        sys.exit(1)
-
-    # Restrict burst mode with multiple workers
-    if num_workers > 1 and burst:
-        click.echo(
-            click.style(
-                "ERROR: --burst mode is not supported with multiple workers (--num-workers > 1). "
-                "Burst mode cannot coordinate across multiple processes.",
-                fg="red",
-            ),
-            err=True,
-        )
-        sys.exit(1)
-
     # Display settings source
     click.echo("Loading RRQ Settings... ", nl=False)
-    if settings_object_path:
-        click.echo(f"from --settings parameter ({settings_object_path}).")
-    elif os.getenv("RRQ_SETTINGS"):
-        click.echo(f"from RRQ_SETTINGS env var ({os.getenv('RRQ_SETTINGS')}).")
-    elif DOTENV_AVAILABLE and find_dotenv(usecwd=True):
-        click.echo("found in .env file.")
+    resolved_path, source = resolve_config_source(config_path)
+    if resolved_path is None:
+        click.echo("missing RRQ config (provide --config or RRQ_CONFIG).")
     else:
-        click.echo("using defaults.")
-
-    if num_workers == 1:
-        # Run a single worker in the current process
-        click.echo(f"Starting 1 RRQ worker process (Burst: {burst})")
-        _run_single_worker(
-            burst, list(queues) if queues else None, settings_object_path
-        )
-    else:
-        # Run multiple worker subprocesses
-        click.echo(f"Starting {num_workers} RRQ worker processes")
-        # Burst is guaranteed to be False here
-        _run_multiple_workers(
-            num_workers, list(queues) if queues else None, settings_object_path
-        )
+        click.echo(f"from {source} ({resolved_path}).")
+    click.echo(f"Starting 1 RRQ worker process (Burst: {burst})")
+    _run_single_worker(
+        burst,
+        list(queues) if queues else None,
+        resolved_path,
+        watch_mode=watch_mode,
+    )
 
 
 def _run_single_worker(
     burst: bool,
     queues_arg: list[str] | None,
-    settings_object_path: str | None,
+    config_path: str | None,
+    *,
+    watch_mode: bool = False,
 ):
     """Helper function to run a single RRQ worker instance."""
-    rrq_settings = _load_app_settings(settings_object_path)
-
-    job_registry = rrq_settings.job_registry
-    if job_registry is None:
-        click.echo(
-            click.style(
-                "ERROR: No 'job_registry'. You must provide a JobRegistry instance in settings.",
-                fg="red",
-            ),
-            err=True,
-        )
-        sys.exit(1)
-    assert job_registry is not None
-
-    logger.debug(
-        f"Registered handlers (from effective registry): {job_registry.get_registered_functions()}"
+    rrq_settings = _load_toml_settings(config_path)
+    pool_sizes = resolve_executor_pool_sizes(rrq_settings, watch_mode=watch_mode)
+    effective_concurrency = max(1, sum(pool_sizes.values()))
+    rrq_settings = rrq_settings.model_copy(
+        update={"worker_concurrency": effective_concurrency}
     )
     logger.debug(f"Effective RRQ settings for worker: {rrq_settings}")
 
+    executors = build_executors_from_settings(
+        rrq_settings,
+        pool_sizes=pool_sizes,
+    )
     worker_instance = RRQWorker(
         settings=rrq_settings,
-        job_registry=job_registry,
         queues=queues_arg,
         burst=burst,
+        executors=executors,
     )
 
     try:
@@ -543,170 +493,6 @@ def _run_single_worker(
         logger.info("RRQ Worker has shut down.")
 
 
-def _run_multiple_workers(
-    num_workers: int,
-    queues: list[str] | None,
-    settings_object_path: str | None,
-):
-    """Manages multiple worker subprocesses."""
-    processes: list[subprocess.Popen] = []
-    # loop = asyncio.get_event_loop() # Not needed here, this function is synchronous
-
-    original_sigint_handler = signal.getsignal(signal.SIGINT)
-    original_sigterm_handler = signal.getsignal(signal.SIGTERM)
-
-    def sig_handler(signum, frame):
-        click.echo(
-            f"\nSignal {signal.Signals(signum).name} received. Terminating child workers..."
-        )
-        # Send SIGTERM to all processes
-        for i, p in enumerate(processes):
-            if p.poll() is None:  # Process is still running
-                try:
-                    pgid = os.getpgid(p.pid)
-                    click.echo(f"Sending SIGTERM to worker {i + 1} (PID {p.pid})...")
-                    os.killpg(pgid, signal.SIGTERM)
-                except (ProcessLookupError, OSError):
-                    pass  # Process already dead
-        # Restore original handlers before exiting or re-raising
-        signal.signal(signal.SIGINT, original_sigint_handler)
-        signal.signal(signal.SIGTERM, original_sigterm_handler)
-        # Propagate signal to ensure parent exits if it was, e.g., a Ctrl+C
-        # This is a bit tricky; for now, just exit.
-        # A more robust way might involve re-raising the signal if not handled by click/asyncio.
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, sig_handler)
-    signal.signal(signal.SIGTERM, sig_handler)
-
-    try:
-        for i in range(num_workers):
-            # Construct the command for the subprocess.
-            # Each subprocess runs 'rrq worker run' for a single worker.
-            # We pass along relevant flags like --settings, --queue, and --burst.
-            # Crucially, we do *not* pass --num-workers to the child,
-            # or rather, we could conceptually pass --num-workers 1.
-            # Use the rrq executable from the same venv
-            venv_bin_dir = os.path.dirname(sys.executable)
-            rrq_executable = os.path.join(venv_bin_dir, "rrq")
-            cmd = [rrq_executable, "worker", "run", "--num-workers=1"]
-            if settings_object_path:
-                cmd.extend(["--settings", settings_object_path])
-            elif os.getenv("RRQ_SETTINGS"):
-                # Pass the RRQ_SETTINGS env var as explicit parameter to subprocess
-                cmd.extend(["--settings", os.getenv("RRQ_SETTINGS")])
-            else:
-                # Error: No settings provided for multi-worker mode
-                click.echo(
-                    "Error: Multi-worker mode requires explicit settings. "
-                    "Please provide either --settings option or set RRQ_SETTINGS environment variable.",
-                    err=True,
-                )
-                sys.exit(1)
-            if queues:
-                for q_name in queues:
-                    cmd.extend(["--queue", q_name])
-            click.echo(f"Starting worker subprocess {i + 1}/{num_workers}...")
-
-            # Set up environment - add current directory to PYTHONPATH
-            env = os.environ.copy()
-            current_pythonpath = env.get("PYTHONPATH", "")
-            current_dir = os.getcwd()
-            if current_pythonpath:
-                env["PYTHONPATH"] = f"{current_dir}:{current_pythonpath}"
-            else:
-                env["PYTHONPATH"] = current_dir
-
-            # Configure output redirection
-            is_testing = "PYTEST_CURRENT_TEST" in os.environ
-            stdout_dest = None if not is_testing else subprocess.DEVNULL
-            stderr_dest = None if not is_testing else subprocess.DEVNULL
-
-            process = subprocess.Popen(
-                cmd,
-                start_new_session=True,
-                stdout=stdout_dest,
-                stderr=stderr_dest,
-                cwd=os.getcwd(),
-                env=env,
-            )
-            processes.append(process)
-            click.echo(f"Worker subprocess {i + 1} started with PID {process.pid}")
-
-        # Wait for all processes to complete
-        click.echo(f"All {num_workers} workers started. Press Ctrl+C to stop.")
-        exit_codes = []
-
-        try:
-            for p in processes:
-                exit_code = p.wait()
-                exit_codes.append(exit_code)
-        except KeyboardInterrupt:
-            # Signal handler has already sent SIGTERM, now wait with timeout
-            max_wait = 10
-            check_interval = 0.1
-            elapsed = 0
-
-            while elapsed < max_wait:
-                time.sleep(check_interval)
-                elapsed += check_interval
-
-                # Check if all processes have terminated
-                all_terminated = all(p.poll() is not None for p in processes)
-                if all_terminated:
-                    click.echo("All workers terminated gracefully.")
-                    break
-            else:
-                # Timeout reached, force kill remaining processes
-                for i, p in enumerate(processes):
-                    if p.poll() is None:
-                        try:
-                            click.echo(
-                                click.style(
-                                    f"WARNING: Worker {i + 1} did not terminate gracefully, sending SIGKILL.",
-                                    fg="yellow",
-                                ),
-                                err=True,
-                            )
-                            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-                        except (ProcessLookupError, OSError):
-                            pass
-
-            # Collect exit codes
-            for p in processes:
-                exit_codes.append(p.wait())
-
-        # Report results
-        for i, exit_code in enumerate(exit_codes):
-            click.echo(f"Worker subprocess {i + 1} exited with code {exit_code}")
-            if exit_code != 0:
-                click.echo(
-                    click.style(
-                        f"Worker subprocess {i + 1} failed with exit code {exit_code}",
-                        fg="red",
-                    ),
-                    err=True,
-                )
-
-    except Exception as e:
-        click.echo(
-            click.style(f"ERROR: Error managing worker subprocesses: {e}", fg="red"),
-            err=True,
-        )
-        # Terminate any running processes if an error occurs in the manager
-        for p in processes:
-            if p.poll() is None:  # If process is still running
-                terminate_worker_process(p, logger)
-    finally:
-        logger.info("All worker subprocesses terminated or completed.")
-        # Restore original signal handlers
-        signal.signal(signal.SIGINT, original_sigint_handler)
-        signal.signal(signal.SIGTERM, original_sigterm_handler)
-        # Any other cleanup for the parent process
-        # No loop to check or close here as this part is synchronous
-        logger.info("Parent process for multi-worker management is exiting.")
-
-
 @worker_cli.command("watch")
 @click.option(
     "--path",
@@ -716,15 +502,14 @@ def _run_multiple_workers(
     show_default=True,
 )
 @click.option(
-    "--settings",
-    "settings_object_path",
+    "--config",
+    "config_path",
     type=str,
     required=False,
     default=None,
     help=(
-        "Python settings path for application worker settings "
-        "(e.g., myapp.worker_config.rrq_settings). "
-        "The specified settings object must define a `job_registry: JobRegistry`."
+        "Path to RRQ TOML config (e.g., rrq.toml). "
+        "Alternatively, this can be specified as RRQ_CONFIG env variable."
     ),
 )
 @click.option(
@@ -734,20 +519,44 @@ def _run_multiple_workers(
     multiple=True,
     help="Queue(s) to poll when restarting worker. Defaults to settings.default_queue_name.",
 )
+@click.option(
+    "--pattern",
+    "include_patterns",
+    type=str,
+    multiple=True,
+    help=(
+        "Glob pattern(s) to include when watching for changes "
+        "(e.g., '*.py'). Defaults to '*.py' and '*.toml'."
+    ),
+)
+@click.option(
+    "--ignore-pattern",
+    "ignore_patterns",
+    type=str,
+    multiple=True,
+    help="Glob pattern(s) to ignore when watching for changes (e.g., '*.md').",
+)
 def worker_watch_command(
     path: str,
-    settings_object_path: str,
+    config_path: str | None,
     queues: tuple[str, ...],
+    include_patterns: tuple[str, ...],
+    ignore_patterns: tuple[str, ...],
 ):
     """Run the RRQ worker with auto-restart on file changes in PATH.
-    Requires an application-specific settings object.
+    Requires an RRQ TOML config.
     """
     # Run watch with optional queue filters
+    include_list = list(include_patterns) if include_patterns else None
+    ignore_list = list(ignore_patterns) if ignore_patterns else None
+
     asyncio.run(
         watch_rrq_worker_impl(
             path,
-            settings_object_path=settings_object_path,
+            config_path=config_path,
             queues=list(queues) if queues else None,
+            include_patterns=include_list,
+            ignore_patterns=ignore_list,
         )
     )
 
@@ -757,25 +566,22 @@ def worker_watch_command(
 
 @rrq.command("check")
 @click.option(
-    "--settings",
-    "settings_object_path",
+    "--config",
+    "config_path",
     type=str,
     required=False,
     default=None,
     help=(
-        "Python settings path for application worker settings "
-        "(e.g., myapp.worker_config.rrq_settings). "
-        "Must include `job_registry: JobRegistry` to identify workers."
+        "Path to RRQ TOML config (e.g., rrq.toml). "
+        "Alternatively, this can be specified as RRQ_CONFIG env variable."
     ),
 )
-def check_command(settings_object_path: str):
+def check_command(config_path: str | None):
     """Perform a health check on active RRQ worker(s).
-    Requires an application-specific settings object.
+    Requires an RRQ TOML config.
     """
     click.echo("Performing RRQ health check...")
-    healthy = asyncio.run(
-        check_health_async_impl(settings_object_path=settings_object_path)
-    )
+    healthy = asyncio.run(check_health_async_impl(config_path=config_path))
     if healthy:
         click.echo(click.style("Health check PASSED.", fg="green"))
     else:

@@ -357,7 +357,7 @@ class TestDLQMonitoringCommands:
         # This would normally run the dashboard but we're mocking Live
         # The important thing is that it should create a Dashboard with DLQ functionality
         with patch(
-            "rrq.cli_commands.commands.monitor.load_app_settings"
+            "rrq.cli_commands.commands.monitor.load_rrq_settings"
         ) as mock_load_settings:
             mock_load_settings.return_value = mock_settings
 

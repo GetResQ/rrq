@@ -2,7 +2,7 @@ import asyncio
 import time  # Import time for checking retry score
 from contextlib import suppress
 from datetime import timezone, datetime, timedelta
-from typing import Any, AsyncGenerator  # Added Callable
+from typing import Any, AsyncGenerator, Generator  # Added Callable
 
 import pytest
 import pytest_asyncio
@@ -15,10 +15,10 @@ from rrq.constants import (
 from rrq.cron import CronJob
 from rrq.exc import RetryJob
 from rrq.job import Job, JobStatus
-from rrq.registry import JobRegistry
 from rrq.settings import RRQSettings
 from rrq.store import JobStore
 from rrq.worker import RRQWorker
+from rrq.executor import ExecutionOutcome, ExecutionRequest, Executor
 
 # --- Test Job Handlers ---
 job_results: dict[str, Any] = {}
@@ -117,6 +117,73 @@ async def long_sleep_handler(ctx, *args, **kwargs):
 # --- End Test Job Handlers ---
 
 
+# --- Executor Helpers ---
+
+
+class InProcessExecutor(Executor):
+    def __init__(
+        self,
+        handlers: dict[str, Any],
+        *,
+        settings: RRQSettings,
+        client: RRQClient | None = None,
+        worker_id: str | None = None,
+    ) -> None:
+        self.handlers = handlers
+        self.settings = settings
+        self.client = client
+        self.worker_id = worker_id
+        self.requests: list[ExecutionRequest] = []
+
+    async def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
+        self.requests.append(request)
+        handler = self.handlers.get(request.function_name)
+        if handler is None:
+            return ExecutionOutcome(
+                status="error",
+                error_message=(
+                    f"No handler registered for function '{request.function_name}'"
+                ),
+                error_type="handler_not_found",
+            )
+
+        context = {
+            "job_id": request.context.job_id,
+            "job_try": request.context.attempt,
+            "enqueue_time": request.context.enqueue_time,
+            "settings": self.settings,
+            "worker_id": self.worker_id,
+            "queue_name": request.context.queue_name,
+            "rrq_client": self.client,
+        }
+
+        try:
+            result = await handler(context, *request.args, **request.kwargs)
+            return ExecutionOutcome(status="success", result=result)
+        except RetryJob as exc:
+            return ExecutionOutcome(
+                status="retry",
+                error_message=str(exc) or None,
+                retry_after_seconds=exc.defer_seconds,
+            )
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            return ExecutionOutcome(
+                status="timeout",
+                error_message=str(exc) or "Job execution timed out.",
+            )
+        except Exception as exc:
+            return ExecutionOutcome(
+                status="error",
+                error_message=str(exc) or "Unhandled handler error",
+            )
+
+    async def cancel(self, job_id: str) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
 # --- Fixtures ---
 @pytest_asyncio.fixture(scope="function")
 def redis_url() -> str:
@@ -146,23 +213,33 @@ async def job_store(rrq_settings) -> AsyncGenerator[JobStore, None]:
     await store.aclose()
 
 
-@pytest_asyncio.fixture(scope="function")
-async def job_registry() -> AsyncGenerator[JobRegistry, None]:
-    """Fixture for a job registry, ensuring it's clean for each function."""
-    # Clear any existing handlers before the test session
-    registry = JobRegistry()
-    registry.clear()  # Ensure the instance is empty at the start of the session
-
-    # Register handlers needed for worker tests
-    registry.register("simple_success", simple_success_handler)
-    registry.register("simple_failure", simple_failure_handler)
-    registry.register("retry_task", retry_handler)
-    registry.register("timeout_task", timeout_handler)
-    registry.register("long_sleep_task", long_sleep_handler)  # Register new handler
-    yield registry
-    registry.clear()
-    job_results.clear()  # Clear global test state
+@pytest.fixture(scope="function")
+def handler_registry() -> Generator[dict[str, Any], None, None]:
+    """Fixture for handler mapping, ensuring it's clean for each function."""
+    job_results.clear()
     job_run_counts.clear()
+    handlers = {
+        "simple_success": simple_success_handler,
+        "simple_failure": simple_failure_handler,
+        "retry_task": retry_handler,
+        "timeout_task": timeout_handler,
+        "long_sleep_task": long_sleep_handler,
+    }
+    yield handlers
+    job_results.clear()
+    job_run_counts.clear()
+
+
+@pytest.fixture(scope="function")
+def executor(
+    rrq_settings: RRQSettings, handler_registry: dict[str, Any]
+) -> InProcessExecutor:
+    return InProcessExecutor(handler_registry, settings=rrq_settings)
+
+
+@pytest.fixture(scope="function")
+def executors(executor: InProcessExecutor) -> dict[str, Executor]:
+    return {"python": executor}
 
 
 @pytest_asyncio.fixture(scope="function")
@@ -174,16 +251,18 @@ async def rrq_client(rrq_settings, job_store) -> AsyncGenerator[RRQClient, None]
 
 
 @pytest_asyncio.fixture(scope="function")
-async def worker(
-    rrq_settings, job_registry, job_store
-) -> AsyncGenerator[RRQWorker, None]:
+async def worker(rrq_settings, executors, job_store) -> AsyncGenerator[RRQWorker, None]:
     """Main RRQWorker fixture for tests."""
     # Use the ACTUAL worker now
     # Clear registry before creating worker to avoid state leak
-    # job_registry.clear_registry() # Done in job_registry fixture setup
-    w = RRQWorker(settings=rrq_settings, job_registry=job_registry)
+    w = RRQWorker(settings=rrq_settings, executors=executors)
     # Ensure it uses the same job_store fixture instance
     w.job_store = job_store
+    w.client.job_store = job_store
+    executor = executors.get("python")
+    if isinstance(executor, InProcessExecutor):
+        executor.client = w.client
+        executor.worker_id = w.worker_id
     w._loop = (
         asyncio.get_running_loop()
     )  # Explicitly set the loop for tests using _run_loop directly
@@ -252,6 +331,41 @@ async def test_worker_runs_job_successfully(
     # Check lock was released by process_job (in placeholder)
     lock_owner = await job_store.get_job_lock_owner(job_id)
     assert lock_owner is None, f"Job lock still held by {lock_owner}"
+
+
+@pytest.mark.asyncio
+async def test_worker_processes_jobs_after_start(
+    rrq_client: RRQClient, worker: RRQWorker, job_store: JobStore
+):
+    job1 = await rrq_client.enqueue("simple_success", "late_start")
+    job2 = await rrq_client.enqueue("simple_failure", "boom")
+    assert job1 is not None
+    assert job2 is not None
+
+    job1_state = await job_store.get_job_definition(job1.id)
+    job2_state = await job_store.get_job_definition(job2.id)
+    assert job1_state is not None
+    assert job2_state is not None
+    assert job1_state.status == JobStatus.PENDING
+    assert job2_state.status == JobStatus.PENDING
+
+    await asyncio.sleep(0.05)
+
+    job1_state = await job_store.get_job_definition(job1.id)
+    job2_state = await job_store.get_job_definition(job2.id)
+    assert job1_state is not None
+    assert job2_state is not None
+    assert job1_state.status == JobStatus.PENDING
+    assert job2_state.status == JobStatus.PENDING
+
+    await run_worker_for(worker, duration=0.5)
+
+    job1_state = await job_store.get_job_definition(job1.id)
+    job2_state = await job_store.get_job_definition(job2.id)
+    assert job1_state is not None
+    assert job2_state is not None
+    assert job1_state.status == JobStatus.COMPLETED
+    assert job2_state.status in {JobStatus.FAILED, JobStatus.RETRYING}
 
 
 @pytest.mark.asyncio
@@ -503,7 +617,6 @@ async def test_worker_graceful_shutdown_releases_active_jobs(
     worker: RRQWorker,
     job_store: JobStore,
     rrq_settings: RRQSettings,
-    # job_registry is already used to register this new handler via fixture
 ):
     # Handler sleeps for this long
     sleep_for_handler = 2.0
@@ -806,31 +919,30 @@ async def test_unique_lock_defers_duplicate_then_processes(
 
 
 # --- RRQWorker 'queues' parameter tests ---
-def test_rrqworker_default_queues(rrq_settings, job_registry):
+def test_rrqworker_default_queues(rrq_settings, executors):
     """RRQWorker without explicit queues uses the default queue from settings."""
-    w = RRQWorker(settings=rrq_settings, job_registry=job_registry)
+    w = RRQWorker(settings=rrq_settings, executors=executors)
     assert w.queues == [rrq_settings.default_queue_name]
 
 
-def test_rrqworker_custom_queues(rrq_settings, job_registry):
+def test_rrqworker_custom_queues(rrq_settings, executors):
     """RRQWorker accepts a custom list of queues to poll."""
     custom = ["alpha", "beta"]
-    w = RRQWorker(settings=rrq_settings, job_registry=job_registry, queues=custom)
+    w = RRQWorker(settings=rrq_settings, executors=executors, queues=custom)
     assert w.queues == custom
 
 
-def test_rrqworker_empty_queues_raises(rrq_settings, job_registry):
+def test_rrqworker_empty_queues_raises(rrq_settings, executors):
     """RRQWorker must have at least one queue; empty list should raise ValueError."""
     with pytest.raises(ValueError):
-        RRQWorker(settings=rrq_settings, job_registry=job_registry, queues=[])
+        RRQWorker(settings=rrq_settings, executors=executors, queues=[])
 
 
 def test_worker_init_no_queues():
     settings = RRQSettings()
-    registry = JobRegistry()
-    # empty list should raise
+    executors = {"python": InProcessExecutor({}, settings=settings)}
     with pytest.raises(ValueError):
-        RRQWorker(settings, registry, queues=[])
+        RRQWorker(settings, executors=executors, queues=[])
 
 
 def test_calculate_backoff_ms():
@@ -838,8 +950,8 @@ def test_calculate_backoff_ms():
     # set base and max for predictable values
     settings.base_retry_delay_seconds = 1
     settings.max_retry_delay_seconds = 5
-    registry = JobRegistry()
-    worker = RRQWorker(settings, registry, queues=["q1"])
+    executors = {"python": InProcessExecutor({}, settings=settings)}
+    worker = RRQWorker(settings, executors=executors, queues=["q1"])
     # attempt 1 => 1 * 2^(1-1) =1s -> 1000ms
     job = Job(id="1", function_name="fn", current_retries=1, max_retries=3)
     assert worker._calculate_backoff_ms(job) == 1000
@@ -850,8 +962,8 @@ def test_calculate_backoff_ms():
 
 def test_request_shutdown_and_status():
     settings = RRQSettings()
-    registry = JobRegistry()
-    worker = RRQWorker(settings, registry, queues=["q"])
+    executors = {"python": InProcessExecutor({}, settings=settings)}
+    worker = RRQWorker(settings, executors=executors, queues=["q"])
     # initially not shutting down
     assert not worker._shutdown_event.is_set()
     worker._request_shutdown()
@@ -861,8 +973,8 @@ def test_request_shutdown_and_status():
 @pytest.mark.asyncio
 async def test_drain_tasks_no_tasks(monkeypatch):
     settings = RRQSettings()
-    registry = JobRegistry()
-    worker = RRQWorker(settings, registry, queues=["q"])
+    executors = {"python": InProcessExecutor({}, settings=settings)}
+    worker = RRQWorker(settings, executors=executors, queues=["q"])
     # No tasks => returns immediately
     # Should not raise
     await worker._drain_tasks()
@@ -871,8 +983,8 @@ async def test_drain_tasks_no_tasks(monkeypatch):
 @pytest.mark.asyncio
 async def test_task_cleanup_and_semaphore(monkeypatch):
     settings = RRQSettings()
-    registry = JobRegistry()
-    worker = RRQWorker(settings, registry, queues=["q"])
+    executors = {"python": InProcessExecutor({}, settings=settings)}
+    worker = RRQWorker(settings, executors=executors, queues=["q"])
     # create a semaphore with value 0 (acquired)
     sem = asyncio.Semaphore(0)
     # create a dummy completed task
@@ -892,8 +1004,8 @@ async def test_task_cleanup_and_semaphore(monkeypatch):
 async def test_worker_close_calls_job_store_aclose():
     # Ensure RRQWorker.close calls aclose on its job_store
     settings = RRQSettings()
-    registry = JobRegistry()
-    worker = RRQWorker(settings, registry)
+    executors = {"python": InProcessExecutor({}, settings=settings)}
+    worker = RRQWorker(settings, executors=executors)
 
     # Prepare dummy job_store
     class DummyStore:
@@ -916,18 +1028,7 @@ async def test_worker_close_calls_job_store_aclose():
 
 @pytest.mark.asyncio
 async def test_worker_run_closes_resources_on_exit():
-    settings = RRQSettings()
-    registry = JobRegistry()
-    worker = RRQWorker(settings, registry)
-
-    # Avoid manipulating process-level signal handlers during tests.
-    worker._setup_signal_handlers = lambda: None  # type: ignore[assignment]
-
-    async def noop_run_loop():
-        return None
-
-    # Avoid Redis interactions; we only want to verify shutdown cleanup.
-    worker._run_loop = noop_run_loop  # type: ignore[assignment]
+    settings = RRQSettings(default_executor_name="default")
 
     class DummyClient:
         def __init__(self):
@@ -945,17 +1046,51 @@ async def test_worker_run_closes_resources_on_exit():
 
     dummy_client = DummyClient()
     dummy_store = DummyStore()
+    closed_executors: list[str] = []
+
+    class DummyExecutor:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
+            return ExecutionOutcome(status="success", result={"executor": self.name})
+
+        async def cancel(self, job_id: str) -> None:
+            return None
+
+        async def close(self) -> None:
+            closed_executors.append(self.name)
+
+    default_executor = DummyExecutor("default")
+    extra_executor = DummyExecutor("extra")
+    worker = RRQWorker(
+        settings,
+        executors={"default": default_executor, "extra": extra_executor},
+    )
+
+    # Avoid manipulating process-level signal handlers during tests.
+    worker._setup_signal_handlers = lambda: None  # type: ignore[assignment]
+
+    async def noop_run_loop():
+        return None
+
+    # Avoid Redis interactions; we only want to verify shutdown cleanup.
+    worker._run_loop = noop_run_loop  # type: ignore[assignment]
     worker.client = dummy_client
     worker.job_store = dummy_store
+    worker.executor = default_executor
+    worker.executors = {"default": default_executor, "extra": extra_executor}
 
     await worker.run()
 
     assert dummy_client.close_called, "RRQClient.close was not called by worker.run"
     assert dummy_store.aclose_called, "JobStore.aclose was not called by worker.run"
+    assert "default" in closed_executors
+    assert "extra" in closed_executors
 
 
 @pytest.mark.asyncio
-async def test_cron_job_enqueue_unique(rrq_settings, job_registry, job_store):
+async def test_cron_job_enqueue_unique(rrq_settings, executors, job_store):
     cron_job = CronJob(
         function_name="simple_success", schedule="* * * * *", unique=True
     )
@@ -963,7 +1098,7 @@ async def test_cron_job_enqueue_unique(rrq_settings, job_registry, job_store):
     cron_job.next_run_time = datetime.now(timezone.utc) - timedelta(minutes=1)
 
     rrq_settings.cron_jobs = [cron_job]
-    worker = RRQWorker(settings=rrq_settings, job_registry=job_registry)
+    worker = RRQWorker(settings=rrq_settings, executors=executors)
     worker.job_store = job_store
     worker.client.job_store = job_store
     await worker._maybe_enqueue_cron_jobs()
@@ -978,7 +1113,7 @@ async def test_cron_job_enqueue_unique(rrq_settings, job_registry, job_store):
 
 
 @pytest.mark.asyncio
-async def test_cron_job_basic_enqueue(rrq_settings, job_registry, job_store):
+async def test_cron_job_basic_enqueue(rrq_settings, executors, job_store):
     """Test basic cron job enqueueing without unique constraint."""
     cron_job = CronJob(function_name="simple_success", schedule="* * * * *")
     # Set the next_run_time to a past time so the job is considered due
@@ -986,7 +1121,7 @@ async def test_cron_job_basic_enqueue(rrq_settings, job_registry, job_store):
     cron_job.next_run_time = past_time
 
     rrq_settings.cron_jobs = [cron_job]
-    worker = RRQWorker(settings=rrq_settings, job_registry=job_registry)
+    worker = RRQWorker(settings=rrq_settings, executors=executors)
     worker.job_store = job_store
     worker.client.job_store = job_store
 
@@ -1008,7 +1143,7 @@ async def test_cron_job_basic_enqueue(rrq_settings, job_registry, job_store):
 
 
 @pytest.mark.asyncio
-async def test_cron_job_with_args_and_kwargs(rrq_settings, job_registry, job_store):
+async def test_cron_job_with_args_and_kwargs(rrq_settings, executors, job_store):
     """Test cron job with arguments and keyword arguments."""
     cron_job = CronJob(
         function_name="simple_success",
@@ -1019,7 +1154,7 @@ async def test_cron_job_with_args_and_kwargs(rrq_settings, job_registry, job_sto
     cron_job.next_run_time = datetime.now(timezone.utc) - timedelta(minutes=1)
 
     rrq_settings.cron_jobs = [cron_job]
-    worker = RRQWorker(settings=rrq_settings, job_registry=job_registry)
+    worker = RRQWorker(settings=rrq_settings, executors=executors)
     worker.job_store = job_store
     worker.client.job_store = job_store
 
@@ -1038,7 +1173,82 @@ async def test_cron_job_with_args_and_kwargs(rrq_settings, job_registry, job_sto
 
 
 @pytest.mark.asyncio
-async def test_cron_job_custom_queue(rrq_settings, job_registry, job_store):
+async def test_worker_routes_executor_prefix(
+    rrq_settings: RRQSettings,
+    executors: dict[str, Executor],
+    job_store: JobStore,
+):
+    class RecordingExecutor:
+        def __init__(self) -> None:
+            self.requests: list[ExecutionRequest] = []
+
+        async def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
+            self.requests.append(request)
+            return ExecutionOutcome(status="success", result={"ok": True})
+
+        async def cancel(self, job_id: str) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    recording_executor = RecordingExecutor()
+    merged_executors = dict(executors)
+    merged_executors["rust"] = recording_executor
+    worker = RRQWorker(
+        settings=rrq_settings,
+        executors=merged_executors,
+    )
+    worker.job_store = job_store
+    worker._loop = asyncio.get_running_loop()
+    client = RRQClient(settings=rrq_settings, job_store=job_store)
+
+    job = await client.enqueue("rust#simple_success", "payload")
+    assert job is not None
+
+    await run_worker_for(worker, duration=0.2)
+
+    assert len(recording_executor.requests) == 1
+    request = recording_executor.requests[0]
+    assert request.function_name == "simple_success"
+    assert job.id not in job_results
+
+    job_def = await job_store.get_job_definition(job.id)
+    assert job_def is not None
+    assert job_def.status == JobStatus.COMPLETED
+    assert job_def.result == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_worker_unknown_executor_moves_to_dlq(
+    rrq_settings: RRQSettings,
+    executors: dict[str, Executor],
+    job_store: JobStore,
+):
+    worker = RRQWorker(
+        settings=rrq_settings,
+        executors=executors,
+    )
+    worker.job_store = job_store
+    worker._loop = asyncio.get_running_loop()
+    client = RRQClient(settings=rrq_settings, job_store=job_store)
+
+    job = await client.enqueue("missing#simple_success", "payload")
+    assert job is not None
+
+    await run_worker_for(worker, duration=0.2)
+
+    job_def = await job_store.get_job_definition(job.id)
+    assert job_def is not None
+    assert job_def.status == JobStatus.FAILED
+
+    dlq_key = rrq_settings.default_dlq_name
+    dlq_jobs = await job_store.redis.lrange(dlq_key, 0, -1)
+    assert job.id.encode("utf-8") in dlq_jobs
+
+
+@pytest.mark.asyncio
+async def test_cron_job_custom_queue(rrq_settings, executors, job_store):
     """Test cron job with custom queue name."""
     custom_queue = "rrq:queue:cron_queue"
     cron_job = CronJob(
@@ -1047,7 +1257,7 @@ async def test_cron_job_custom_queue(rrq_settings, job_registry, job_store):
     cron_job.next_run_time = datetime.now(timezone.utc) - timedelta(minutes=1)
 
     rrq_settings.cron_jobs = [cron_job]
-    worker = RRQWorker(settings=rrq_settings, job_registry=job_registry)
+    worker = RRQWorker(settings=rrq_settings, executors=executors)
     worker.job_store = job_store
     worker.client.job_store = job_store
 
@@ -1065,14 +1275,14 @@ async def test_cron_job_custom_queue(rrq_settings, job_registry, job_store):
 
 
 @pytest.mark.asyncio
-async def test_cron_job_not_due(rrq_settings, job_registry, job_store):
+async def test_cron_job_not_due(rrq_settings, executors, job_store):
     """Test that cron jobs not due are not enqueued."""
     cron_job = CronJob(function_name="simple_success", schedule="* * * * *")
     # Set next_run_time to future so it's not due
     cron_job.next_run_time = datetime.now(timezone.utc) + timedelta(hours=1)
 
     rrq_settings.cron_jobs = [cron_job]
-    worker = RRQWorker(settings=rrq_settings, job_registry=job_registry)
+    worker = RRQWorker(settings=rrq_settings, executors=executors)
     worker.job_store = job_store
     worker.client.job_store = job_store
 
@@ -1084,9 +1294,7 @@ async def test_cron_job_not_due(rrq_settings, job_registry, job_store):
 
 
 @pytest.mark.asyncio
-async def test_cron_job_schedule_next_after_enqueue(
-    rrq_settings, job_registry, job_store
-):
+async def test_cron_job_schedule_next_after_enqueue(rrq_settings, executors, job_store):
     """Test that cron job schedules next run time after enqueueing."""
     cron_job = CronJob(
         function_name="simple_success", schedule="0 9 * * *"
@@ -1096,7 +1304,7 @@ async def test_cron_job_schedule_next_after_enqueue(
     original_next_run = cron_job.next_run_time
 
     rrq_settings.cron_jobs = [cron_job]
-    worker = RRQWorker(settings=rrq_settings, job_registry=job_registry)
+    worker = RRQWorker(settings=rrq_settings, executors=executors)
     worker.job_store = job_store
     worker.client.job_store = job_store
 
@@ -1114,7 +1322,7 @@ async def test_cron_job_schedule_next_after_enqueue(
 
 
 @pytest.mark.asyncio
-async def test_multiple_cron_jobs(rrq_settings, job_registry, job_store):
+async def test_multiple_cron_jobs(rrq_settings, executors, job_store):
     """Test multiple cron jobs being processed."""
     cron_job1 = CronJob(
         function_name="simple_success", schedule="* * * * *", args=["job1"]
@@ -1129,7 +1337,7 @@ async def test_multiple_cron_jobs(rrq_settings, job_registry, job_store):
     cron_job2.next_run_time = past_time
 
     rrq_settings.cron_jobs = [cron_job1, cron_job2]
-    worker = RRQWorker(settings=rrq_settings, job_registry=job_registry)
+    worker = RRQWorker(settings=rrq_settings, executors=executors)
     worker.job_store = job_store
     worker.client.job_store = job_store
 
@@ -1151,7 +1359,7 @@ async def test_multiple_cron_jobs(rrq_settings, job_registry, job_store):
 
 @pytest.mark.asyncio
 async def test_cron_job_execution_end_to_end(
-    rrq_settings, job_registry, job_store, worker
+    rrq_settings, executors, job_store, worker
 ):
     """Test end-to-end cron job execution."""
     cron_job = CronJob(

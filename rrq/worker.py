@@ -12,7 +12,7 @@ import signal
 import time
 import uuid
 from contextlib import suppress
-from datetime import timezone, datetime
+from datetime import timezone, datetime, timedelta
 from typing import (
     Any,
     Optional,
@@ -23,9 +23,15 @@ from rrq.client import RRQClient
 from .constants import (
     DEFAULT_WORKER_ID_PREFIX,
 )
-from .exc import RetryJob
+from .exc import HandlerNotFound, RetryJob
+from .executor import (
+    ExecutionContext,
+    ExecutionRequest,
+    Executor,
+    StdioExecutor,
+    StdioReservation,
+)
 from .job import Job, JobStatus
-from .registry import JobRegistry
 from .settings import RRQSettings
 from .store import JobStore
 from .cron import CronJob
@@ -47,23 +53,22 @@ class RRQWorker:
     def __init__(
         self,
         settings: RRQSettings,
-        job_registry: JobRegistry,
         queues: Optional[list[str]] = None,
         worker_id: Optional[str] = None,
         burst: bool = False,
+        executors: dict[str, Executor] | None = None,
     ):
         """Initializes the RRQWorker.
 
         Args:
             settings: The RRQSettings instance for configuration.
-            job_registry: The JobRegistry containing the handler functions.
             queues: A list of queue names (without prefix) to poll.
                     If None, defaults to `settings.default_queue_name`.
             worker_id: A unique identifier for this worker instance.
                        If None, one is generated automatically.
+            executors: Mapping of executor names to implementations.
         """
         self.settings = settings
-        self.job_registry = job_registry
         self.queues = (
             queues if queues is not None else [self.settings.default_queue_name]
         )
@@ -76,6 +81,18 @@ class RRQWorker:
             worker_id
             or f"{DEFAULT_WORKER_ID_PREFIX}{os.getpid()}_{uuid.uuid4().hex[:6]}"
         )
+        self.default_executor_name = self.settings.default_executor_name
+        if executors is None:
+            raise ValueError("RRQWorker requires an executors mapping.")
+        self.executors = dict(executors)
+        if not self.executors:
+            raise ValueError("RRQWorker requires at least one executor.")
+        if self.default_executor_name not in self.executors:
+            raise ValueError(
+                f"Default executor '{self.default_executor_name}' is not configured."
+            )
+        self.executor = self.executors[self.default_executor_name]
+        self.executor_routes = dict(self.settings.executor_routes)
         # Burst mode: process existing jobs then exit
         self.burst = burst
 
@@ -116,31 +133,6 @@ class RRQWorker:
 
         return random.uniform(min_delay, max_delay)
 
-    async def _call_startup_hook(self) -> None:
-        if self.settings.on_startup:
-            logger.info(f"Worker {self.worker_id} calling on_startup hook...")
-            try:
-                await self.settings.on_startup()
-                logger.info(f"Worker {self.worker_id} on_startup hook completed.")
-            except Exception as e:
-                logger.error(
-                    f"Worker {self.worker_id} error during on_startup hook: {e}",
-                    exc_info=True,
-                )
-                raise
-
-    async def _call_shutdown_hook(self) -> None:
-        if self.settings.on_shutdown:
-            logger.info(f"Worker {self.worker_id} calling on_shutdown hook...")
-            try:
-                await self.settings.on_shutdown()
-                logger.info(f"Worker {self.worker_id} on_shutdown hook completed.")
-            except Exception as e:
-                logger.error(
-                    f"Worker {self.worker_id} error during on_shutdown hook: {e}",
-                    exc_info=True,
-                )
-
     async def run(self) -> None:
         logger.info(f"RRQWorker {self.worker_id} starting.")
         self.status = "running"
@@ -148,7 +140,6 @@ class RRQWorker:
         self._setup_signal_handlers()
         telemetry = get_telemetry()
         try:
-            await self._call_startup_hook()
             try:
                 telemetry.worker_started(
                     worker_id=self.worker_id, queues=list(self.queues)
@@ -163,7 +154,6 @@ class RRQWorker:
             logger.info(f"Worker {self.worker_id} run cancelled.")
         finally:
             logger.info(f"Worker {self.worker_id} shutting down cleanly.")
-            await self._call_shutdown_hook()
             self.status = "stopped"
             try:
                 telemetry.worker_stopped(worker_id=self.worker_id)
@@ -289,9 +279,28 @@ class RRQWorker:
                     if fetched_count >= count or self._shutdown_event.is_set():
                         break
 
+                    reservation: StdioReservation | None = None
                     try:
+                        job = await self.job_store.get_job_definition(job_id)
+                        if not job:
+                            logger.warning(
+                                f"Worker {self.worker_id} job definition {job_id} not found during polling for queue {queue_name}."
+                            )
+                            continue
+
+                        executor_name, handler_name = self._split_executor_name(
+                            job.function_name
+                        )
+                        executor: Executor | None = None
+                        if handler_name:
+                            executor = self._resolve_executor(executor_name, queue_name)
+                            if isinstance(executor, StdioExecutor):
+                                reservation = await executor.try_reserve()
+                                if reservation is None:
+                                    continue
+
                         # Try to acquire lock and remove from queue first (without semaphore)
-                        job_acquired = await self._try_acquire_job(job_id, queue_name)
+                        job_acquired = await self._try_lock_job(job, queue_name)
                         if job_acquired:
                             # Only acquire semaphore after successfully getting the job
                             await self._semaphore.acquire()
@@ -299,7 +308,9 @@ class RRQWorker:
                                 # Process the job (we already have the lock and removed from queue)
                                 # The semaphore will be released when the job task completes
                                 await self._process_acquired_job(
-                                    job_acquired, queue_name
+                                    job_acquired,
+                                    queue_name,
+                                    reservation=reservation,
                                 )
                                 fetched_count += 1
                             except Exception as e_process:
@@ -310,6 +321,11 @@ class RRQWorker:
                                 # Release lock and semaphore since processing failed
                                 await self.job_store.release_job_lock(job_id)
                                 self._semaphore.release()
+                                if reservation is not None:
+                                    await reservation.release()
+                        else:
+                            if reservation is not None:
+                                await reservation.release()
                         # If job_acquired is None, another worker got it - continue to next job
                     except Exception as e_try:
                         # Catch errors during the job acquisition itself
@@ -317,6 +333,8 @@ class RRQWorker:
                             f"Worker {self.worker_id} exception trying to acquire job {job_id}: {e_try}",
                             exc_info=True,
                         )
+                        if reservation is not None:
+                            await reservation.release()
 
             except Exception as e_poll:
                 logger.error(
@@ -348,7 +366,18 @@ class RRQWorker:
                 f"Worker {self.worker_id} job definition {job_id} not found during _try_acquire_job from queue {queue_name}."
             )
             return None  # Job vanished between poll and fetch?
+        return await self._try_lock_job(job, queue_name)
 
+    async def _try_lock_job(self, job: Job, queue_name: str) -> Optional[Job]:
+        """Attempts to atomically lock and remove a job from the queue.
+
+        Args:
+            job: The Job object to attempt acquiring.
+            queue_name: The name of the queue the job ID was retrieved from.
+
+        Returns:
+            The Job object if successfully acquired, None otherwise.
+        """
         # Determine job-specific timeout and calculate lock timeout
         job_timeout = (
             job.job_timeout_seconds
@@ -371,7 +400,13 @@ class RRQWorker:
         logger.debug(f"Worker {self.worker_id} successfully acquired job {job.id}")
         return job
 
-    async def _process_acquired_job(self, job: Job, queue_name: str) -> None:
+    async def _process_acquired_job(
+        self,
+        job: Job,
+        queue_name: str,
+        *,
+        reservation: StdioReservation | None = None,
+    ) -> None:
         """Processes a job that has already been acquired (locked and removed from queue).
 
         Note: This method assumes the worker has already acquired the concurrency semaphore.
@@ -382,16 +417,19 @@ class RRQWorker:
             queue_name: The name of the queue the job was retrieved from.
         """
         try:
-            await self.job_store.update_job_status(job.id, JobStatus.ACTIVE)
+            start_time = datetime.now(timezone.utc)
+            await self.job_store.mark_job_started(job.id, self.worker_id, start_time)
             logger.debug(
-                f"Worker {self.worker_id} updated status to ACTIVE for job {job.id}"
+                f"Worker {self.worker_id} marked job {job.id} ACTIVE at {start_time.isoformat()}"
             )
 
             # Create and track the execution task
             # The semaphore will be released when this task completes
             loop = self._loop
             assert loop is not None
-            task = loop.create_task(self._execute_job(job, queue_name))
+            task = loop.create_task(
+                self._execute_job(job, queue_name, reservation=reservation)
+            )
             self._running_tasks.add(task)
             task.add_done_callback(lambda t: self._task_cleanup(t, self._semaphore))
             logger.info(
@@ -405,6 +443,8 @@ class RRQWorker:
             )
             # Release the lock since task wasn't started
             await self.job_store.release_job_lock(job.id)
+            if reservation is not None:
+                await reservation.release()
             raise  # Re-raise to be handled by caller
 
     async def _try_process_job(self, job_id: str, queue_name: str) -> bool:
@@ -432,7 +472,7 @@ class RRQWorker:
         await self._semaphore.acquire()
         try:
             # Process the acquired job
-            await self._process_acquired_job(job_acquired, queue_name)
+            await self._process_acquired_job(job_acquired, queue_name, reservation=None)
             return True
         except Exception as e_process:
             logger.error(
@@ -444,7 +484,56 @@ class RRQWorker:
             # Lock is already released in _process_acquired_job on error
             return False
 
-    async def _execute_job(self, job: Job, queue_name: str) -> None:
+    def _build_execution_request(
+        self,
+        job: Job,
+        queue_name: str,
+        attempt: int,
+        timeout_seconds: int,
+        function_name: str,
+    ) -> ExecutionRequest:
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)
+        context = ExecutionContext(
+            job_id=job.id,
+            attempt=attempt,
+            enqueue_time=job.enqueue_time,
+            queue_name=queue_name,
+            deadline=deadline,
+            trace_context=job.trace_context,
+            worker_id=self.worker_id,
+        )
+        return ExecutionRequest(
+            job_id=job.id,
+            function_name=function_name,
+            args=job.job_args,
+            kwargs=job.job_kwargs,
+            context=context,
+        )
+
+    def _split_executor_name(self, function_name: str) -> tuple[str | None, str]:
+        if "#" not in function_name:
+            return None, function_name
+        executor_name, handler_name = function_name.split("#", 1)
+        return executor_name or None, handler_name
+
+    def _resolve_executor(
+        self, executor_name: str | None, queue_name: str
+    ) -> Executor | None:
+        if executor_name is None:
+            executor_name = self.executor_routes.get(
+                queue_name, self.default_executor_name
+            )
+        if executor_name == self.default_executor_name:
+            return self.executor
+        return self.executors.get(executor_name)
+
+    async def _execute_job(
+        self,
+        job: Job,
+        queue_name: str,
+        *,
+        reservation: StdioReservation | None = None,
+    ) -> None:
         """Executes a single job handler, managing timeouts, errors, retries, and results.
 
         This method is run within an asyncio Task for each job.
@@ -477,65 +566,98 @@ class RRQWorker:
         try:
             with span_cm as span:
                 try:
-                    # --- Find Handler ---
-                    handler = self.job_registry.get_handler(job.function_name)
-                    if not handler:
-                        raise ValueError(
-                            f"No handler registered for function '{job.function_name}'"
+                    executor_name, handler_name = self._split_executor_name(
+                        job.function_name
+                    )
+                    if not handler_name:
+                        error_message = (
+                            "Handler name is missing for job function "
+                            f"'{job.function_name}'."
                         )
-
-                    # --- Prepare Context ---
-                    context = {
-                        "job_id": job.id,
-                        "job_try": attempt,  # Attempt number (1-based)
-                        "enqueue_time": job.enqueue_time,
-                        "settings": self.settings,
-                        "worker_id": self.worker_id,
-                        "queue_name": queue_name,
-                        "rrq_client": self.client,
-                    }
-
-                    # --- Execute Handler ---
-                    result = None
-                    exc: Optional[BaseException] = None  # Stores caught exception
-
-                    try:  # Inner try for handler execution and its specific exceptions
-                        logger.debug(
-                            f"Calling handler '{job.function_name}' for job {job.id}"
+                        logger.error(error_message)
+                        if reservation is not None:
+                            await reservation.release()
+                            reservation = None
+                        await self._handle_fatal_job_error(
+                            job, queue_name, error_message
                         )
-                        result = await asyncio.wait_for(
-                            handler(context, *job.job_args, **job.job_kwargs),
+                        span.dlq(
+                            duration_seconds=time.monotonic() - start_time,
+                            reason=error_message,
+                            error=ValueError(error_message),
+                        )
+                        return
+
+                    executor = self._resolve_executor(executor_name, queue_name)
+                    if executor is None:
+                        resolved_name = (
+                            executor_name
+                            or self.executor_routes.get(queue_name)
+                            or self.default_executor_name
+                        )
+                        error_message = f"No executor configured for '{resolved_name}'."
+                        logger.error(error_message)
+                        if reservation is not None:
+                            await reservation.release()
+                            reservation = None
+                        await self._handle_fatal_job_error(
+                            job, queue_name, error_message
+                        )
+                        span.dlq(
+                            duration_seconds=time.monotonic() - start_time,
+                            reason=error_message,
+                            error=ValueError(error_message),
+                        )
+                        return
+
+                    request = self._build_execution_request(
+                        job,
+                        queue_name,
+                        attempt,
+                        actual_job_timeout,
+                        handler_name,
+                    )
+                    try:
+                        if reservation is not None and isinstance(
+                            executor, StdioExecutor
+                        ):
+                            execute_coro = executor.execute_with_reservation(
+                                reservation, request
+                            )
+                            reservation = None
+                        else:
+                            if reservation is not None:
+                                await reservation.release()
+                                reservation = None
+                            execute_coro = executor.execute(request)
+                        outcome = await asyncio.wait_for(
+                            execute_coro,
                             timeout=float(actual_job_timeout),
                         )
-                        logger.debug(f"Handler for job {job.id} returned successfully.")
-                    except TimeoutError as e_timeout:  # Specifically from wait_for
-                        exc = e_timeout
-                        logger.warning(
-                            f"Job {job.id} execution timed out after {actual_job_timeout}s."
+                    except asyncio.TimeoutError:
+                        error_msg = f"Job timed out after {actual_job_timeout}s."
+                        await self._handle_job_timeout(job, queue_name, error_msg)
+                        span.timeout(
+                            duration_seconds=time.monotonic() - start_time,
+                            timeout_seconds=float(actual_job_timeout),
+                            error_message=error_msg,
                         )
-                    except RetryJob as e_retry:  # Handler explicitly requests retry
-                        exc = e_retry
-                        logger.info(f"Job {job.id} requested retry: {e_retry}")
-                    except (
-                        Exception
-                    ) as e_other:  # Any other exception from the handler itself
-                        exc = e_other
-                        logger.error(
-                            f"Job {job.id} handler '{job.function_name}' raised unhandled exception:",
-                            exc_info=e_other,
-                        )
+                        return
 
-                    # --- Process Outcome ---
                     duration = time.monotonic() - start_time
-                    if exc is None:  # Success
-                        await self._handle_job_success(job, result)
+                    if outcome.status == "success":
+                        await self._handle_job_success(job, outcome.result)
                         span.success(duration_seconds=duration)
                         logger.info(
                             f"Job {job.id} completed successfully in {duration:.2f}s."
                         )
-                    elif isinstance(exc, RetryJob):
+                    elif outcome.status == "retry":
+                        retry_exc = RetryJob(
+                            outcome.error_message or "Job requested retry",
+                            defer_seconds=outcome.retry_after_seconds,
+                        )
                         anticipated_retry_count = job.current_retries + 1
-                        delay_seconds = exc.defer_seconds
+                        delay_seconds = outcome.retry_after_seconds
                         if (
                             delay_seconds is None
                             and anticipated_retry_count < job.max_retries
@@ -550,24 +672,23 @@ class RRQWorker:
                                 self._calculate_backoff_ms(temp_job_for_backoff)
                                 / 1000.0
                             )
-                        await self._process_retry_job(job, exc, queue_name)
+                        await self._process_retry_job(job, retry_exc, queue_name)
                         if anticipated_retry_count >= job.max_retries:
                             span.dlq(
                                 duration_seconds=duration,
                                 reason="max_retries",
-                                error=exc,
+                                error=retry_exc,
                             )
                         else:
                             span.retry(
                                 duration_seconds=duration,
                                 delay_seconds=delay_seconds,
-                                reason=str(exc) or None,
+                                reason=str(retry_exc) or None,
                             )
-                    elif isinstance(exc, asyncio.TimeoutError):
+                    elif outcome.status == "timeout":
                         error_msg = (
-                            str(exc)
-                            if str(exc)
-                            else f"Job timed out after {actual_job_timeout}s."
+                            outcome.error_message
+                            or f"Job timed out after {actual_job_timeout}s."
                         )
                         await self._handle_job_timeout(job, queue_name, error_msg)
                         span.timeout(
@@ -575,7 +696,24 @@ class RRQWorker:
                             timeout_seconds=float(actual_job_timeout),
                             error_message=error_msg,
                         )
-                    else:  # Other unhandled exception from handler
+                    else:
+                        error_message = outcome.error_message or "Job failed"
+                        error_exc = Exception(error_message)
+                        if outcome.error_type == "handler_not_found":
+                            logger.error(
+                                "Job %s fatal error: %s. Moving to DLQ.",
+                                job.id,
+                                error_message,
+                            )
+                            await self._handle_fatal_job_error(
+                                job, queue_name, error_message
+                            )
+                            span.dlq(
+                                duration_seconds=duration,
+                                reason=error_message,
+                                error=error_exc,
+                            )
+                            return
                         anticipated_retry_count = job.current_retries + 1
                         delay_seconds = None
                         if anticipated_retry_count < job.max_retries:
@@ -590,27 +728,27 @@ class RRQWorker:
                                 )
                                 / 1000.0
                             )
-                        await self._process_other_failure(job, exc, queue_name)
+                        await self._process_other_failure(job, error_exc, queue_name)
                         if anticipated_retry_count >= job.max_retries:
                             span.dlq(
                                 duration_seconds=duration,
                                 reason="max_retries",
-                                error=exc,
+                                error=error_exc,
                             )
                         else:
                             span.retry(
                                 duration_seconds=duration,
                                 delay_seconds=delay_seconds,
-                                reason=str(exc) or None,
+                                reason=error_message or None,
                             )
 
-                except ValueError as ve:  # Catches "handler not found"
-                    logger.error(f"Job {job.id} fatal error: {ve}. Moving to DLQ.")
-                    await self._handle_fatal_job_error(job, queue_name, str(ve))
+                except HandlerNotFound as hnfe:
+                    logger.error(f"Job {job.id} fatal error: {hnfe}. Moving to DLQ.")
+                    await self._handle_fatal_job_error(job, queue_name, str(hnfe))
                     span.dlq(
                         duration_seconds=time.monotonic() - start_time,
-                        reason=str(ve),
-                        error=ve,
+                        reason=str(hnfe),
+                        error=hnfe,
                     )
                 except asyncio.CancelledError:
                     # Catches cancellation of this _execute_job task (e.g., worker shutdown)
@@ -640,6 +778,8 @@ class RRQWorker:
                         error=critical_exc,
                     )
         finally:
+            if reservation is not None:
+                await reservation.release()
             # CRITICAL: Ensure the lock is released regardless of outcome
             await self.job_store.release_job_lock(job.id)
             # Logger call moved inside release_job_lock for context
@@ -1173,6 +1313,20 @@ class RRQWorker:
     async def close(self) -> None:
         """Gracefully close worker resources."""
         logger.info(f"[{self.worker_id}] Closing RRQ worker...")
+        seen_executors: set[int] = set()
+        executors_to_close = [self.executor, *self.executors.values()]
+        for executor in executors_to_close:
+            executor_id = id(executor)
+            if executor_id in seen_executors:
+                continue
+            seen_executors.add(executor_id)
+            try:
+                await executor.close()
+            except Exception as e_close:
+                logger.error(
+                    f"[{self.worker_id}] Error closing executor: {e_close}",
+                    exc_info=True,
+                )
         if self.client:  # Check if client exists before closing
             await self.client.close()
         if self.job_store:

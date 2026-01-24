@@ -11,7 +11,7 @@ import click
 
 from rrq.constants import JOB_KEY_PREFIX, QUEUE_KEY_PREFIX
 from rrq.store import JobStore
-from rrq.cli_commands.base import AsyncCommand, load_app_settings, get_job_store
+from rrq.cli_commands.base import AsyncCommand, load_rrq_settings, get_job_store
 from ..utils import (
     console,
     create_progress,
@@ -35,10 +35,10 @@ class DebugCommands(AsyncCommand):
         # Generate fake jobs
         @debug_group.command("generate-jobs")
         @click.option(
-            "--settings",
-            "settings_object_path",
+            "--config",
+            "config_path",
             type=str,
-            help="Python settings path (e.g., myapp.settings.rrq_settings)",
+            help="Path to RRQ TOML config (e.g., rrq.toml)",
         )
         @click.option(
             "--count",
@@ -72,7 +72,7 @@ class DebugCommands(AsyncCommand):
             help="Batch size for bulk operations",
         )
         def generate_jobs(
-            settings_object_path: str,
+            config_path: str | None,
             count: int,
             queue_names: tuple,
             statuses: tuple,
@@ -81,7 +81,7 @@ class DebugCommands(AsyncCommand):
         ):
             """Generate fake jobs for testing"""
             self.make_async(self._generate_jobs)(
-                settings_object_path,
+                config_path,
                 count,
                 queue_names,
                 statuses,
@@ -92,10 +92,10 @@ class DebugCommands(AsyncCommand):
         # Generate fake workers
         @debug_group.command("generate-workers")
         @click.option(
-            "--settings",
-            "settings_object_path",
+            "--config",
+            "config_path",
             type=str,
-            help="Python settings path (e.g., myapp.settings.rrq_settings)",
+            help="Path to RRQ TOML config (e.g., rrq.toml)",
         )
         @click.option(
             "--count",
@@ -109,20 +109,18 @@ class DebugCommands(AsyncCommand):
             default=60,
             help="Duration to simulate workers in seconds",
         )
-        def generate_workers(settings_object_path: str, count: int, duration: int):
+        def generate_workers(config_path: str | None, count: int, duration: int):
             """Generate fake worker heartbeats for testing"""
-            self.make_async(self._generate_workers)(
-                settings_object_path, count, duration
-            )
+            self.make_async(self._generate_workers)(config_path, count, duration)
 
         # Submit test job
         @debug_group.command("submit")
         @click.argument("function_name")
         @click.option(
-            "--settings",
-            "settings_object_path",
+            "--config",
+            "config_path",
             type=str,
-            help="Python settings path (e.g., myapp.settings.rrq_settings)",
+            help="Path to RRQ TOML config (e.g., rrq.toml)",
         )
         @click.option(
             "--args",
@@ -143,7 +141,7 @@ class DebugCommands(AsyncCommand):
         )
         def submit_job(
             function_name: str,
-            settings_object_path: str,
+            config_path: str | None,
             args: Optional[str],
             kwargs: Optional[str],
             queue: Optional[str],
@@ -151,16 +149,16 @@ class DebugCommands(AsyncCommand):
         ):
             """Submit a test job"""
             self.make_async(self._submit_job)(
-                function_name, settings_object_path, args, kwargs, queue, delay
+                function_name, config_path, args, kwargs, queue, delay
             )
 
         # Clear test data
         @debug_group.command("clear")
         @click.option(
-            "--settings",
-            "settings_object_path",
+            "--config",
+            "config_path",
             type=str,
-            help="Python settings path (e.g., myapp.settings.rrq_settings)",
+            help="Path to RRQ TOML config (e.g., rrq.toml)",
         )
         @click.option(
             "--confirm",
@@ -172,17 +170,17 @@ class DebugCommands(AsyncCommand):
             default="test_*",
             help="Pattern to match for deletion (default: test_*)",
         )
-        def clear_data(settings_object_path: str, confirm: bool, pattern: str):
+        def clear_data(config_path: str | None, confirm: bool, pattern: str):
             """Clear test data from Redis"""
-            self.make_async(self._clear_data)(settings_object_path, confirm, pattern)
+            self.make_async(self._clear_data)(config_path, confirm, pattern)
 
         # Stress test
         @debug_group.command("stress-test")
         @click.option(
-            "--settings",
-            "settings_object_path",
+            "--config",
+            "config_path",
             type=str,
-            help="Python settings path (e.g., myapp.settings.rrq_settings)",
+            help="Path to RRQ TOML config (e.g., rrq.toml)",
         )
         @click.option(
             "--jobs-per-second",
@@ -202,19 +200,19 @@ class DebugCommands(AsyncCommand):
             help="Queue names to use",
         )
         def stress_test(
-            settings_object_path: str,
+            config_path: str | None,
             jobs_per_second: int,
             duration: int,
             queues: tuple,
         ):
             """Run stress test by creating jobs continuously"""
             self.make_async(self._stress_test)(
-                settings_object_path, jobs_per_second, duration, queues
+                config_path, jobs_per_second, duration, queues
             )
 
     async def _generate_jobs(
         self,
-        settings_object_path: str,
+        config_path: str | None,
         count: int,
         queue_names: tuple,
         statuses: tuple,
@@ -222,7 +220,7 @@ class DebugCommands(AsyncCommand):
         batch_size: int,
     ) -> None:
         """Generate fake jobs"""
-        settings = load_app_settings(settings_object_path)
+        settings = load_rrq_settings(config_path)
         job_store = await get_job_store(settings)
 
         try:
@@ -265,7 +263,7 @@ class DebugCommands(AsyncCommand):
                     status = random.choice(statuses)
 
                     # Random timestamps
-                    created_at = start_time + timedelta(
+                    enqueue_time = start_time + timedelta(
                         seconds=random.randint(0, int(age_hours * 3600))
                     )
 
@@ -282,14 +280,14 @@ class DebugCommands(AsyncCommand):
                                 "priority": random.choice(["high", "medium", "low"]),
                             }
                         ),
-                        "created_at": created_at.timestamp(),
+                        "enqueue_time": enqueue_time.timestamp(),
                         "retries": random.randint(0, 3),
                         "max_retries": 3,
                     }
 
                     # Add status-specific fields
                     if status in ("completed", "failed"):
-                        started_at = created_at + timedelta(
+                        started_at = enqueue_time + timedelta(
                             seconds=random.randint(1, 60)
                         )
                         completed_at = started_at + timedelta(
@@ -297,8 +295,8 @@ class DebugCommands(AsyncCommand):
                         )
                         job_data.update(
                             {
-                                "started_at": started_at.timestamp(),
-                                "completed_at": completed_at.timestamp(),
+                                "start_time": started_at.timestamp(),
+                                "completion_time": completed_at.timestamp(),
                                 "worker_id": f"worker_{random.randint(1, 10)}",
                             }
                         )
@@ -322,12 +320,12 @@ class DebugCommands(AsyncCommand):
                             )
 
                     elif status == "active":
-                        started_at = created_at + timedelta(
+                        started_at = enqueue_time + timedelta(
                             seconds=random.randint(1, 60)
                         )
                         job_data.update(
                             {
-                                "started_at": started_at.timestamp(),
+                                "start_time": started_at.timestamp(),
                                 "worker_id": f"worker_{random.randint(1, 10)}",
                             }
                         )
@@ -363,16 +361,16 @@ class DebugCommands(AsyncCommand):
                 # Add to queue if pending
                 if status == "pending":
                     queue_key = f"{QUEUE_KEY_PREFIX}{queue_name}"
-                    priority = job_data.get("created_at", time.time())
+                    priority = job_data.get("enqueue_time", time.time())
                     pipe.zadd(queue_key, {job_id: priority})
 
             await pipe.execute()
 
     async def _generate_workers(
-        self, settings_object_path: str, count: int, duration: int
+        self, config_path: str | None, count: int, duration: int
     ) -> None:
         """Generate fake worker heartbeats"""
-        settings = load_app_settings(settings_object_path)
+        settings = load_rrq_settings(config_path)
         job_store = await get_job_store(settings)
 
         try:
@@ -415,14 +413,14 @@ class DebugCommands(AsyncCommand):
     async def _submit_job(
         self,
         function_name: str,
-        settings_object_path: str,
+        config_path: str | None,
         args: Optional[str],
         kwargs: Optional[str],
         queue: Optional[str],
         delay: Optional[int],
     ) -> None:
         """Submit a test job"""
-        settings = load_app_settings(settings_object_path)
+        settings = load_rrq_settings(config_path)
 
         # Parse arguments
         parsed_args = json.loads(args) if args else []
@@ -455,10 +453,10 @@ class DebugCommands(AsyncCommand):
             await client.close()
 
     async def _clear_data(
-        self, settings_object_path: str, confirm: bool, pattern: str
+        self, config_path: str | None, confirm: bool, pattern: str
     ) -> None:
         """Clear test data from Redis"""
-        settings = load_app_settings(settings_object_path)
+        settings = load_rrq_settings(config_path)
         job_store = await get_job_store(settings)
 
         try:
@@ -491,13 +489,13 @@ class DebugCommands(AsyncCommand):
 
     async def _stress_test(
         self,
-        settings_object_path: str,
+        config_path: str | None,
         jobs_per_second: int,
         duration: int,
         queues: tuple,
     ) -> None:
         """Run stress test"""
-        settings = load_app_settings(settings_object_path)
+        settings = load_rrq_settings(config_path)
 
         # Default queues
         if not queues:

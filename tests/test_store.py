@@ -161,6 +161,24 @@ async def test_update_job_status(job_store: JobStore):
 
 
 @pytest.mark.asyncio
+async def test_mark_job_started(job_store: JobStore):
+    job = Job(function_name="start_time_test_func")
+    await job_store.save_job_definition(job)
+
+    start_time = datetime.now(timezone.utc)
+    await job_store.mark_job_started(job.id, "worker_test", start_time)
+
+    job_data = await job_store.get_job_data_dict(job.id)
+    assert job_data is not None
+    assert job_data.get("status") == JobStatus.ACTIVE.value
+    assert job_data.get("worker_id") == "worker_test"
+    stored_start = job_data.get("start_time")
+    assert stored_start is not None
+    parsed = datetime.fromisoformat(stored_start.replace("Z", "+00:00"))
+    assert parsed.timestamp() == pytest.approx(start_time.timestamp(), abs=1)
+
+
+@pytest.mark.asyncio
 async def test_update_job_next_scheduled_run_time(job_store: JobStore):
     job = Job(function_name="next_run_time_test")
     await job_store.save_job_definition(job)

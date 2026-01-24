@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "rrq-executor",
+    "rrq-producer",
+    "rrq-protocol",
+]

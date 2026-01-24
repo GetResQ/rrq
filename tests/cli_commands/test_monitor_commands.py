@@ -192,12 +192,12 @@ class TestDashboard:
         job_data = {
             b"function_name": b"test_function",
             b"status": b"completed",
-            b"created_at": b"1234567890.0",
+            b"enqueue_time": b"1234567890.0",
         }
         job_data_dict = {
             "function_name": "test_function",
             "status": "completed",
-            "created_at": "1234567890.0",
+            "enqueue_time": "1234567890.0",
         }
         mock_store.redis.hgetall = AsyncMock(return_value=job_data)
         mock_store.get_job_data_dict = AsyncMock(return_value=job_data_dict)
@@ -312,26 +312,26 @@ class TestDashboard:
         job_data_1 = {
             b"function_name": b"test_function",
             b"status": b"completed",
-            b"started_at": b"1234567890.0",
-            b"completed_at": b"1234567895.0",
+            b"start_time": b"1234567890.0",
+            b"completion_time": b"1234567895.0",
         }
         job_data_2 = {
             b"function_name": b"send_email",
             b"status": b"failed",
-            b"started_at": b"1234567880.0",
-            b"completed_at": b"1234567885.0",
+            b"start_time": b"1234567880.0",
+            b"completion_time": b"1234567885.0",
         }
         job_data_dict_1 = {
             "function_name": "test_function",
             "status": "completed",
-            "started_at": "1234567890.0",
-            "completed_at": "1234567895.0",
+            "start_time": "1234567890.0",
+            "completion_time": "1234567895.0",
         }
         job_data_dict_2 = {
             "function_name": "send_email",
             "status": "failed",
-            "started_at": "1234567880.0",
-            "completed_at": "1234567885.0",
+            "start_time": "1234567880.0",
+            "completion_time": "1234567885.0",
         }
 
         mock_store.redis.hgetall = AsyncMock(side_effect=[job_data_1, job_data_2])
@@ -425,15 +425,15 @@ class TestDashboard:
                 "id": "job_001",
                 "function": "test_function",
                 "status": "completed",
-                "started_at": 1234567890.0,
-                "completed_at": 1234567895.0,
+                "start_time": 1234567890.0,
+                "completion_time": 1234567895.0,
             },
             {
                 "id": "job_002",
                 "function": "send_email",
                 "status": "failed",
-                "started_at": 1234567880.0,
-                "completed_at": 1234567885.0,
+                "start_time": 1234567880.0,
+                "completion_time": 1234567885.0,
             },
         ]
 

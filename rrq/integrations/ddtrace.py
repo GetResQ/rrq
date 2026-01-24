@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from ..job import Job
-from ..telemetry import EnqueueSpan, JobSpan, Telemetry, configure
+from ..telemetry import ExecutorSpan, EnqueueSpan, JobSpan, Telemetry, configure
 
 
 def enable(
@@ -265,6 +265,157 @@ class _DdtraceJobSpan(JobSpan):
             pass
 
 
+class _DdtraceExecutorSpan(ExecutorSpan):
+    def __init__(
+        self,
+        *,
+        tracer: Any,
+        service: str,
+        component: str,
+        job_id: str,
+        function_name: str,
+        queue_name: str,
+        attempt: int,
+        worker_id: Optional[str],
+        parent_context: Any,
+        env: str | None,
+        version: str | None,
+    ) -> None:
+        self._tracer = tracer
+        self._service = service
+        self._component = component
+        self._job_id = job_id
+        self._function_name = function_name
+        self._queue_name = queue_name
+        self._attempt = attempt
+        self._worker_id = worker_id
+        self._parent_context = parent_context
+        self._env = env
+        self._version = version
+        self._span = None
+
+    def __enter__(self) -> "_DdtraceExecutorSpan":
+        span = _trace_with_parent(
+            self._tracer,
+            name="rrq.executor",
+            service=self._service,
+            resource=self._function_name,
+            span_type="worker",
+            parent_context=self._parent_context,
+        )
+        self._span = span.__enter__()
+        self._set_common_tags(self._span)
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:  # type: ignore[override]
+        if self._span is not None and exc is not None:
+            _set_span_error(self._span, exc)
+        try:
+            return self._span.__exit__(exc_type, exc, tb) if self._span else False
+        finally:
+            self._span = None
+
+    def success(self, *, duration_seconds: float) -> None:
+        self._set_outcome("success", duration_seconds=duration_seconds)
+
+    def retry(
+        self,
+        *,
+        duration_seconds: float,
+        delay_seconds: Optional[float] = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        self._set_outcome(
+            "retry",
+            duration_seconds=duration_seconds,
+            delay_seconds=delay_seconds,
+            reason=reason,
+        )
+
+    def timeout(
+        self,
+        *,
+        duration_seconds: float,
+        timeout_seconds: Optional[float] = None,
+        error_message: Optional[str] = None,
+    ) -> None:
+        if self._span is not None and error_message:
+            try:
+                self._span.set_tag("error.msg", error_message)
+            except Exception:
+                pass
+        self._set_outcome(
+            "timeout",
+            duration_seconds=duration_seconds,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def error(self, *, duration_seconds: float, error: BaseException) -> None:
+        if self._span is not None:
+            _set_span_error(self._span, error)
+        self._set_outcome("error", duration_seconds=duration_seconds)
+
+    def cancelled(
+        self, *, duration_seconds: float, reason: Optional[str] = None
+    ) -> None:
+        self._set_outcome(
+            "cancelled",
+            duration_seconds=duration_seconds,
+            reason=reason,
+        )
+
+    def close(self) -> None:
+        return None
+
+    def _set_common_tags(self, span: Any) -> None:
+        try:
+            span.set_tag("component", self._component)
+            span.set_tag("span.kind", "consumer")
+            span.set_tag("rrq.job_id", self._job_id)
+            span.set_tag("rrq.function", self._function_name)
+            span.set_tag("rrq.queue", self._queue_name)
+            span.set_tag("rrq.attempt", self._attempt)
+            if self._worker_id:
+                span.set_tag("rrq.worker_id", self._worker_id)
+            span.set_tag("messaging.system", "redis")
+            span.set_tag("messaging.destination.name", self._queue_name)
+            span.set_tag("messaging.destination_kind", "queue")
+            span.set_tag("messaging.operation", "process")
+            if self._env:
+                span.set_tag("env", self._env)
+            if self._version:
+                span.set_tag("version", self._version)
+        except Exception:
+            pass
+
+    def _set_outcome(
+        self,
+        outcome: str,
+        *,
+        duration_seconds: float,
+        delay_seconds: Optional[float] = None,
+        reason: Optional[str] = None,
+        timeout_seconds: Optional[float] = None,
+    ) -> None:
+        if self._span is None:
+            return
+        try:
+            self._span.set_tag("rrq.outcome", outcome)
+            _set_span_metric(
+                self._span, "rrq.duration_ms", float(duration_seconds) * 1000.0
+            )
+            if delay_seconds is not None:
+                _set_span_metric(
+                    self._span, "rrq.retry_delay_ms", float(delay_seconds) * 1000.0
+                )
+            if timeout_seconds is not None:
+                self._span.set_tag("rrq.timeout_seconds", float(timeout_seconds))
+            if reason:
+                self._span.set_tag("rrq.reason", reason)
+        except Exception:
+            pass
+
+
 class DdtraceTelemetry(Telemetry):
     """ddtrace-backed RRQ telemetry (traces + propagation)."""
 
@@ -345,6 +496,33 @@ class DdtraceTelemetry(Telemetry):
             queue_name=queue_name,
             attempt=attempt,
             timeout_seconds=timeout_seconds,
+            parent_context=parent_context,
+            env=self._env,
+            version=self._version,
+        )
+
+    def executor_span(
+        self,
+        *,
+        job_id: str,
+        function_name: str,
+        queue_name: str,
+        attempt: int,
+        trace_context: Optional[dict[str, str]],
+        worker_id: Optional[str],
+    ) -> ExecutorSpan:
+        parent_context = None
+        if self._propagator is not None and trace_context:
+            parent_context = _ddtrace_extract(self._propagator, dict(trace_context))
+        return _DdtraceExecutorSpan(
+            tracer=self._tracer,
+            service=self._service,
+            component=self._component,
+            job_id=job_id,
+            function_name=function_name,
+            queue_name=queue_name,
+            attempt=attempt,
+            worker_id=worker_id,
             parent_context=parent_context,
             env=self._env,
             version=self._version,

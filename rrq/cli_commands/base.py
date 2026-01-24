@@ -12,6 +12,13 @@ import click
 from ..settings import RRQSettings
 from ..store import JobStore
 
+try:
+    from dotenv import find_dotenv, load_dotenv
+
+    DOTENV_AVAILABLE = True
+except ImportError:
+    DOTENV_AVAILABLE = False
+
 
 class BaseCommand(ABC):
     """Base class for all RRQ CLI commands"""
@@ -34,26 +41,24 @@ class AsyncCommand(BaseCommand):
         return wrapper
 
 
-def load_app_settings(settings_object_path: str | None = None) -> RRQSettings:
-    """Load the settings object from the given path.
+def load_rrq_settings(config_path: str | None = None) -> RRQSettings:
+    """Load RRQ settings from TOML config."""
+    from ..config import load_toml_settings
 
-    If not provided, the RRQ_SETTINGS environment variable will be used.
-    If the environment variable is not set, will create a default settings object.
-    """
-    # Import the original function from cli.py
-    from ..cli import _load_app_settings
-
-    return _load_app_settings(settings_object_path)
+    if DOTENV_AVAILABLE:
+        dotenv_path = find_dotenv(usecwd=True)
+        if dotenv_path:
+            load_dotenv(dotenv_path=dotenv_path, override=False)
+    return load_toml_settings(config_path)
 
 
-def resolve_settings_source(
-    settings_object_path: str | None = None,
+def resolve_config_source(
+    config_path: str | None = None,
 ) -> tuple[str | None, str]:
-    """Resolve the settings path and its source."""
-    # Import the original function from cli.py
-    from ..cli import _resolve_settings_source
+    """Resolve the config path and its source."""
+    from ..config import resolve_config_source as resolve
 
-    return _resolve_settings_source(settings_object_path)
+    return resolve(config_path)
 
 
 def auto_discover_commands(package_path: str) -> list[type[BaseCommand]]:

@@ -7,7 +7,7 @@ import click
 
 from rrq.constants import JOB_KEY_PREFIX, QUEUE_KEY_PREFIX, DLQ_KEY_PREFIX
 from rrq.store import JobStore
-from rrq.cli_commands.base import AsyncCommand, load_app_settings, get_job_store
+from rrq.cli_commands.base import AsyncCommand, load_rrq_settings, get_job_store
 from ..utils import (
     console,
     create_progress,
@@ -36,27 +36,27 @@ class QueueCommands(AsyncCommand):
         # List all queues
         @queue_group.command("list")
         @click.option(
-            "--settings",
-            "settings_object_path",
+            "--config",
+            "config_path",
             type=str,
-            help="Python settings path (e.g., myapp.settings.rrq_settings)",
+            help="Path to RRQ TOML config (e.g., rrq.toml)",
         )
         @click.option(
             "--show-empty",
             is_flag=True,
             help="Show queues with no pending jobs",
         )
-        def list_queues(settings_object_path: str, show_empty: bool):
+        def list_queues(config_path: str | None, show_empty: bool):
             """List all active queues with job counts"""
-            self.make_async(self._list_queues)(settings_object_path, show_empty)
+            self.make_async(self._list_queues)(config_path, show_empty)
 
         # Show queue statistics
         @queue_group.command("stats")
         @click.option(
-            "--settings",
-            "settings_object_path",
+            "--config",
+            "config_path",
             type=str,
-            help="Python settings path (e.g., myapp.settings.rrq_settings)",
+            help="Path to RRQ TOML config (e.g., rrq.toml)",
         )
         @click.option(
             "--queue",
@@ -71,21 +71,19 @@ class QueueCommands(AsyncCommand):
             help="Maximum jobs to scan for status breakdown (0 = unlimited, may be slow)",
         )
         def queue_stats(
-            settings_object_path: str, queue_names: Tuple[str], max_scan: int
+            config_path: str | None, queue_names: Tuple[str], max_scan: int
         ):
             """Show detailed statistics for queues"""
-            self.make_async(self._queue_stats)(
-                settings_object_path, queue_names, max_scan
-            )
+            self.make_async(self._queue_stats)(config_path, queue_names, max_scan)
 
         # Inspect a specific queue
         @queue_group.command("inspect")
         @click.argument("queue_name")
         @click.option(
-            "--settings",
-            "settings_object_path",
+            "--config",
+            "config_path",
             type=str,
-            help="Python settings path (e.g., myapp.settings.rrq_settings)",
+            help="Path to RRQ TOML config (e.g., rrq.toml)",
         )
         @click.option(
             "--limit",
@@ -100,16 +98,14 @@ class QueueCommands(AsyncCommand):
             help="Offset for pagination",
         )
         def inspect_queue(
-            queue_name: str, settings_object_path: str, limit: int, offset: int
+            queue_name: str, config_path: str | None, limit: int, offset: int
         ):
             """Inspect jobs in a specific queue"""
-            self.make_async(self._inspect_queue)(
-                queue_name, settings_object_path, limit, offset
-            )
+            self.make_async(self._inspect_queue)(queue_name, config_path, limit, offset)
 
-    async def _list_queues(self, settings_object_path: str, show_empty: bool) -> None:
+    async def _list_queues(self, config_path: str | None, show_empty: bool) -> None:
         """List all active queues"""
-        settings = load_app_settings(settings_object_path)
+        settings = load_rrq_settings(config_path)
         job_store = await get_job_store(settings)
 
         try:
@@ -222,10 +218,10 @@ class QueueCommands(AsyncCommand):
         )
 
     async def _queue_stats(
-        self, settings_object_path: str, queue_names: Tuple[str], max_scan: int = 1000
+        self, config_path: str | None, queue_names: Tuple[str], max_scan: int = 1000
     ) -> None:
         """Show detailed queue statistics"""
-        settings = load_app_settings(settings_object_path)
+        settings = load_rrq_settings(config_path)
         job_store = await get_job_store(settings)
 
         try:
@@ -295,10 +291,10 @@ class QueueCommands(AsyncCommand):
             await job_store.aclose()
 
     async def _inspect_queue(
-        self, queue_name: str, settings_object_path: str, limit: int, offset: int
+        self, queue_name: str, config_path: str | None, limit: int, offset: int
     ) -> None:
         """Inspect jobs in a specific queue"""
-        settings = load_app_settings(settings_object_path)
+        settings = load_rrq_settings(config_path)
         job_store = await get_job_store(settings)
 
         try:

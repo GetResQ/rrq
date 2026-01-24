@@ -19,7 +19,7 @@ from rrq.constants import (
     QUEUE_KEY_PREFIX,
     DLQ_KEY_PREFIX,
 )
-from rrq.cli_commands.base import AsyncCommand, load_app_settings, get_job_store
+from rrq.cli_commands.base import AsyncCommand, load_rrq_settings, get_job_store
 from rrq.settings import RRQSettings
 from rrq.store import JobStore
 from ..utils import (
@@ -28,6 +28,7 @@ from ..utils import (
     format_queue_name,
     format_status,
     format_timestamp,
+    parse_timestamp,
 )
 
 # Error truncation lengths for consistency with DLQ commands
@@ -48,10 +49,10 @@ class MonitorCommands(AsyncCommand):
 
         @cli_group.command("monitor")
         @click.option(
-            "--settings",
-            "settings_object_path",
+            "--config",
+            "config_path",
             type=str,
-            help="Python settings path (e.g., myapp.settings.rrq_settings)",
+            help="Path to RRQ TOML config (e.g., rrq.toml)",
         )
         @click.option(
             "--refresh",
@@ -64,15 +65,15 @@ class MonitorCommands(AsyncCommand):
             multiple=True,
             help="Specific queues to monitor (default: all)",
         )
-        def monitor(settings_object_path: str, refresh: float, queues: tuple[str, ...]):
+        def monitor(config_path: str | None, refresh: float, queues: tuple[str, ...]):
             """Launch real-time monitoring dashboard"""
-            self.make_async(self._monitor)(settings_object_path, refresh, queues)
+            self.make_async(self._monitor)(config_path, refresh, queues)
 
     async def _monitor(
-        self, settings_object_path: str, refresh: float, queues: tuple[str, ...]
+        self, config_path: str | None, refresh: float, queues: tuple[str, ...]
     ) -> None:
         """Run the monitoring dashboard"""
-        settings = load_app_settings(settings_object_path)
+        settings = load_rrq_settings(config_path)
         dashboard = Dashboard(settings, refresh, queues)
 
         try:
@@ -281,15 +282,17 @@ class Dashboard:
             job_id = key.decode().replace(JOB_KEY_PREFIX, "")
             job_dict = await job_store.get_job_data_dict(job_id)
             if job_dict:
+                start_time = parse_timestamp(job_dict.get("start_time"))
+                completion_time = parse_timestamp(job_dict.get("completion_time"))
                 # Only include recently updated jobs
-                if "completed_at" in job_dict or "started_at" in job_dict:
+                if start_time is not None or completion_time is not None:
                     jobs.append(
                         {
                             "id": job_id,
                             "function": job_dict.get("function_name", "unknown"),
                             "status": job_dict.get("status", "unknown"),
-                            "started_at": float(job_dict.get("started_at", 0)),
-                            "completed_at": float(job_dict.get("completed_at", 0)),
+                            "start_time": start_time,
+                            "completion_time": completion_time,
                         }
                     )
 
@@ -297,7 +300,7 @@ class Dashboard:
 
         # Sort by most recent activity
         jobs.sort(
-            key=lambda x: x.get("completed_at") or x.get("started_at") or 0,
+            key=lambda x: x.get("completion_time") or x.get("start_time") or 0,
             reverse=True,
         )
 
@@ -471,8 +474,12 @@ class Dashboard:
                 job_dict = await job_store.get_job_data_dict(job_id)
                 if job_dict:
                     try:
+                        start_time = parse_timestamp(job_dict.get("start_time"))
+                        completion_time = parse_timestamp(
+                            job_dict.get("completion_time")
+                        )
                         # Only include recently updated jobs
-                        if "completed_at" in job_dict or "started_at" in job_dict:
+                        if start_time is not None or completion_time is not None:
                             recent_jobs.append(
                                 {
                                     "id": job_id,
@@ -480,10 +487,8 @@ class Dashboard:
                                         "function_name", "unknown"
                                     ),
                                     "status": job_dict.get("status", "unknown"),
-                                    "started_at": float(job_dict.get("started_at", 0)),
-                                    "completed_at": float(
-                                        job_dict.get("completed_at", 0)
-                                    ),
+                                    "start_time": start_time,
+                                    "completion_time": completion_time,
                                 }
                             )
                     except (ValueError, UnicodeDecodeError):
@@ -491,7 +496,7 @@ class Dashboard:
 
             # Sort by most recent activity
             recent_jobs.sort(
-                key=lambda x: x.get("completed_at") or x.get("started_at") or 0,
+                key=lambda x: x.get("completion_time") or x.get("start_time") or 0,
                 reverse=True,
             )
             jobs = recent_jobs[:limit]
@@ -681,8 +686,8 @@ class Dashboard:
             for job in self.recent_jobs[:5]:  # Show top 5
                 # Calculate duration
                 duration = None
-                if job.get("completed_at") and job.get("started_at"):
-                    duration = job["completed_at"] - job["started_at"]
+                if job.get("completion_time") and job.get("start_time"):
+                    duration = job["completion_time"] - job["start_time"]
 
                 # Truncate IDs
                 job_id = job["id"][:8] + "..."

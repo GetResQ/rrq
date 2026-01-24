@@ -49,12 +49,40 @@ def format_status(status: JobStatus | str) -> Text:
     return Text(status_str.upper(), style=color)
 
 
-def format_timestamp(ts: float | None) -> str:
+def parse_timestamp(value: Any) -> float | None:
+    """Parse timestamps from floats or ISO-8601 strings into epoch seconds."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, datetime):
+        return value.timestamp()
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8")
+        except (UnicodeDecodeError, AttributeError):
+            return None
+    if isinstance(value, str):
+        if not value:
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                return parsed.timestamp()
+            except ValueError:
+                return None
+    return None
+
+
+def format_timestamp(ts: float | str | datetime | None) -> str:
     """Format timestamp for display"""
-    if ts is None:
+    parsed = parse_timestamp(ts)
+    if parsed is None:
         return "N/A"
     try:
-        dt = datetime.fromtimestamp(ts)
+        dt = datetime.fromtimestamp(parsed)
         # Show relative time if recent
         now = datetime.now()
         diff = now - dt
