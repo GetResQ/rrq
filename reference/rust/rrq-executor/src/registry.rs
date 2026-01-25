@@ -68,10 +68,10 @@ impl Registry {
         let function_name = request.function_name.clone();
         let outcome = match self.get(&function_name) {
             Some(handler) => handler.handle(request).instrument(span.clone()).await,
-            None => ExecutionOutcome::handler_not_found(format!(
-                "No handler registered for function '{}'",
-                function_name
-            )),
+            None => ExecutionOutcome::handler_not_found(
+                request.job_id.clone(),
+                format!("No handler registered for function '{}'", function_name),
+            ),
         };
         record_outcome(&span, &outcome, start.elapsed());
         outcome
@@ -120,7 +120,10 @@ mod tests {
     async fn registry_invokes_handler() {
         let mut registry = Registry::new();
         registry.register("echo", |request| async move {
-            ExecutionOutcome::success(json!({ "job_id": request.job_id }))
+            ExecutionOutcome::success(
+                request.job_id.clone(),
+                json!({ "job_id": request.job_id }),
+            )
         });
 
         let handler = registry.get("echo").expect("handler not found");
@@ -150,7 +153,10 @@ mod tests {
     async fn registry_execute_with_noop_telemetry() {
         let mut registry = Registry::new();
         registry.register("echo", |request| async move {
-            ExecutionOutcome::success(json!({ "job_id": request.job_id }))
+            ExecutionOutcome::success(
+                request.job_id.clone(),
+                json!({ "job_id": request.job_id }),
+            )
         });
 
         let payload = json!({

@@ -97,6 +97,7 @@ async def run_python_executor(settings_object_path: str | None) -> None:
                 request = ExecutionRequest.model_validate_json(raw)
             except Exception as exc:
                 error = ExecutionOutcome(
+                    job_id="unknown",
                     status="error",
                     error_message=f"Invalid request: {exc}",
                 )
@@ -105,6 +106,7 @@ async def run_python_executor(settings_object_path: str | None) -> None:
 
             if request.protocol_version != "1":
                 outcome = ExecutionOutcome(
+                    job_id=request.job_id,
                     status="error",
                     error_message="Unsupported protocol version",
                 )
@@ -115,12 +117,14 @@ async def run_python_executor(settings_object_path: str | None) -> None:
                 outcome = await executor.execute(request)
             except HandlerNotFound as exc:
                 outcome = ExecutionOutcome(
+                    job_id=request.job_id,
                     status="error",
                     error_message=str(exc),
                     error_type="handler_not_found",
                 )
             except Exception as exc:
                 outcome = ExecutionOutcome(
+                    job_id=request.job_id,
                     status="error",
                     error_message=str(exc),
                 )

@@ -62,6 +62,7 @@ For cross-language tracing, all runtimes must use the same propagation format.
 ## ExecutionOutcome
 ```json
 {
+  "job_id": "uuid",
   "status": "success",
   "result": {"ok": true},
   "error_message": null,
@@ -76,6 +77,11 @@ One of:
 - `retry`: Executor requests retry. Scheduler applies retry policy.
 - `timeout`: Executor timed itself out (scheduler still enforces hard timeout).
 - `error`: Execution failed. Scheduler applies retry policy.
+
+### job_id
+The job ID this outcome corresponds to. Required for stdio executors so the
+scheduler can correlate responses and guard against stray or out-of-order
+stdout lines.
 
 ### error_type (optional)
 Reserved values:

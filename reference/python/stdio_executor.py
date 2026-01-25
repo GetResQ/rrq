@@ -12,7 +12,9 @@ from rrq.executor import ExecutionOutcome, ExecutionRequest
 
 
 def handle_echo(request: ExecutionRequest) -> ExecutionOutcome:
-    return ExecutionOutcome(status="success", result={"job_id": request.job_id})
+    return ExecutionOutcome(
+        job_id=request.job_id, status="success", result={"job_id": request.job_id}
+    )
 
 
 def main() -> int:
@@ -27,7 +29,11 @@ def main() -> int:
         try:
             request = ExecutionRequest.model_validate_json(raw)
         except Exception as exc:
-            outcome = ExecutionOutcome(status="error", error_message=str(exc))
+            outcome = ExecutionOutcome(
+                job_id="unknown",
+                status="error",
+                error_message=str(exc),
+            )
             sys.stdout.write(outcome.model_dump_json() + "\n")
             sys.stdout.flush()
             continue
@@ -35,6 +41,7 @@ def main() -> int:
         handler = handlers.get(request.function_name)
         if handler is None:
             outcome = ExecutionOutcome(
+                job_id=request.job_id,
                 status="error",
                 error_message=f"No handler for '{request.function_name}'",
                 error_type="handler_not_found",

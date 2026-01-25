@@ -15,6 +15,7 @@ from .constants import (
     DEFAULT_DLQ_RESULT_TTL_SECONDS,
     JOB_KEY_PREFIX,
     LOCK_KEY_PREFIX,
+    ACTIVE_JOBS_PREFIX,
     QUEUE_KEY_PREFIX,
     UNIQUE_JOB_LOCK_PREFIX,
 )
@@ -465,6 +466,24 @@ class JobStore:
         await self.redis.hset(job_key, "status", status.value.encode("utf-8"))
         logger.debug(f"Updated status of job {job_id} to {status.value}.")
 
+    async def mark_job_pending(
+        self, job_id: str, *, last_error: str | None = None
+    ) -> None:
+        """Mark a job as pending and clear any active worker metadata."""
+        job_key = f"{JOB_KEY_PREFIX}{job_id}"
+        update_data = {"status": JobStatus.PENDING.value.encode("utf-8")}
+        if last_error is not None:
+            update_data["last_error"] = last_error.encode("utf-8")
+        async with self.redis.pipeline(transaction=True) as pipe:
+            pipe.hset(job_key, mapping=update_data)
+            pipe.hdel(job_key, "start_time", "worker_id")
+            await pipe.execute()
+
+    async def is_job_queued(self, queue_name: str, job_id: str) -> bool:
+        queue_key = self._format_queue_key(queue_name)
+        score = await self.redis.zscore(queue_key, job_id.encode("utf-8"))
+        return score is not None
+
     async def mark_job_started(
         self, job_id: str, worker_id: str, start_time: datetime
     ) -> None:
@@ -482,6 +501,37 @@ class JobStore:
         }
         await self.redis.hset(job_key, mapping=update_data)
         logger.debug(f"Marked job {job_id} as ACTIVE at {dt.isoformat()}.")
+        await self.track_active_job(worker_id, job_id, dt)
+
+    def _active_jobs_key(self, worker_id: str) -> str:
+        return f"{ACTIVE_JOBS_PREFIX}{worker_id}"
+
+    async def track_active_job(
+        self, worker_id: str, job_id: str, start_time: datetime
+    ) -> None:
+        active_key = self._active_jobs_key(worker_id)
+        score = start_time.timestamp()
+        await self.redis.zadd(active_key, {job_id.encode("utf-8"): score})
+
+    async def remove_active_job(self, worker_id: str, job_id: str) -> None:
+        active_key = self._active_jobs_key(worker_id)
+        await self.redis.zrem(active_key, job_id.encode("utf-8"))
+
+    async def get_active_job_ids(self, worker_id: str) -> list[str]:
+        active_key = self._active_jobs_key(worker_id)
+        job_ids = await self.redis.zrange(active_key, 0, -1)
+        return [job_id.decode("utf-8") for job_id in job_ids]
+
+    async def scan_active_job_keys(
+        self, *, cursor: int = 0, count: int = 100
+    ) -> tuple[int, list[str]]:
+        scan_cursor, keys = await self.redis.scan(
+            cursor=cursor, match=f"{ACTIVE_JOBS_PREFIX}*", count=count
+        )
+        decoded = [
+            key.decode("utf-8") if isinstance(key, bytes) else str(key) for key in keys
+        ]
+        return int(scan_cursor), decoded
 
     async def get_job_status(self, job_id: str) -> Optional[str]:
         """Retrieves the status field for a job from Redis.

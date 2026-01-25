@@ -22,6 +22,7 @@ from rrq.client import RRQClient
 
 from .constants import (
     DEFAULT_WORKER_ID_PREFIX,
+    ACTIVE_JOBS_PREFIX,
 )
 from .exc import HandlerNotFound, RetryJob
 from .executor import (
@@ -286,6 +287,9 @@ class RRQWorker:
                             logger.warning(
                                 f"Worker {self.worker_id} job definition {job_id} not found during polling for queue {queue_name}."
                             )
+                            await self.job_store.remove_job_from_queue(
+                                queue_name, job_id
+                            )
                             continue
 
                         executor_name, handler_name = self._split_executor_name(
@@ -365,6 +369,7 @@ class RRQWorker:
             logger.warning(
                 f"Worker {self.worker_id} job definition {job_id} not found during _try_acquire_job from queue {queue_name}."
             )
+            await self.job_store.remove_job_from_queue(queue_name, job_id)
             return None  # Job vanished between poll and fetch?
         return await self._try_lock_job(job, queue_name)
 
@@ -396,6 +401,19 @@ class RRQWorker:
         if not lock_acquired or removed_count == 0:
             return None  # Another worker got there first
 
+        try:
+            start_time = datetime.now(timezone.utc)
+            await self.job_store.mark_job_started(job.id, self.worker_id, start_time)
+            job.start_time = start_time
+        except Exception:
+            await self.job_store.release_job_lock(job.id)
+            await self.job_store.mark_job_pending(
+                job.id,
+                last_error="Job acquisition failed to start; re-queued for recovery.",
+            )
+            await self.job_store.add_job_to_queue(queue_name, job.id, time.time() * 1000)
+            raise
+
         # Successfully acquired the job
         logger.debug(f"Worker {self.worker_id} successfully acquired job {job.id}")
         return job
@@ -417,10 +435,9 @@ class RRQWorker:
             queue_name: The name of the queue the job was retrieved from.
         """
         try:
-            start_time = datetime.now(timezone.utc)
-            await self.job_store.mark_job_started(job.id, self.worker_id, start_time)
+            start_time = job.start_time or datetime.now(timezone.utc)
             logger.debug(
-                f"Worker {self.worker_id} marked job {job.id} ACTIVE at {start_time.isoformat()}"
+                f"Worker {self.worker_id} job {job.id} ACTIVE at {start_time.isoformat()}"
             )
 
             # Create and track the execution task
@@ -443,6 +460,19 @@ class RRQWorker:
             )
             # Release the lock since task wasn't started
             await self.job_store.release_job_lock(job.id)
+            await self.job_store.remove_active_job(self.worker_id, job.id)
+            try:
+                await self.job_store.mark_job_pending(
+                    job.id,
+                    last_error=(
+                        "Job execution failed to start; re-queued for recovery."
+                    ),
+                )
+                await self.job_store.add_job_to_queue(
+                    queue_name, job.id, time.time() * 1000
+                )
+            except Exception:
+                pass
             if reservation is not None:
                 await reservation.release()
             raise  # Re-raise to be handled by caller
@@ -780,6 +810,7 @@ class RRQWorker:
         finally:
             if reservation is not None:
                 await reservation.release()
+            await self.job_store.remove_active_job(self.worker_id, job.id)
             # CRITICAL: Ensure the lock is released regardless of outcome
             await self.job_store.release_job_lock(job.id)
             # Logger call moved inside release_job_lock for context
@@ -1115,6 +1146,7 @@ class RRQWorker:
                 telemetry.worker_heartbeat(
                     worker_id=self.worker_id, health_data=health_data
                 )
+                await self._recover_orphaned_jobs()
                 # Logger call moved into set_worker_health
             except Exception as e:
                 # Log error but continue the loop
@@ -1146,6 +1178,68 @@ class RRQWorker:
                 await asyncio.sleep(1)  # Avoid tight loop
 
         logger.debug(f"Worker {self.worker_id} heartbeat loop finished.")
+
+    async def _recover_orphaned_jobs(self) -> None:
+        cursor = 0
+        recovered = 0
+        while True:
+            cursor, keys = await self.job_store.scan_active_job_keys(
+                cursor=cursor, count=100
+            )
+            for key in keys:
+                if not key.startswith(ACTIVE_JOBS_PREFIX):
+                    continue
+                worker_id = key[len(ACTIVE_JOBS_PREFIX) :]
+                if not worker_id:
+                    continue
+                job_ids = await self.job_store.get_active_job_ids(worker_id)
+                for job_id in job_ids:
+                    if self._shutdown_event.is_set():
+                        return
+                    lock_owner = await self.job_store.get_job_lock_owner(job_id)
+                    if lock_owner:
+                        continue
+                    job = await self.job_store.get_job_definition(job_id)
+                    if not job:
+                        await self.job_store.remove_active_job(worker_id, job_id)
+                        continue
+                    queue_name = job.queue_name or self.settings.default_queue_name
+                    if await self.job_store.is_job_queued(queue_name, job_id):
+                        if job.status == JobStatus.ACTIVE:
+                            await self.job_store.mark_job_pending(job.id)
+                        await self.job_store.remove_active_job(worker_id, job_id)
+                        continue
+                    if job.status in {JobStatus.ACTIVE, JobStatus.PENDING, JobStatus.RETRYING}:
+                        requeue_time = job.next_scheduled_run_time or datetime.now(
+                            timezone.utc
+                        )
+                        if requeue_time.tzinfo is None:
+                            requeue_time = requeue_time.replace(tzinfo=timezone.utc)
+                        score_ms = int(requeue_time.timestamp() * 1000)
+                        await self.job_store.add_job_to_queue(
+                            queue_name, job.id, score_ms
+                        )
+                        if job.status == JobStatus.ACTIVE:
+                            await self.job_store.mark_job_pending(
+                                job.id,
+                                last_error=(
+                                    "Recovered after lock expiry or worker crash."
+                                ),
+                            )
+                        if job.next_scheduled_run_time != requeue_time:
+                            await self.job_store.update_job_next_scheduled_run_time(
+                                job.id, requeue_time
+                            )
+                        await self.job_store.remove_active_job(worker_id, job_id)
+                        recovered += 1
+                    else:
+                        await self.job_store.remove_active_job(worker_id, job_id)
+            if cursor == 0:
+                break
+        if recovered:
+            logger.warning(
+                f"Worker {self.worker_id} re-queued {recovered} orphaned job(s)."
+            )
 
     async def _maybe_enqueue_cron_jobs(self) -> None:
         """Enqueue cron jobs that are due to run."""
@@ -1284,6 +1378,9 @@ class RRQWorker:
             # Do not increment retries for shutdown interruption
 
             await self.job_store.save_job_definition(job)
+            await self.job_store.mark_job_pending(
+                job.id, last_error=job.last_error or None
+            )
             await self.job_store.add_job_to_queue(
                 queue_name, job.id, job.next_scheduled_run_time.timestamp() * 1000
             )

@@ -54,6 +54,7 @@ def test_stdio_executor_echo_handler() -> None:
     request = _request("echo")
     outcomes = _run_executor([request.model_dump_json()])
     assert len(outcomes) == 1
+    assert outcomes[0].job_id == "job-1"
     assert outcomes[0].status == "success"
     assert outcomes[0].result == {"job_id": "job-1"}
 
@@ -62,6 +63,7 @@ def test_stdio_executor_unknown_handler() -> None:
     request = _request("missing")
     outcomes = _run_executor([request.model_dump_json()])
     assert len(outcomes) == 1
+    assert outcomes[0].job_id == "job-1"
     assert outcomes[0].status == "error"
     assert outcomes[0].error_type == "handler_not_found"
 

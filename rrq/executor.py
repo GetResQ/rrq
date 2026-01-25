@@ -50,6 +50,7 @@ class ExecutionRequest(BaseModel):
 class ExecutionOutcome(BaseModel):
     """Result returned by an executor."""
 
+    job_id: str | None = None
     status: Literal["success", "retry", "timeout", "error"]
     result: Any | None = None
     error_message: str | None = None
@@ -127,7 +128,9 @@ class PythonExecutor:
                     "Handler for job %s returned successfully.", request.job_id
                 )
                 span.success(duration_seconds=time.monotonic() - start_time)
-                return ExecutionOutcome(status="success", result=result)
+                return ExecutionOutcome(
+                    job_id=request.job_id, status="success", result=result
+                )
             except RetryJob as exc:
                 logger.info("Job %s requested retry: %s", request.job_id, exc)
                 span.retry(
@@ -136,6 +139,7 @@ class PythonExecutor:
                     reason=str(exc) or None,
                 )
                 return ExecutionOutcome(
+                    job_id=request.job_id,
                     status="retry",
                     error_message=str(exc) or None,
                     retry_after_seconds=exc.defer_seconds,
@@ -150,7 +154,11 @@ class PythonExecutor:
                     timeout_seconds=None,
                     error_message=error_message,
                 )
-                return ExecutionOutcome(status="timeout", error_message=error_message)
+                return ExecutionOutcome(
+                    job_id=request.job_id,
+                    status="timeout",
+                    error_message=error_message,
+                )
             except Exception as exc:
                 logger.error(
                     "Job %s handler '%s' raised unhandled exception:",
@@ -160,6 +168,7 @@ class PythonExecutor:
                 )
                 span.error(duration_seconds=time.monotonic() - start_time, error=exc)
                 return ExecutionOutcome(
+                    job_id=request.job_id,
                     status="error",
                     error_message=str(exc) or "Unhandled handler error",
                 )
@@ -449,6 +458,12 @@ class StdioExecutor:
             if not line:
                 raise RuntimeError("Executor process exited")
             outcome = ExecutionOutcome.model_validate_json(line)
+            if outcome.job_id is None:
+                raise RuntimeError("Executor outcome missing job_id")
+            if outcome.job_id != request.job_id:
+                raise RuntimeError(
+                    f"Executor outcome job_id mismatch (expected {request.job_id}, got {outcome.job_id})"
+                )
             return outcome
         except asyncio.CancelledError:
             await self._pool.invalidate(stdio_proc)
@@ -457,7 +472,9 @@ class StdioExecutor:
         except Exception as exc:
             await self._pool.invalidate(stdio_proc)
             replaced = True
-            return ExecutionOutcome(status="error", error_message=str(exc))
+            return ExecutionOutcome(
+                job_id=request.job_id, status="error", error_message=str(exc)
+            )
         finally:
             if not replaced:
                 await self._pool.release(stdio_proc)
@@ -494,6 +511,12 @@ class StdioExecutor:
             if not line:
                 raise RuntimeError("Executor process exited")
             outcome = ExecutionOutcome.model_validate_json(line)
+            if outcome.job_id is None:
+                raise RuntimeError("Executor outcome missing job_id")
+            if outcome.job_id != request.job_id:
+                raise RuntimeError(
+                    f"Executor outcome job_id mismatch (expected {request.job_id}, got {outcome.job_id})"
+                )
             return outcome
         except asyncio.CancelledError:
             await reservation.invalidate()
@@ -502,7 +525,9 @@ class StdioExecutor:
         except Exception as exc:
             await reservation.invalidate()
             replaced = True
-            return ExecutionOutcome(status="error", error_message=str(exc))
+            return ExecutionOutcome(
+                job_id=request.job_id, status="error", error_message=str(exc)
+            )
         finally:
             if not replaced:
                 await reservation.release()

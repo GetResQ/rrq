@@ -45,6 +45,8 @@ pub enum OutcomeStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionOutcome {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
     pub status: OutcomeStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
@@ -57,9 +59,10 @@ pub struct ExecutionOutcome {
 }
 
 impl ExecutionOutcome {
-    pub fn success<T: Serialize>(result: T) -> Self {
+    pub fn success<T: Serialize>(job_id: impl Into<String>, result: T) -> Self {
         let value = serde_json::to_value(result).unwrap_or(Value::Null);
         Self {
+            job_id: Some(job_id.into()),
             status: OutcomeStatus::Success,
             result: Some(value),
             error_message: None,
@@ -68,8 +71,13 @@ impl ExecutionOutcome {
         }
     }
 
-    pub fn retry(message: impl Into<String>, retry_after_seconds: Option<f64>) -> Self {
+    pub fn retry(
+        job_id: impl Into<String>,
+        message: impl Into<String>,
+        retry_after_seconds: Option<f64>,
+    ) -> Self {
         Self {
+            job_id: Some(job_id.into()),
             status: OutcomeStatus::Retry,
             result: None,
             error_message: Some(message.into()),
@@ -78,8 +86,9 @@ impl ExecutionOutcome {
         }
     }
 
-    pub fn timeout(message: impl Into<String>) -> Self {
+    pub fn timeout(job_id: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
+            job_id: Some(job_id.into()),
             status: OutcomeStatus::Timeout,
             result: None,
             error_message: Some(message.into()),
@@ -88,8 +97,9 @@ impl ExecutionOutcome {
         }
     }
 
-    pub fn error(message: impl Into<String>) -> Self {
+    pub fn error(job_id: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
+            job_id: Some(job_id.into()),
             status: OutcomeStatus::Error,
             result: None,
             error_message: Some(message.into()),
@@ -98,8 +108,12 @@ impl ExecutionOutcome {
         }
     }
 
-    pub fn handler_not_found(message: impl Into<String>) -> Self {
+    pub fn handler_not_found(
+        job_id: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
+            job_id: Some(job_id.into()),
             status: OutcomeStatus::Error,
             result: None,
             error_message: Some(message.into()),
@@ -137,7 +151,8 @@ mod tests {
 
     #[test]
     fn handler_not_found_sets_error_type() {
-        let outcome = ExecutionOutcome::handler_not_found("missing handler");
+        let outcome =
+            ExecutionOutcome::handler_not_found("job-1", "missing handler");
         assert_eq!(outcome.status, OutcomeStatus::Error);
         assert_eq!(outcome.error_type.as_deref(), Some("handler_not_found"));
     }

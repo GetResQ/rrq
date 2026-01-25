@@ -30,7 +30,11 @@ async def test_queue_routing_executor() -> None:
 
         async def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
             self.calls.append(request.job_id)
-            return ExecutionOutcome(status="success", result={"executor": self.name})
+            return ExecutionOutcome(
+                job_id=request.job_id,
+                status="success",
+                result={"executor": self.name},
+            )
 
         async def cancel(self, job_id: str) -> None:
             self.calls.append(f"cancel:{job_id}")
@@ -89,7 +93,7 @@ async def test_stdio_executor_success(tmp_path) -> None:
         "import json,sys\n"
         "for line in sys.stdin:\n"
         "    req=json.loads(line)\n"
-        "    out={'status':'success','result':{'job_id':req['job_id']}}\n"
+        "    out={'job_id':req['job_id'],'status':'success','result':{'job_id':req['job_id']}}\n"
         "    sys.stdout.write(json.dumps(out)+'\\n')\n"
         "    sys.stdout.flush()\n"
     )

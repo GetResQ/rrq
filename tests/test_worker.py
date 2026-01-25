@@ -140,6 +140,7 @@ class InProcessExecutor(Executor):
         handler = self.handlers.get(request.function_name)
         if handler is None:
             return ExecutionOutcome(
+                job_id=request.job_id,
                 status="error",
                 error_message=(
                     f"No handler registered for function '{request.function_name}'"
@@ -159,20 +160,25 @@ class InProcessExecutor(Executor):
 
         try:
             result = await handler(context, *request.args, **request.kwargs)
-            return ExecutionOutcome(status="success", result=result)
+            return ExecutionOutcome(
+                job_id=request.job_id, status="success", result=result
+            )
         except RetryJob as exc:
             return ExecutionOutcome(
+                job_id=request.job_id,
                 status="retry",
                 error_message=str(exc) or None,
                 retry_after_seconds=exc.defer_seconds,
             )
         except (asyncio.TimeoutError, TimeoutError) as exc:
             return ExecutionOutcome(
+                job_id=request.job_id,
                 status="timeout",
                 error_message=str(exc) or "Job execution timed out.",
             )
         except Exception as exc:
             return ExecutionOutcome(
+                job_id=request.job_id,
                 status="error",
                 error_message=str(exc) or "Unhandled handler error",
             )
@@ -1053,7 +1059,11 @@ async def test_worker_run_closes_resources_on_exit():
             self.name = name
 
         async def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
-            return ExecutionOutcome(status="success", result={"executor": self.name})
+            return ExecutionOutcome(
+                job_id=request.job_id,
+                status="success",
+                result={"executor": self.name},
+            )
 
         async def cancel(self, job_id: str) -> None:
             return None
@@ -1184,7 +1194,9 @@ async def test_worker_routes_executor_prefix(
 
         async def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
             self.requests.append(request)
-            return ExecutionOutcome(status="success", result={"ok": True})
+            return ExecutionOutcome(
+                job_id=request.job_id, status="success", result={"ok": True}
+            )
 
         async def cancel(self, job_id: str) -> None:
             return None
