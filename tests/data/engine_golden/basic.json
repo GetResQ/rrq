@@ -1,0 +1,46 @@
+{
+  "engine": "python",
+  "jobs": {
+    "job-fail": {
+      "current_retries": 2,
+      "in_dlq": true,
+      "last_error": "boom: gamma",
+      "max_retries": 2,
+      "result": null,
+      "status": "FAILED"
+    },
+    "job-missing": {
+      "current_retries": 1,
+      "in_dlq": true,
+      "last_error": "No handler registered for function 'missing_handler'",
+      "max_retries": 3,
+      "result": null,
+      "status": "FAILED"
+    },
+    "job-retry": {
+      "current_retries": 1,
+      "in_dlq": false,
+      "last_error": null,
+      "max_retries": 3,
+      "result": "ok:beta",
+      "status": "COMPLETED"
+    },
+    "job-success": {
+      "current_retries": 0,
+      "in_dlq": false,
+      "last_error": null,
+      "max_retries": 3,
+      "result": "ok:alpha",
+      "status": "COMPLETED"
+    },
+    "job-timeout": {
+      "current_retries": 1,
+      "in_dlq": true,
+      "last_error": "Job timed out after 1s.",
+      "max_retries": 3,
+      "result": null,
+      "status": "FAILED"
+    }
+  },
+  "scenario": "basic"
+}

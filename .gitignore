@@ -2,3 +2,6 @@
 __pycache__/
 .git/
 .vscode/
+target/
+rrq/bin/rrq
+rrq/bin/rrq.exe

@@ -1,0 +1,61 @@
+{
+  "engine": "python",
+  "jobs": {
+    "job-custom-queue": {
+      "current_retries": 0,
+      "deferred": false,
+      "in_dlq": false,
+      "last_error": null,
+      "max_retries": 3,
+      "queue_name": "rrq:queue:custom",
+      "result": "ok:delta",
+      "status": "COMPLETED",
+      "unique_key": null
+    },
+    "job-defer": {
+      "current_retries": 0,
+      "deferred": true,
+      "in_dlq": false,
+      "last_error": null,
+      "max_retries": 3,
+      "queue_name": "rrq:queue:default",
+      "result": "ok:gamma",
+      "status": "COMPLETED",
+      "unique_key": null
+    },
+    "job-dlq": {
+      "current_retries": 1,
+      "deferred": false,
+      "in_dlq": true,
+      "last_error": "boom: epsilon",
+      "max_retries": 1,
+      "queue_name": "rrq:queue:default",
+      "result": null,
+      "status": "FAILED",
+      "unique_key": null
+    },
+    "job-unique-1": {
+      "current_retries": 0,
+      "deferred": false,
+      "in_dlq": false,
+      "last_error": null,
+      "max_retries": 3,
+      "queue_name": "rrq:queue:default",
+      "result": "ok:alpha",
+      "status": "COMPLETED",
+      "unique_key": "unique-alpha"
+    },
+    "job-unique-2": {
+      "current_retries": 0,
+      "deferred": true,
+      "in_dlq": false,
+      "last_error": null,
+      "max_retries": 3,
+      "queue_name": "rrq:queue:default",
+      "result": "ok:beta",
+      "status": "COMPLETED",
+      "unique_key": "unique-alpha"
+    }
+  },
+  "scenario": "extended"
+}

@@ -20,6 +20,7 @@ class JobStatus(str, Enum):
         "FAILED"  # Job failed after all retry attempts or was a non-retryable failure.
     )
     RETRYING = "RETRYING"  # Job failed, an attempt will be made to re-process it after a delay.
+    CANCELLED = "CANCELLED"  # Job cancelled before completion.
     # NOT_FOUND might be a status for queries, but not stored on the job itself typically
 
 
@@ -52,6 +53,11 @@ class Job(BaseModel):
     enqueue_time: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         description="Timestamp (timezone.utc) when the job was initially enqueued.",
+    )
+
+    start_time: Optional[datetime] = Field(
+        default=None,
+        description="Timestamp (timezone.utc) when the job started processing.",
     )
 
     status: JobStatus = Field(

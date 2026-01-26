@@ -31,6 +31,12 @@ class RetryJob(RRQError):
         self.defer_seconds = defer_seconds
 
 
+class HandlerNotFound(RRQError):
+    """Exception raised when a job handler cannot be found in the registry."""
+
+    pass
+
+
 class JobNotFound(RRQError):
     """Exception raised when a job definition cannot be found in the JobStore."""
 

@@ -35,3 +35,18 @@ jobs:
 
       - name: Run tests
         run: uv run pytest --disable-warnings -q --maxfail=1
+
+  rust-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo audit
+        run: cd reference/rust && cargo audit

@@ -1,14 +1,28 @@
-from .cron import CronJob, CronSchedule
-from .worker import RRQWorker
 from .client import RRQClient
+from .executor import (
+    ExecutionContext,
+    ExecutionOutcome,
+    ExecutionRequest,
+    PythonExecutor,
+    QueueRoutingExecutor,
+    StdioExecutor,
+    build_executors_from_settings,
+)
+from .executor_settings import PythonExecutorSettings
 from .registry import JobRegistry
-from .settings import RRQSettings
+from .settings import ExecutorConfig, RRQSettings
 
 __all__ = [
-    "CronJob",
-    "CronSchedule",
-    "RRQWorker",
     "RRQClient",
-    "JobRegistry",
     "RRQSettings",
+    "ExecutorConfig",
+    "JobRegistry",
+    "PythonExecutorSettings",
+    "ExecutionContext",
+    "ExecutionRequest",
+    "ExecutionOutcome",
+    "PythonExecutor",
+    "QueueRoutingExecutor",
+    "StdioExecutor",
+    "build_executors_from_settings",
 ]

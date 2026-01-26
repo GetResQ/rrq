@@ -1,0 +1,16 @@
+[package]
+name = "rrq-producer"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1.0.100"
+chrono = { version = "0.4.43", features = ["serde"] }
+redis = { version = "1.0.2", features = ["tokio-comp"] }
+serde_json = "1.0.149"
+uuid = { version = "1.20.0", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
+serde_json = "1.0.149"

@@ -17,7 +17,7 @@ JOB_KEY_PREFIX: str = "rrq:job:"
 QUEUE_KEY_PREFIX: str = "rrq:queue:"  # For ZSETs holding job IDs
 DLQ_KEY_PREFIX: str = "rrq:dlq:"  # For lists holding Dead Letter Queue job IDs
 ACTIVE_JOBS_PREFIX: str = (
-    "rrq:active:"  # For lists of active jobs per worker (optional, for recovery)
+    "rrq:active:jobs:"  # ZSET per worker for active jobs (optional, for recovery)
 )
 LOCK_KEY_PREFIX: str = "rrq:lock:job:"  # For job processing locks
 UNIQUE_JOB_LOCK_PREFIX: str = "rrq:lock:unique:"  # For user-defined unique job keys

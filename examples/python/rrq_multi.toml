@@ -1,0 +1,17 @@
+[rrq]
+redis_dsn = "redis://localhost:6379/3"
+default_executor_name = "python"
+worker_concurrency = 4
+
+[rrq.executors.python]
+type = "stdio"
+cmd = ["rrq-executor", "--settings", "examples.python.executor_config.python_executor_settings"]
+pool_size = 1
+
+[rrq.executors.rust]
+type = "stdio"
+cmd = ["/opt/rrq-executor", "--stdio"]
+pool_size = 1
+
+[rrq.routing]
+rust_queue = "rust"
