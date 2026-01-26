@@ -78,11 +78,7 @@ impl Registry {
     }
 }
 
-fn record_outcome(
-    span: &tracing::Span,
-    outcome: &ExecutionOutcome,
-    duration: std::time::Duration,
-) {
+fn record_outcome(span: &tracing::Span, outcome: &ExecutionOutcome, duration: std::time::Duration) {
     let duration_ms = duration.as_secs_f64() * 1000.0;
     span.record("rrq.duration_ms", duration_ms);
     match outcome.status {
@@ -120,10 +116,7 @@ mod tests {
     async fn registry_invokes_handler() {
         let mut registry = Registry::new();
         registry.register("echo", |request| async move {
-            ExecutionOutcome::success(
-                request.job_id.clone(),
-                json!({ "job_id": request.job_id }),
-            )
+            ExecutionOutcome::success(request.job_id.clone(), json!({ "job_id": request.job_id }))
         });
 
         let handler = registry.get("echo").expect("handler not found");
@@ -153,10 +146,7 @@ mod tests {
     async fn registry_execute_with_noop_telemetry() {
         let mut registry = Registry::new();
         registry.register("echo", |request| async move {
-            ExecutionOutcome::success(
-                request.job_id.clone(),
-                json!({ "job_id": request.job_id }),
-            )
+            ExecutionOutcome::success(request.job_id.clone(), json!({ "job_id": request.job_id }))
         });
 
         let payload = json!({
@@ -176,7 +166,9 @@ mod tests {
         });
         let request: ExecutionRequest = serde_json::from_value(payload).unwrap();
 
-        let outcome = registry.execute_with(request, &NoopTelemetry::default()).await;
+        let outcome = registry
+            .execute_with(request, &NoopTelemetry::default())
+            .await;
         assert_eq!(outcome.status, OutcomeStatus::Success);
     }
 
@@ -200,7 +192,9 @@ mod tests {
         });
         let request: ExecutionRequest = serde_json::from_value(payload).unwrap();
 
-        let outcome = registry.execute_with(request, &NoopTelemetry::default()).await;
+        let outcome = registry
+            .execute_with(request, &NoopTelemetry::default())
+            .await;
         assert_eq!(outcome.status, OutcomeStatus::Error);
         assert_eq!(outcome.error_type.as_deref(), Some("handler_not_found"));
     }

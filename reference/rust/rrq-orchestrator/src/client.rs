@@ -27,7 +27,10 @@ pub struct RRQClient {
 
 impl RRQClient {
     pub fn new(settings: RRQSettings, job_store: JobStore) -> Self {
-        Self { settings, job_store }
+        Self {
+            settings,
+            job_store,
+        }
     }
 
     pub async fn enqueue(
@@ -37,9 +40,7 @@ impl RRQClient {
         kwargs: serde_json::Map<String, Value>,
         options: EnqueueOptions,
     ) -> Result<Job> {
-        let job_id = options
-            .job_id
-            .unwrap_or_else(|| Job::new_id());
+        let job_id = options.job_id.unwrap_or_else(|| Job::new_id());
         let queue_name = options
             .queue_name
             .unwrap_or_else(|| self.settings.default_queue_name.clone());
@@ -58,7 +59,9 @@ impl RRQClient {
 
         if let Some(defer_until) = options.defer_until {
             desired_run_time = defer_until;
-            let diff = defer_until.signed_duration_since(enqueue_time).num_seconds();
+            let diff = defer_until
+                .signed_duration_since(enqueue_time)
+                .num_seconds();
             if diff > 0 {
                 lock_ttl_seconds = lock_ttl_seconds.max(diff + 1);
             }
@@ -72,7 +75,8 @@ impl RRQClient {
         if let Some(unique_key) = options.unique_key.as_deref() {
             let remaining_ttl = self.job_store.get_lock_ttl(unique_key).await?;
             if remaining_ttl > 0 {
-                desired_run_time = desired_run_time.max(enqueue_time + Duration::seconds(remaining_ttl));
+                desired_run_time =
+                    desired_run_time.max(enqueue_time + Duration::seconds(remaining_ttl));
             } else {
                 let acquired = self
                     .job_store
@@ -83,8 +87,8 @@ impl RRQClient {
                 } else {
                     let remaining = self.job_store.get_lock_ttl(unique_key).await?;
                     if remaining > 0 {
-                        desired_run_time = desired_run_time
-                            .max(enqueue_time + Duration::seconds(remaining));
+                        desired_run_time =
+                            desired_run_time.max(enqueue_time + Duration::seconds(remaining));
                     }
                 }
             }

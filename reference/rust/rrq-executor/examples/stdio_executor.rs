@@ -23,11 +23,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut registry = Registry::new();
     registry.register("echo", |request| async move {
-        ExecutionOutcome::success(request.job_id.clone(), json!({
-            "job_id": request.job_id,
-            "args": request.args,
-            "kwargs": request.kwargs,
-        }))
+        ExecutionOutcome::success(
+            request.job_id.clone(),
+            json!({
+                "job_id": request.job_id,
+                "args": request.args,
+                "kwargs": request.kwargs,
+            }),
+        )
     });
 
     let stdin = io::stdin();
@@ -40,8 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let request: ExecutionRequest = match serde_json::from_str(&line) {
             Ok(request) => request,
             Err(err) => {
-                let outcome =
-                    ExecutionOutcome::error("unknown", format!("invalid request: {err}"));
+                let outcome = ExecutionOutcome::error("unknown", format!("invalid request: {err}"));
                 writeln!(stdout, "{}", serde_json::to_string(&outcome)?)?;
                 stdout.flush()?;
                 continue;

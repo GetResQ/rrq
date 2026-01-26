@@ -81,7 +81,10 @@ impl StdioExecutorPool {
         if self.cmd.len() > 1 {
             command.args(&self.cmd[1..]);
         }
-        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         if let Some(env) = &self.env {
             command.envs(env);
         }

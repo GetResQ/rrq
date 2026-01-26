@@ -1,18 +1,21 @@
 use std::collections::HashMap;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use anyhow::Result;
-use chrono::{Utc, TimeZone};
+use chrono::{TimeZone, Utc};
 use rand::Rng;
-use rrq_protocol::{ExecutionContext, ExecutionRequest, ExecutionOutcome, OutcomeStatus};
+use rrq_protocol::{ExecutionContext, ExecutionOutcome, ExecutionRequest, OutcomeStatus};
 use serde_json::Value;
 use tokio::sync::{Mutex, Semaphore};
-use tokio::time::{sleep, Duration, timeout};
+use tokio::time::{sleep, timeout, Duration};
 use uuid::Uuid;
 
 use crate::client::{EnqueueOptions, RRQClient};
-use crate::cron::CronJob;
 use crate::constants::DEFAULT_WORKER_ID_PREFIX;
+use crate::cron::CronJob;
 use crate::executor::Executor;
 use crate::job::{Job, JobStatus};
 use crate::settings::RRQSettings;
@@ -124,8 +127,8 @@ impl RRQWorker {
         let jitter = jitter_factor.clamp(0.0, 0.99);
         let min_delay = (base_delay * (1.0 - jitter)).max(0.001);
         let max_delay = base_delay * (1.0 + jitter);
-        let mut rng = rand::thread_rng();
-        let delay = rng.gen_range(min_delay..=max_delay);
+        let mut rng = rand::rng();
+        let delay = rng.random_range(min_delay..=max_delay);
         Duration::from_secs_f64(delay)
     }
 
@@ -181,10 +184,8 @@ impl RRQWorker {
             let fetch_count = self.settings.worker_concurrency.saturating_sub(running);
             if fetch_count == 0 {
                 self.set_status("idle (concurrency limit)").await;
-                let delay = self.calculate_jittered_delay(
-                    self.settings.default_poll_delay_seconds,
-                    0.5,
-                );
+                let delay =
+                    self.calculate_jittered_delay(self.settings.default_poll_delay_seconds, 0.5);
                 sleep(delay).await;
                 continue;
             }
@@ -197,10 +198,8 @@ impl RRQWorker {
                     break;
                 }
                 self.set_status("idle (no jobs)").await;
-                let delay = self.calculate_jittered_delay(
-                    self.settings.default_poll_delay_seconds,
-                    0.5,
-                );
+                let delay =
+                    self.calculate_jittered_delay(self.settings.default_poll_delay_seconds, 0.5);
                 sleep(delay).await;
             }
         }
@@ -219,7 +218,10 @@ impl RRQWorker {
             if fetched >= count || self.shutdown.load(Ordering::SeqCst) {
                 break;
             }
-            let ready = self.job_store.get_ready_job_ids(queue_name, count - fetched).await?;
+            let ready = self
+                .job_store
+                .get_ready_job_ids(queue_name, count - fetched)
+                .await?;
             if ready.is_empty() {
                 continue;
             }
@@ -232,7 +234,10 @@ impl RRQWorker {
                 let job = match job_opt {
                     Some(job) => job,
                     None => {
-                        let _ = self.job_store.remove_job_from_queue(queue_name, &job_id).await;
+                        let _ = self
+                            .job_store
+                            .remove_job_from_queue(queue_name, &job_id)
+                            .await;
                         continue;
                     }
                 };
@@ -355,8 +360,19 @@ impl RRQWorker {
         for (job_id, info) in running {
             tracing::warn!("re-queueing job {} after shutdown", job_id);
             let mut store = self.job_store.clone();
-            let _ = store.mark_job_pending(&job_id, Some("Job execution interrupted by worker shutdown. Re-queued.")).await;
-            let _ = store.add_job_to_queue(&info.queue_name, &job_id, Utc::now().timestamp_millis() as f64).await;
+            let _ = store
+                .mark_job_pending(
+                    &job_id,
+                    Some("Job execution interrupted by worker shutdown. Re-queued."),
+                )
+                .await;
+            let _ = store
+                .add_job_to_queue(
+                    &info.queue_name,
+                    &job_id,
+                    Utc::now().timestamp_millis() as f64,
+                )
+                .await;
             let _ = store.release_job_lock(&job_id).await;
         }
 
@@ -369,7 +385,11 @@ fn split_executor_name(function_name: &str) -> (Option<String>, String) {
         if handler.is_empty() {
             return (Some(prefix.to_string()), String::new());
         }
-        let executor = if prefix.is_empty() { None } else { Some(prefix.to_string()) };
+        let executor = if prefix.is_empty() {
+            None
+        } else {
+            Some(prefix.to_string())
+        };
         return (executor, handler.to_string());
     }
     (None, function_name.to_string())
@@ -405,7 +425,14 @@ async fn execute_job(
     if handler_name.is_empty() {
         handle_fatal_job_error(&job, &queue_name, "Handler name is missing", &mut job_store)
             .await?;
-        cleanup_running(&job.id, &mut job_store, &worker_id, running_jobs, running_aborts).await?;
+        cleanup_running(
+            &job.id,
+            &mut job_store,
+            &worker_id,
+            running_jobs,
+            running_aborts,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -423,7 +450,14 @@ async fn execute_job(
         None => {
             let message = format!("No executor configured for '{resolved_executor}'.");
             handle_fatal_job_error(&job, &queue_name, &message, &mut job_store).await?;
-            cleanup_running(&job.id, &mut job_store, &worker_id, running_jobs, running_aborts).await?;
+            cleanup_running(
+                &job.id,
+                &mut job_store,
+                &worker_id,
+                running_jobs,
+                running_aborts,
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -459,14 +493,7 @@ async fn execute_job(
     match exec_result {
         Ok(outcome_result) => {
             let outcome = outcome_result?;
-            handle_execution_outcome(
-                &job,
-                &queue_name,
-                &settings,
-                &mut job_store,
-                outcome,
-            )
-            .await?;
+            handle_execution_outcome(&job, &queue_name, &settings, &mut job_store, outcome).await?;
         }
         Err(_) => {
             let message = format!("Job timed out after {}s.", job_timeout);
@@ -474,7 +501,14 @@ async fn execute_job(
         }
     }
 
-    cleanup_running(&job.id, &mut job_store, &worker_id, running_jobs, running_aborts).await?;
+    cleanup_running(
+        &job.id,
+        &mut job_store,
+        &worker_id,
+        running_jobs,
+        running_aborts,
+    )
+    .await?;
 
     Ok(())
 }
@@ -519,7 +553,15 @@ async fn handle_execution_outcome(
                 .error_message
                 .clone()
                 .unwrap_or_else(|| "Job requested retry".to_string());
-            process_retry_job(job, queue_name, settings, job_store, &message, outcome.retry_after_seconds).await?;
+            process_retry_job(
+                job,
+                queue_name,
+                settings,
+                job_store,
+                &message,
+                outcome.retry_after_seconds,
+            )
+            .await?;
             tracing::info!("job retry requested");
         }
         OutcomeStatus::Timeout => {
@@ -637,7 +679,12 @@ async fn process_retry_job(
         .update_job_next_scheduled_run_time(&job.id, next_run_time)
         .await;
 
-    tracing::info!("retrying job {} attempt {}/{}", job.id, new_retry, job.max_retries);
+    tracing::info!(
+        "retrying job {} attempt {}/{}",
+        job.id,
+        new_retry,
+        job.max_retries
+    );
     Ok(())
 }
 
@@ -680,7 +727,12 @@ async fn process_failure_job(
         .update_job_next_scheduled_run_time(&job.id, next_run_time)
         .await;
 
-    tracing::info!("retrying job {} attempt {}/{}", job.id, new_retry, job.max_retries);
+    tracing::info!(
+        "retrying job {} attempt {}/{}",
+        job.id,
+        new_retry,
+        job.max_retries
+    );
     Ok(())
 }
 
@@ -732,11 +784,8 @@ async fn heartbeat_loop(
             tracing::error!("failed to recover orphaned jobs: {err}");
         }
 
-        let sleep_duration = Duration::from_secs_f64(
-            settings
-                .worker_health_check_interval_seconds
-                .min(60.0),
-        );
+        let sleep_duration =
+            Duration::from_secs_f64(settings.worker_health_check_interval_seconds.min(60.0));
         sleep_with_shutdown(&shutdown, sleep_duration).await;
     }
 }
@@ -780,9 +829,7 @@ async fn recover_orphaned_jobs(
                     .unwrap_or_else(|| settings.default_queue_name.clone());
                 if job_store.is_job_queued(&queue_name, &job_id).await? {
                     if job.status == JobStatus::Active {
-                        let _ = job_store
-                            .mark_job_pending(&job_id, None)
-                            .await;
+                        let _ = job_store.mark_job_pending(&job_id, None).await;
                     }
                     let _ = job_store.remove_active_job(worker_id, &job_id).await;
                     continue;

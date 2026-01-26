@@ -30,3 +30,13 @@ Use VS Code clickable format: `rrq/queue.py:45` or `rrq/worker.py:120-135`
 - Follow existing patterns in codebase
 - No sensitive data in logs
 - Ask before large cross-domain changes
+- Rust safety and reliability:
+  - Avoid `unsafe` in production; if required, isolate and document invariants/assumptions.
+  - Validate/sanitize external inputs (headers, query/body); use parameterized queries.
+  - Prefer `Option`/`Result` and `?` for propagation; avoid `unwrap`/`expect` on external data.
+    - Tests may use `unwrap`/`expect` for setup and assertions.
+  - Avoid blocking calls in async contexts; use async I/O or `spawn_blocking` for CPU-bound work.
+  - Enable overflow checks in release builds in `Cargo.toml`.
+  - Evaluate third-party crates for maintenance/security; add `cargo audit` to CI.
+  - Always run `cargo fmt` and `clippy` when you finish a piece of work
+  - Warnings from clippy and compiler should be treated like errors.

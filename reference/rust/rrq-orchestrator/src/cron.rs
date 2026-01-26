@@ -27,7 +27,10 @@ impl CronJob {
     pub fn schedule_next(&mut self, now: DateTime<Utc>) -> Result<()> {
         let schedule = Schedule::from_str(&self.schedule)
             .with_context(|| format!("invalid cron schedule: {}", self.schedule))?;
-        let base = now.with_second(0).and_then(|dt| dt.with_nanosecond(0)).unwrap_or(now);
+        let base = now
+            .with_second(0)
+            .and_then(|dt| dt.with_nanosecond(0))
+            .unwrap_or(now);
         let next = schedule
             .after(&base)
             .next()

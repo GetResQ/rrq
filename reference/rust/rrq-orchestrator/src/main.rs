@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
-use rand::seq::SliceRandom;
-use rand::{thread_rng, Rng};
+use rand::prelude::IndexedRandom;
+use rand::Rng;
 use serde_json::{json, Value};
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -280,7 +280,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Worker { command } => match command {
-            WorkerCommand::Run { config, queue, burst } => {
+            WorkerCommand::Run {
+                config,
+                queue,
+                burst,
+            } => {
                 run_worker(config, queue, burst, false).await?;
             }
             WorkerCommand::Watch {
@@ -317,7 +321,11 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Job { command } => match command {
-            JobCommand::Show { job_id, config, raw } => {
+            JobCommand::Show {
+                job_id,
+                config,
+                raw,
+            } => {
                 job_show(job_id, config, raw).await?;
             }
             JobCommand::List {
@@ -329,7 +337,11 @@ async fn main() -> Result<()> {
             } => {
                 job_list(config, status, queue, function, limit).await?;
             }
-            JobCommand::Replay { job_id, config, queue } => {
+            JobCommand::Replay {
+                job_id,
+                config,
+                queue,
+            } => {
                 job_replay(job_id, config, queue).await?;
             }
             JobCommand::Cancel { job_id, config } => {
@@ -350,13 +362,19 @@ async fn main() -> Result<()> {
                 raw,
                 batch_size,
             } => {
-                dlq_list(config, queue, function, limit, offset, dlq_name, raw, batch_size)
-                    .await?;
+                dlq_list(
+                    config, queue, function, limit, offset, dlq_name, raw, batch_size,
+                )
+                .await?;
             }
             DlqCommand::Stats { config, dlq_name } => {
                 dlq_stats(config, dlq_name).await?;
             }
-            DlqCommand::Inspect { job_id, config, raw } => {
+            DlqCommand::Inspect {
+                job_id,
+                config,
+                raw,
+            } => {
                 dlq_inspect(job_id, config, raw).await?;
             }
             DlqCommand::Requeue {
@@ -455,7 +473,11 @@ async fn run_worker(
     let mut settings = settings;
     settings.worker_concurrency = effective_concurrency;
     let executors = build_executors_from_settings(&settings, Some(&pool_sizes)).await?;
-    let queues = if queues.is_empty() { None } else { Some(queues) };
+    let queues = if queues.is_empty() {
+        None
+    } else {
+        Some(queues)
+    };
     let worker = RRQWorker::new(settings, queues, None, executors, burst).await?;
     run_worker_loop(worker).await?;
     Ok(())
@@ -485,8 +507,8 @@ async fn run_worker_loop(mut worker: RRQWorker) -> Result<()> {
 fn build_globset(patterns: &[String]) -> Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
-        let glob = Glob::new(pattern)
-            .with_context(|| format!("invalid glob pattern '{pattern}'"))?;
+        let glob =
+            Glob::new(pattern).with_context(|| format!("invalid glob pattern '{pattern}'"))?;
         builder.add(glob);
     }
     Ok(builder.build()?)
@@ -508,13 +530,17 @@ fn should_restart_for_event(
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_default();
-        if ignore_set.is_match(&rel_str) || (!base_name.is_empty() && ignore_set.is_match(&base_name)) {
+        if ignore_set.is_match(&rel_str)
+            || (!base_name.is_empty() && ignore_set.is_match(&base_name))
+        {
             continue;
         }
         if include_set.is_empty() {
             return true;
         }
-        if include_set.is_match(&rel_str) || (!base_name.is_empty() && include_set.is_match(&base_name)) {
+        if include_set.is_match(&rel_str)
+            || (!base_name.is_empty() && include_set.is_match(&base_name))
+        {
             return true;
         }
     }
@@ -559,7 +585,11 @@ async fn run_worker_watch(
         let mut settings = settings;
         settings.worker_concurrency = effective_concurrency;
         let executors = build_executors_from_settings(&settings, Some(&pool_sizes)).await?;
-        let queue_arg = if queues.is_empty() { None } else { Some(queues.clone()) };
+        let queue_arg = if queues.is_empty() {
+            None
+        } else {
+            Some(queues.clone())
+        };
         let mut worker = RRQWorker::new(settings, queue_arg, None, executors, false).await?;
         let shutdown = worker.shutdown_handle();
         let mut handle = tokio::spawn(async move {
@@ -630,7 +660,10 @@ async fn check_workers(config: Option<String>) -> Result<()> {
         println!("Worker Health Check: FAIL (No active workers found)");
         return Ok(());
     }
-    println!("Worker Health Check: Found {} active worker(s):", keys.len());
+    println!(
+        "Worker Health Check: Found {} active worker(s):",
+        keys.len()
+    );
     for key in keys {
         let worker_id = key.trim_start_matches(HEALTH_KEY_PREFIX);
         let (health, ttl) = store.get_worker_health(worker_id).await?;
@@ -670,7 +703,10 @@ async fn queue_list(config: Option<String>, show_empty: bool) -> Result<()> {
         println!("No active queues found");
         return Ok(());
     }
-    println!("{:<30} {:>10} {:>20} {:>20}", "Queue", "Pending", "Oldest(ms)", "Newest(ms)");
+    println!(
+        "{:<30} {:>10} {:>20} {:>20}",
+        "Queue", "Pending", "Oldest(ms)", "Newest(ms)"
+    );
     let mut total = 0i64;
     for key in keys {
         let queue_name = key.trim_start_matches(QUEUE_KEY_PREFIX);
@@ -717,7 +753,15 @@ async fn queue_stats(config: Option<String>, queues: Vec<String>, max_scan: usiz
 
     println!(
         "{:<25} {:>8} {:>8} {:>8} {:>9} {:>8} {:>10} {:>12} {:>10}",
-        "Queue", "Total", "Pending", "Active", "Completed", "Failed", "DLQ", "Avg Wait", "Throughput"
+        "Queue",
+        "Total",
+        "Pending",
+        "Active",
+        "Completed",
+        "Failed",
+        "DLQ",
+        "Avg Wait",
+        "Throughput"
     );
 
     for queue_name in queue_names {
@@ -781,7 +825,8 @@ async fn queue_stats(config: Option<String>, queues: Vec<String>, max_scan: usiz
             None
         };
 
-        let dlq_jobs = count_dlq_for_queue(&mut store, &settings.default_dlq_name, &queue_name).await?;
+        let dlq_jobs =
+            count_dlq_for_queue(&mut store, &settings.default_dlq_name, &queue_name).await?;
 
         println!(
             "{:<25} {:>8} {:>8} {:>8} {:>9} {:>8} {:>10} {:>12} {:>10}",
@@ -832,12 +877,17 @@ async fn queue_inspect(
         println!("No jobs found in queue {queue_name}");
         return Ok(());
     }
-    println!("{:<4} {:<20} {:<20} {:<10} {:<20} {:>7}", "#", "Job ID", "Function", "Status", "Scheduled", "Retries");
+    println!(
+        "{:<4} {:<20} {:<20} {:<10} {:<20} {:>7}",
+        "#", "Job ID", "Function", "Status", "Scheduled", "Retries"
+    );
     for (idx, (job_id, score)) in entries.iter().enumerate() {
         let job_map = store.get_job_data_map(job_id).await?;
         let (function, status, retries) = if let Some(map) = job_map {
             (
-                map.get("function_name").cloned().unwrap_or_else(|| "<unknown>".to_string()),
+                map.get("function_name")
+                    .cloned()
+                    .unwrap_or_else(|| "<unknown>".to_string()),
                 cli_utils::format_status(map.get("status").map(|s| s.as_str())),
                 map.get("current_retries")
                     .or_else(|| map.get("retries"))
@@ -845,7 +895,11 @@ async fn queue_inspect(
                     .unwrap_or_else(|| "0".to_string()),
             )
         } else {
-            ("<missing>".to_string(), "MISSING".to_string(), "N/A".to_string())
+            (
+                "<missing>".to_string(),
+                "MISSING".to_string(),
+                "N/A".to_string(),
+            )
         };
         let scheduled = format!("{}", score / 1000.0);
         println!(
@@ -876,21 +930,36 @@ async fn job_show(job_id: String, config: Option<String>, raw: bool) -> Result<(
         return Ok(());
     }
 
-    let status = job_map.get("status").cloned().unwrap_or_else(|| "unknown".to_string());
-    let function_name = job_map.get("function_name").cloned().unwrap_or_else(|| "unknown".to_string());
-    let queue_name = job_map.get("queue_name").cloned().unwrap_or_else(|| "unknown".to_string());
+    let status = job_map
+        .get("status")
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_string());
+    let function_name = job_map
+        .get("function_name")
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_string());
+    let queue_name = job_map
+        .get("queue_name")
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_string());
     println!("Job ID: {job_id}");
     println!("Status: {}", cli_utils::format_status(Some(&status)));
     println!("Function: {function_name}");
     println!("Queue: {queue_name}");
     if let Some(enqueue_time) = job_map.get("enqueue_time") {
-        println!("Enqueued: {}", cli_utils::format_timestamp(Some(enqueue_time)));
+        println!(
+            "Enqueued: {}",
+            cli_utils::format_timestamp(Some(enqueue_time))
+        );
     }
     if let Some(start_time) = job_map.get("start_time") {
         println!("Started: {}", cli_utils::format_timestamp(Some(start_time)));
     }
     if let Some(completion_time) = job_map.get("completion_time") {
-        println!("Completed: {}", cli_utils::format_timestamp(Some(completion_time)));
+        println!(
+            "Completed: {}",
+            cli_utils::format_timestamp(Some(completion_time))
+        );
         let duration = match (job_map.get("start_time"), job_map.get("completion_time")) {
             (Some(start), Some(end)) => {
                 let start_ts = cli_utils::parse_timestamp(start).unwrap_or(0.0);
@@ -999,27 +1068,35 @@ async fn job_list(
     }
 
     jobs.sort_by(|a, b| {
-        let a_ts = a
-            .1
-            .get("enqueue_time")
-            .and_then(|value| cli_utils::parse_timestamp(value))
-            .unwrap_or(0.0);
-        let b_ts = b
-            .1
-            .get("enqueue_time")
-            .and_then(|value| cli_utils::parse_timestamp(value))
-            .unwrap_or(0.0);
+        let a_ts =
+            a.1.get("enqueue_time")
+                .and_then(|value| cli_utils::parse_timestamp(value))
+                .unwrap_or(0.0);
+        let b_ts =
+            b.1.get("enqueue_time")
+                .and_then(|value| cli_utils::parse_timestamp(value))
+                .unwrap_or(0.0);
         b_ts.partial_cmp(&a_ts).unwrap_or(std::cmp::Ordering::Equal)
     });
 
     let jobs = jobs.into_iter().take(limit).collect::<Vec<_>>();
 
-    println!("{:<12} {:<30} {:<24} {:<10} {:<18} {:>10}", "Job ID", "Function", "Queue", "Status", "Enqueued", "Duration");
+    println!(
+        "{:<12} {:<30} {:<24} {:<10} {:<18} {:>10}",
+        "Job ID", "Function", "Queue", "Status", "Enqueued", "Duration"
+    );
     for (job_id, job_map) in jobs {
-        let function_name = job_map.get("function_name").cloned().unwrap_or_else(|| "unknown".to_string());
-        let queue_name = job_map.get("queue_name").cloned().unwrap_or_else(|| "unknown".to_string());
+        let function_name = job_map
+            .get("function_name")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        let queue_name = job_map
+            .get("queue_name")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
         let status = cli_utils::format_status(job_map.get("status").map(|value| value.as_str()));
-        let enqueue = cli_utils::format_timestamp(job_map.get("enqueue_time").map(|value| value.as_str()));
+        let enqueue =
+            cli_utils::format_timestamp(job_map.get("enqueue_time").map(|value| value.as_str()));
         let duration = match (
             job_map.get("start_time"),
             job_map.get("completion_time"),
@@ -1111,17 +1188,16 @@ async fn job_cancel(job_id: String, config: Option<String>) -> Result<()> {
         println!("Can only cancel pending jobs. Job status: {status}");
         return Ok(());
     }
-    let queue_name = job_map
-        .get("queue_name")
-        .cloned()
-        .unwrap_or_default();
+    let queue_name = job_map.get("queue_name").cloned().unwrap_or_default();
     if queue_name.is_empty() {
         println!("Job has no associated queue");
         return Ok(());
     }
     let removed = store.remove_job_from_queue(&queue_name, &job_id).await?;
     if removed > 0 {
-        store.update_job_status(&job_id, JobStatus::Cancelled).await?;
+        store
+            .update_job_status(&job_id, JobStatus::Cancelled)
+            .await?;
         println!("Job '{job_id}' cancelled successfully");
     } else {
         println!("Failed to remove job from queue");
@@ -1138,13 +1214,29 @@ async fn job_trace(job_id: String, config: Option<String>) -> Result<()> {
     };
     let mut events: Vec<(String, f64, String)> = Vec::new();
 
-    if let Some(enqueue) = job_map.get("enqueue_time").and_then(|v| cli_utils::parse_timestamp(v)) {
-        let function_name = job_map.get("function_name").cloned().unwrap_or_else(|| "unknown".to_string());
-        events.push(("Enqueued".to_string(), enqueue, format!("Function: {function_name}")));
+    if let Some(enqueue) = job_map
+        .get("enqueue_time")
+        .and_then(|v| cli_utils::parse_timestamp(v))
+    {
+        let function_name = job_map
+            .get("function_name")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        events.push((
+            "Enqueued".to_string(),
+            enqueue,
+            format!("Function: {function_name}"),
+        ));
     }
 
-    if let Some(start) = job_map.get("start_time").and_then(|v| cli_utils::parse_timestamp(v)) {
-        let worker_id = job_map.get("worker_id").cloned().unwrap_or_else(|| "unknown".to_string());
+    if let Some(start) = job_map
+        .get("start_time")
+        .and_then(|v| cli_utils::parse_timestamp(v))
+    {
+        let worker_id = job_map
+            .get("worker_id")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
         events.push(("Started".to_string(), start, format!("Worker: {worker_id}")));
     }
 
@@ -1154,19 +1246,43 @@ async fn job_trace(job_id: String, config: Option<String>) -> Result<()> {
         .unwrap_or(0);
     for i in 0..retries {
         let key = format!("retry_{i}_at");
-        if let Some(ts) = job_map.get(&key).and_then(|v| cli_utils::parse_timestamp(v)) {
-            let max_retries = job_map.get("max_retries").cloned().unwrap_or_else(|| "0".to_string());
-            events.push((format!("Retry {}", i + 1), ts, format!("Attempt {} of {max_retries}", i + 1)));
+        if let Some(ts) = job_map
+            .get(&key)
+            .and_then(|v| cli_utils::parse_timestamp(v))
+        {
+            let max_retries = job_map
+                .get("max_retries")
+                .cloned()
+                .unwrap_or_else(|| "0".to_string());
+            events.push((
+                format!("Retry {}", i + 1),
+                ts,
+                format!("Attempt {} of {max_retries}", i + 1),
+            ));
         }
     }
 
-    if let Some(completion) = job_map.get("completion_time").and_then(|v| cli_utils::parse_timestamp(v)) {
-        let status = job_map.get("status").cloned().unwrap_or_else(|| "unknown".to_string());
+    if let Some(completion) = job_map
+        .get("completion_time")
+        .and_then(|v| cli_utils::parse_timestamp(v))
+    {
+        let status = job_map
+            .get("status")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
         if status.eq_ignore_ascii_case("completed") {
             events.push(("Completed".to_string(), completion, "Success".to_string()));
         } else {
-            let error_msg = job_map.get("last_error").or_else(|| job_map.get("error")).cloned().unwrap_or_else(|| "Unknown error".to_string());
-            events.push(("Failed".to_string(), completion, cli_utils::truncate(&error_msg, 50)));
+            let error_msg = job_map
+                .get("last_error")
+                .or_else(|| job_map.get("error"))
+                .cloned()
+                .unwrap_or_else(|| "Unknown error".to_string());
+            events.push((
+                "Failed".to_string(),
+                completion,
+                cli_utils::truncate(&error_msg, 50),
+            ));
         }
     }
 
@@ -1186,7 +1302,10 @@ async fn job_trace(job_id: String, config: Option<String>) -> Result<()> {
     }
     if let (Some(first), Some(last)) = (events.first(), events.last()) {
         let duration = last.1 - first.1;
-        println!("\nTotal Duration: {}", cli_utils::format_duration(Some(duration)));
+        println!(
+            "\nTotal Duration: {}",
+            cli_utils::format_duration(Some(duration))
+        );
     }
 
     Ok(())
@@ -1238,7 +1357,11 @@ async fn dlq_list(
         b_ts.partial_cmp(&a_ts).unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let jobs = jobs.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
+    let jobs = jobs
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
 
     if raw {
         for job in &jobs {
@@ -1252,11 +1375,20 @@ async fn dlq_list(
         return Ok(());
     }
 
-    println!("{:<20} {:<18} {:<16} {:<25} {:<18} {:>7}", "Job ID", "Function", "Queue", "Error", "Failed At", "Retries");
+    println!(
+        "{:<20} {:<18} {:<16} {:<25} {:<18} {:>7}",
+        "Job ID", "Function", "Queue", "Error", "Failed At", "Retries"
+    );
     for job in &jobs {
         let job_id = job.get("id").cloned().unwrap_or_default();
-        let function_name = job.get("function_name").cloned().unwrap_or_else(|| "N/A".to_string());
-        let queue_name = job.get("queue_name").cloned().unwrap_or_else(|| "N/A".to_string());
+        let function_name = job
+            .get("function_name")
+            .cloned()
+            .unwrap_or_else(|| "N/A".to_string());
+        let queue_name = job
+            .get("queue_name")
+            .cloned()
+            .unwrap_or_else(|| "N/A".to_string());
         let error = job
             .get("last_error")
             .or_else(|| job.get("error"))
@@ -1324,9 +1456,15 @@ async fn dlq_stats(config: Option<String>, dlq_name: Option<String>) -> Result<(
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0);
         retries.push(retry_count);
-        let queue = job.get("queue_name").cloned().unwrap_or_else(|| "Unknown".to_string());
+        let queue = job
+            .get("queue_name")
+            .cloned()
+            .unwrap_or_else(|| "Unknown".to_string());
         *by_queue.entry(queue).or_insert(0) += 1;
-        let function = job.get("function_name").cloned().unwrap_or_else(|| "Unknown".to_string());
+        let function = job
+            .get("function_name")
+            .cloned()
+            .unwrap_or_else(|| "Unknown".to_string());
         *by_function.entry(function).or_insert(0) += 1;
         let error = job
             .get("last_error")
@@ -1456,7 +1594,10 @@ async fn dlq_requeue(
             let now_ms = chrono::Utc::now().timestamp_millis() as f64;
             store.add_job_to_queue(&target_queue, &id, now_ms).await?;
             let mut mapping: HashMap<String, String> = HashMap::new();
-            mapping.insert("status".to_string(), JobStatus::Pending.as_str().to_string());
+            mapping.insert(
+                "status".to_string(),
+                JobStatus::Pending.as_str().to_string(),
+            );
             mapping.insert("queue_name".to_string(), target_queue.clone());
             let _ = store.update_job_fields(&id, &mapping).await;
             requeued += 1;
@@ -1477,20 +1618,38 @@ async fn debug_generate_jobs(
 ) -> Result<()> {
     let settings = load_toml_settings(config.as_deref())?;
     let mut store = JobStore::new(settings.clone()).await?;
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
     let queue_names = if queue_names.is_empty() {
-        vec!["test".to_string(), "urgent".to_string(), "low_priority".to_string(), "default".to_string()]
+        vec![
+            "test".to_string(),
+            "urgent".to_string(),
+            "low_priority".to_string(),
+            "default".to_string(),
+        ]
     } else {
         queue_names
     };
     let statuses = if statuses.is_empty() {
-        vec!["pending".to_string(), "completed".to_string(), "failed".to_string(), "retrying".to_string()]
+        vec![
+            "pending".to_string(),
+            "completed".to_string(),
+            "failed".to_string(),
+            "retrying".to_string(),
+        ]
     } else {
         statuses
     };
     let function_names = vec![
-        "process_data", "send_email", "generate_report", "cleanup_files", "sync_database",
-        "resize_image", "calculate_metrics", "export_csv", "backup_data", "validate_input",
+        "process_data",
+        "send_email",
+        "generate_report",
+        "cleanup_files",
+        "sync_database",
+        "resize_image",
+        "calculate_metrics",
+        "export_csv",
+        "backup_data",
+        "validate_input",
     ];
     let now = chrono::Utc::now();
     let start_time = now - chrono::Duration::hours(age_hours);
@@ -1499,9 +1658,15 @@ async fn debug_generate_jobs(
     for i in 0..count {
         let job_id = format!("test_job_{}_{}", chrono::Utc::now().timestamp_micros(), i);
         let function_name = function_names.choose(&mut rng).unwrap_or(&"process_data");
-        let queue_name = queue_names.choose(&mut rng).cloned().unwrap_or_else(|| "default".to_string());
-        let status = statuses.choose(&mut rng).cloned().unwrap_or_else(|| "pending".to_string());
-        let enqueue_delta = rng.gen_range(0..(age_hours.max(1) * 3600)) as i64;
+        let queue_name = queue_names
+            .choose(&mut rng)
+            .cloned()
+            .unwrap_or_else(|| "default".to_string());
+        let status = statuses
+            .choose(&mut rng)
+            .cloned()
+            .unwrap_or_else(|| "pending".to_string());
+        let enqueue_delta = rng.random_range(0..(age_hours.max(1) * 3600)) as i64;
         let enqueue_time = start_time + chrono::Duration::seconds(enqueue_delta);
 
         let mut job = Job {
@@ -1509,22 +1674,27 @@ async fn debug_generate_jobs(
             function_name: function_name.to_string(),
             job_args: vec![
                 Value::String(format!("arg_{i}")),
-                Value::from(rng.gen_range(1..=100) as i64),
+                Value::from(rng.random_range(1..=100) as i64),
             ],
             job_kwargs: serde_json::Map::from_iter([
                 (
                     "user_id".to_string(),
-                    Value::from(rng.gen_range(1..=1000) as i64),
+                    Value::from(rng.random_range(1..=1000) as i64),
                 ),
                 (
                     "priority".to_string(),
-                    Value::String(["high", "medium", "low"].choose(&mut rng).unwrap_or(&"medium").to_string()),
+                    Value::String(
+                        ["high", "medium", "low"]
+                            .choose(&mut rng)
+                            .unwrap_or(&"medium")
+                            .to_string(),
+                    ),
                 ),
             ]),
             enqueue_time,
             start_time: None,
             status: JobStatus::Pending,
-            current_retries: rng.gen_range(0..=3),
+            current_retries: rng.random_range(0..=3),
             next_scheduled_run_time: None,
             max_retries: 3,
             job_timeout_seconds: None,
@@ -1542,20 +1712,21 @@ async fn debug_generate_jobs(
         match status.as_str() {
             "completed" => {
                 job.status = JobStatus::Completed;
-                let start = enqueue_time + chrono::Duration::seconds(rng.gen_range(1..=60));
-                let completed = start + chrono::Duration::seconds(rng.gen_range(1..=300));
+                let start = enqueue_time + chrono::Duration::seconds(rng.random_range(1..=60));
+                let completed = start + chrono::Duration::seconds(rng.random_range(1..=300));
                 job.start_time = Some(start);
                 job.completion_time = Some(completed);
-                job.worker_id = Some(format!("worker_{}", rng.gen_range(1..=10)));
-                job.result = Some(json!({"success": true, "processed_items": rng.gen_range(1..=100)}));
+                job.worker_id = Some(format!("worker_{}", rng.random_range(1..=10)));
+                job.result =
+                    Some(json!({"success": true, "processed_items": rng.random_range(1..=100)}));
             }
             "failed" => {
                 job.status = JobStatus::Failed;
-                let start = enqueue_time + chrono::Duration::seconds(rng.gen_range(1..=60));
-                let completed = start + chrono::Duration::seconds(rng.gen_range(1..=300));
+                let start = enqueue_time + chrono::Duration::seconds(rng.random_range(1..=60));
+                let completed = start + chrono::Duration::seconds(rng.random_range(1..=300));
                 job.start_time = Some(start);
                 job.completion_time = Some(completed);
-                job.worker_id = Some(format!("worker_{}", rng.gen_range(1..=10)));
+                job.worker_id = Some(format!("worker_{}", rng.random_range(1..=10)));
                 job.last_error = Some(
                     [
                         "Connection timeout",
@@ -1571,9 +1742,9 @@ async fn debug_generate_jobs(
             }
             "active" => {
                 job.status = JobStatus::Active;
-                let start = enqueue_time + chrono::Duration::seconds(rng.gen_range(1..=60));
+                let start = enqueue_time + chrono::Duration::seconds(rng.random_range(1..=60));
                 job.start_time = Some(start);
-                job.worker_id = Some(format!("worker_{}", rng.gen_range(1..=10)));
+                job.worker_id = Some(format!("worker_{}", rng.random_range(1..=10)));
             }
             "retrying" => {
                 job.status = JobStatus::Retrying;
@@ -1593,7 +1764,10 @@ async fn debug_generate_jobs(
         insert_job_batch(&mut store, &created).await?;
     }
 
-    println!("Generated {count} fake jobs across {} queues", queue_names.len());
+    println!(
+        "Generated {count} fake jobs across {} queues",
+        queue_names.len()
+    );
     Ok(())
 }
 
@@ -1603,7 +1777,9 @@ async fn insert_job_batch(store: &mut JobStore, jobs: &[Job]) -> Result<()> {
         if matches!(job.status, JobStatus::Pending) {
             let score_ms = job.enqueue_time.timestamp_millis() as f64;
             if let Some(queue_name) = job.queue_name.as_deref() {
-                store.add_job_to_queue(queue_name, &job.id, score_ms).await?;
+                store
+                    .add_job_to_queue(queue_name, &job.id, score_ms)
+                    .await?;
             }
         }
     }
@@ -1624,22 +1800,25 @@ async fn debug_generate_workers(config: Option<String>, count: usize, duration: 
                 "status".to_string(),
                 Value::String(
                     ["running", "idle", "polling"]
-                        .choose(&mut thread_rng())
+                        .choose(&mut rand::rng())
                         .unwrap_or(&"running")
                         .to_string(),
                 ),
             );
             data.insert(
                 "active_jobs".to_string(),
-                Value::from(thread_rng().gen_range(0..=5) as i64),
+                Value::from(rand::rng().random_range(0..=5) as i64),
             );
             data.insert(
                 "concurrency_limit".to_string(),
-                Value::from(thread_rng().gen_range(5..=20) as i64),
+                Value::from(rand::rng().random_range(5..=20) as i64),
             );
             data.insert(
                 "queues".to_string(),
-                Value::Array(vec![Value::String("test".to_string()), Value::String("default".to_string())]),
+                Value::Array(vec![
+                    Value::String("test".to_string()),
+                    Value::String("default".to_string()),
+                ]),
             );
             data.insert(
                 "timestamp".to_string(),
@@ -1751,7 +1930,10 @@ async fn debug_stress_test(
     while start.elapsed() < StdDuration::from_secs(duration) {
         let batch_start = Instant::now();
         for i in 0..jobs_per_second {
-            let queue_name = queues.choose(&mut thread_rng()).cloned().unwrap_or_else(|| settings.default_queue_name.clone());
+            let queue_name = queues
+                .choose(&mut rand::rng())
+                .cloned()
+                .unwrap_or_else(|| settings.default_queue_name.clone());
             let _ = client
                 .enqueue(
                     "stress_test_job",

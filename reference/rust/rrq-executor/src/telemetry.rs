@@ -68,7 +68,7 @@ pub mod otel {
                 let parent = opentelemetry::global::get_text_map_propagator(|prop| {
                     prop.extract(&HashMapExtractor(trace_context))
                 });
-                span.set_parent(parent);
+                let _ = span.set_parent(parent);
             }
 
             span
@@ -90,8 +90,6 @@ pub mod otel {
     pub fn init_tracing(service_name: &str) -> Result<(), Box<dyn std::error::Error>> {
         use opentelemetry::global;
         use opentelemetry::trace::TracerProvider as _;
-        use opentelemetry::KeyValue;
-        use opentelemetry_sdk::trace;
         use opentelemetry_sdk::Resource;
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
@@ -100,17 +98,16 @@ pub mod otel {
             opentelemetry_sdk::propagation::TraceContextPropagator::new(),
         );
 
-        let exporter = opentelemetry_otlp::new_exporter().tonic();
-        let provider = opentelemetry_otlp::new_pipeline()
-            .tracing()
-            .with_exporter(exporter)
-            .with_trace_config(
-                trace::Config::default().with_resource(Resource::new(vec![KeyValue::new(
-                    "service.name",
-                    service_name.to_string(),
-                )])),
-            )
-            .install_batch(opentelemetry_sdk::runtime::Tokio)?;
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .build()?;
+        let resource = Resource::builder()
+            .with_service_name(service_name.to_string())
+            .build();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_resource(resource)
+            .with_batch_exporter(exporter)
+            .build();
 
         let tracer = provider.tracer(service_name.to_string());
         opentelemetry::global::set_tracer_provider(provider);

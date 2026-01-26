@@ -50,9 +50,7 @@ impl Producer {
         let queue_name = options
             .queue_name
             .unwrap_or_else(|| DEFAULT_QUEUE_NAME.to_string());
-        let job_id = options
-            .job_id
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let job_id = options.job_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let enqueue_time = options.enqueue_time.unwrap_or_else(Utc::now);
         let scheduled_time = options.scheduled_time.unwrap_or(enqueue_time);
 

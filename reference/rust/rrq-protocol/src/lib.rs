@@ -108,10 +108,7 @@ impl ExecutionOutcome {
         }
     }
 
-    pub fn handler_not_found(
-        job_id: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Self {
+    pub fn handler_not_found(job_id: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             job_id: Some(job_id.into()),
             status: OutcomeStatus::Error,
@@ -151,8 +148,7 @@ mod tests {
 
     #[test]
     fn handler_not_found_sets_error_type() {
-        let outcome =
-            ExecutionOutcome::handler_not_found("job-1", "missing handler");
+        let outcome = ExecutionOutcome::handler_not_found("job-1", "missing handler");
         assert_eq!(outcome.status, OutcomeStatus::Error);
         assert_eq!(outcome.error_type.as_deref(), Some("handler_not_found"));
     }

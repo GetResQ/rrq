@@ -7,8 +7,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Duration;
 use rrq_orchestrator::executor::Executor;
-use rrq_orchestrator::{EnqueueOptions, Job, JobStatus, RRQClient, RRQSettings, RRQWorker};
 use rrq_orchestrator::store::JobStore;
+use rrq_orchestrator::{EnqueueOptions, Job, JobStatus, RRQClient, RRQSettings, RRQWorker};
 use rrq_protocol::{ExecutionOutcome, ExecutionRequest, OutcomeStatus};
 use serde_json::{json, Value};
 
@@ -307,10 +307,7 @@ async fn test_engine_conformance_basic() -> Result<()> {
         .join("../../../tests/data/engine_golden/basic.json");
     let golden = std::fs::read_to_string(&golden_path)?;
     let golden_json: Value = serde_json::from_str(&golden)?;
-    let expected_jobs = golden_json
-        .get("jobs")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let expected_jobs = golden_json.get("jobs").cloned().unwrap_or(Value::Null);
 
     assert_eq!(Value::Object(jobs), expected_jobs);
 
@@ -416,8 +413,7 @@ async fn test_engine_conformance_extended() -> Result<()> {
         settings.default_queue_name.clone(),
         "rrq:queue:custom".to_string(),
     ];
-    let mut worker =
-        RRQWorker::new(settings.clone(), Some(queues), None, executors, false).await?;
+    let mut worker = RRQWorker::new(settings.clone(), Some(queues), None, executors, false).await?;
     let shutdown = worker.shutdown_handle();
     let handle = tokio::spawn(async move { worker.run().await });
 
@@ -442,10 +438,7 @@ async fn test_engine_conformance_extended() -> Result<()> {
         .join("../../../tests/data/engine_golden/extended.json");
     let golden = std::fs::read_to_string(&golden_path)?;
     let golden_json: Value = serde_json::from_str(&golden)?;
-    let expected_jobs = golden_json
-        .get("jobs")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let expected_jobs = golden_json.get("jobs").cloned().unwrap_or(Value::Null);
 
     assert_eq!(Value::Object(jobs), expected_jobs);
 
@@ -514,10 +507,7 @@ async fn test_engine_conformance_retry_backoff() -> Result<()> {
         .join("../../../tests/data/engine_golden/retry_backoff.json");
     let golden = std::fs::read_to_string(&golden_path)?;
     let golden_json: Value = serde_json::from_str(&golden)?;
-    let expected_jobs = golden_json
-        .get("jobs")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let expected_jobs = golden_json.get("jobs").cloned().unwrap_or(Value::Null);
 
     assert_eq!(Value::Object(jobs), expected_jobs);
 
@@ -571,18 +561,14 @@ async fn test_engine_conformance_routing() -> Result<()> {
         .await?;
 
     let mut executors: HashMap<String, Arc<dyn Executor>> = HashMap::new();
-    executors.insert(
-        "python".to_string(),
-        Arc::new(ScenarioExecutor::new("py")),
-    );
+    executors.insert("python".to_string(), Arc::new(ScenarioExecutor::new("py")));
     executors.insert("alt".to_string(), Arc::new(ScenarioExecutor::new("alt")));
 
     let queues = vec![
         settings.default_queue_name.clone(),
         "rrq:queue:routed".to_string(),
     ];
-    let mut worker =
-        RRQWorker::new(settings.clone(), Some(queues), None, executors, false).await?;
+    let mut worker = RRQWorker::new(settings.clone(), Some(queues), None, executors, false).await?;
     let shutdown = worker.shutdown_handle();
     let handle = tokio::spawn(async move { worker.run().await });
 
@@ -607,10 +593,7 @@ async fn test_engine_conformance_routing() -> Result<()> {
         .join("../../../tests/data/engine_golden/routing.json");
     let golden = std::fs::read_to_string(&golden_path)?;
     let golden_json: Value = serde_json::from_str(&golden)?;
-    let expected_jobs = golden_json
-        .get("jobs")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let expected_jobs = golden_json.get("jobs").cloned().unwrap_or(Value::Null);
 
     assert_eq!(Value::Object(jobs), expected_jobs);
 

@@ -32,10 +32,7 @@ impl JobStore {
         Ok(Self::with_connection(settings, conn))
     }
 
-    pub fn with_connection(
-        settings: RRQSettings,
-        conn: redis::aio::MultiplexedConnection,
-    ) -> Self {
+    pub fn with_connection(settings: RRQSettings, conn: redis::aio::MultiplexedConnection) -> Self {
         let lock_and_remove_script = Script::new(
             "-- KEYS: [1] = lock_key, [2] = queue_key\n\
              -- ARGV: [1] = worker_id, [2] = lock_timeout_ms, [3] = job_id\n\
@@ -120,10 +117,7 @@ impl JobStore {
             ("function_name".to_string(), job.function_name.clone()),
             ("job_args".to_string(), job_args_json),
             ("job_kwargs".to_string(), job_kwargs_json),
-            (
-                "enqueue_time".to_string(),
-                job.enqueue_time.to_rfc3339(),
-            ),
+            ("enqueue_time".to_string(), job.enqueue_time.to_rfc3339()),
             ("status".to_string(), job.status.as_str().to_string()),
             (
                 "current_retries".to_string(),
@@ -143,10 +137,7 @@ impl JobStore {
             mapping.push(("start_time".to_string(), value.to_rfc3339()));
         }
         if let Some(value) = job.job_timeout_seconds {
-            mapping.push((
-                "job_timeout_seconds".to_string(),
-                value.to_string(),
-            ));
+            mapping.push(("job_timeout_seconds".to_string(), value.to_string()));
         }
         if let Some(value) = job.result_ttl_seconds {
             mapping.push(("result_ttl_seconds".to_string(), value.to_string()));
@@ -198,9 +189,7 @@ impl JobStore {
             .get("job_kwargs")
             .and_then(|value| serde_json::from_str(value).ok())
             .unwrap_or_default();
-        let result = raw
-            .get("result")
-            .and_then(|value| Self::parse_json(value));
+        let result = raw.get("result").and_then(|value| Self::parse_json(value));
         let trace_context = raw.get("trace_context").and_then(|value| {
             if value.eq_ignore_ascii_case("null") {
                 return None;
@@ -226,14 +215,8 @@ impl JobStore {
             .unwrap_or(self.settings.default_max_retries);
 
         let job = Job {
-            id: raw
-                .get("id")
-                .cloned()
-                .unwrap_or_else(|| job_id.to_string()),
-            function_name: raw
-                .get("function_name")
-                .cloned()
-                .unwrap_or_default(),
+            id: raw.get("id").cloned().unwrap_or_else(|| job_id.to_string()),
+            function_name: raw.get("function_name").cloned().unwrap_or_default(),
             job_args,
             job_kwargs,
             enqueue_time,
@@ -299,11 +282,7 @@ impl JobStore {
         Ok(Some(raw))
     }
 
-    pub async fn scan_job_keys(
-        &mut self,
-        cursor: u64,
-        count: usize,
-    ) -> Result<(u64, Vec<String>)> {
+    pub async fn scan_job_keys(&mut self, cursor: u64, count: usize) -> Result<(u64, Vec<String>)> {
         let pattern = format!("{JOB_KEY_PREFIX}*");
         let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
             .arg(cursor)
@@ -450,11 +429,7 @@ impl JobStore {
         Ok(ids)
     }
 
-    pub async fn remove_job_from_queue(
-        &mut self,
-        queue_name: &str,
-        job_id: &str,
-    ) -> Result<i64> {
+    pub async fn remove_job_from_queue(&mut self, queue_name: &str, job_id: &str) -> Result<i64> {
         let queue_key = self.format_queue_key(queue_name);
         let removed: i64 = self.conn.zrem(queue_key, job_id).await?;
         Ok(removed)
@@ -515,11 +490,7 @@ impl JobStore {
         Ok(())
     }
 
-    pub async fn mark_job_pending(
-        &mut self,
-        job_id: &str,
-        last_error: Option<&str>,
-    ) -> Result<()> {
+    pub async fn mark_job_pending(&mut self, job_id: &str, last_error: Option<&str>) -> Result<()> {
         let job_key = format!("{JOB_KEY_PREFIX}{job_id}");
         let mut pipe = redis::pipe();
         pipe.atomic();
@@ -529,7 +500,7 @@ impl JobStore {
         }
         pipe.hdel(&job_key, "start_time");
         pipe.hdel(&job_key, "worker_id");
-        pipe.query_async::<_, ()>(&mut self.conn).await?;
+        pipe.query_async::<()>(&mut self.conn).await?;
         Ok(())
     }
 
@@ -590,7 +561,7 @@ impl JobStore {
         pipe.hset(&job_key, "completion_time", completion_time.to_rfc3339());
         pipe.lpush(&dlq_key, job_id);
         pipe.expire(&job_key, DEFAULT_DLQ_RESULT_TTL_SECONDS);
-        pipe.query_async::<_, ()>(&mut self.conn).await?;
+        pipe.query_async::<()>(&mut self.conn).await?;
         Ok(())
     }
 
@@ -613,7 +584,7 @@ impl JobStore {
         } else if ttl_seconds == 0 {
             pipe.persist(&job_key);
         }
-        pipe.query_async::<_, ()>(&mut self.conn).await?;
+        pipe.query_async::<()>(&mut self.conn).await?;
         Ok(())
     }
 
@@ -680,7 +651,7 @@ impl JobStore {
             .arg(payload)
             .arg("EX")
             .arg(ttl_seconds)
-            .query_async::<_, ()>(&mut self.conn)
+            .query_async::<()>(&mut self.conn)
             .await?;
         Ok(())
     }
@@ -722,7 +693,11 @@ impl JobStore {
         Ok((next, keys))
     }
 
-    pub async fn scan_queue_keys(&mut self, cursor: u64, count: usize) -> Result<(u64, Vec<String>)> {
+    pub async fn scan_queue_keys(
+        &mut self,
+        cursor: u64,
+        count: usize,
+    ) -> Result<(u64, Vec<String>)> {
         let pattern = format!("{QUEUE_KEY_PREFIX}*");
         let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
             .arg(cursor)
@@ -789,7 +764,7 @@ impl JobStore {
 
     pub async fn flushdb(&mut self) -> Result<()> {
         redis::cmd("FLUSHDB")
-            .query_async::<_, ()>(&mut self.conn)
+            .query_async::<()>(&mut self.conn)
             .await?;
         Ok(())
     }

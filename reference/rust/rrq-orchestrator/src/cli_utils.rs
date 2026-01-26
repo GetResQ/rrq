@@ -80,5 +80,6 @@ pub fn to_utc_rfc3339(epoch_seconds: f64) -> String {
     let seconds = epoch_seconds.floor() as i64;
     let nanos = ((epoch_seconds - epoch_seconds.floor()) * 1_000_000_000.0) as u32;
     let dt = Utc.timestamp_opt(seconds, nanos).single();
-    dt.map(|dt| dt.to_rfc3339()).unwrap_or_else(|| epoch_seconds.to_string())
+    dt.map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| epoch_seconds.to_string())
 }

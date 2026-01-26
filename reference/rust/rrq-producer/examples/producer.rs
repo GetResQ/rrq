@@ -4,11 +4,10 @@ use serde_json::{json, Map, Value};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let redis_dsn = std::env::var("RRQ_REDIS_DSN")
-        .unwrap_or_else(|_| "redis://localhost:6379/3".to_string());
+    let redis_dsn =
+        std::env::var("RRQ_REDIS_DSN").unwrap_or_else(|_| "redis://localhost:6379/3".to_string());
     let queue_name = std::env::var("RRQ_QUEUE").unwrap_or_else(|_| "default".to_string());
-    let function_name =
-        std::env::var("RRQ_FUNCTION").unwrap_or_else(|_| "quick_task".to_string());
+    let function_name = std::env::var("RRQ_FUNCTION").unwrap_or_else(|_| "quick_task".to_string());
     let count: usize = std::env::var("RRQ_COUNT")
         .ok()
         .and_then(|val| val.parse().ok())

@@ -1,11 +1,11 @@
 # RRQ Executor Protocol (v1)
 
-This protocol defines the contract between the RRQ **scheduler/orchestrator**
-(Python) and **executor runtimes** (e.g., Rust worker pools). The v1 transport
-is JSON Lines over stdio.
+This protocol defines the contract between the RRQ orchestrator (Rust `rrq`
+worker) and executor runtimes (Python, Rust, or any other language). The v1
+transport is JSON Lines over stdio.
 
 ## Design Goals
-- **Centralized scheduling** in Python (timeouts, retries, DLQ).
+- **Centralized scheduling** in the Rust orchestrator (timeouts, retries, DLQ).
 - **Language-agnostic executors** that only execute jobs and return outcomes.
 - **Stable wire format** for cross-language compatibility.
 
@@ -45,14 +45,15 @@ is JSON Lines over stdio.
   - `attempt` (int): 1-based attempt number.
   - `enqueue_time` (string, RFC 3339)
   - `queue_name` (string)
-  - `deadline` (string, RFC 3339, optional): Scheduler-calculated deadline.
-  - `trace_context` (object, optional): Propagation carrier for distributed tracing.
+  - `deadline` (string, RFC 3339, optional): Orchestrator-calculated deadline.
+  - `trace_context` (object, optional): Propagation carrier for distributed
+    tracing.
   - `worker_id` (string, optional)
 
 ### Tracing
 `trace_context` carries the producer's trace propagation headers. Executors can
 use it to continue traces in their own runtime. The Python executor runtime
-will automatically emit `rrq.executor` spans when telemetry is enabled.
+will emit `rrq.executor` spans when telemetry is enabled.
 
 The Rust reference executor supports OpenTelemetry with W3C
 `traceparent`/`tracestate` headers when built with the `otel` feature.
@@ -73,30 +74,31 @@ For cross-language tracing, all runtimes must use the same propagation format.
 
 ### status
 One of:
-- `success`: Execution completed. Scheduler persists result.
-- `retry`: Executor requests retry. Scheduler applies retry policy.
-- `timeout`: Executor timed itself out (scheduler still enforces hard timeout).
-- `error`: Execution failed. Scheduler applies retry policy.
+- `success`: Execution completed. Orchestrator persists result.
+- `retry`: Executor requests retry. Orchestrator applies retry policy.
+- `timeout`: Executor timed itself out (orchestrator still enforces hard
+  timeout).
+- `error`: Execution failed. Orchestrator applies retry policy.
 
 ### job_id
 The job ID this outcome corresponds to. Required for stdio executors so the
-scheduler can correlate responses and guard against stray or out-of-order
+orchestrator can correlate responses and guard against stray or out-of-order
 stdout lines.
 
 ### error_type (optional)
 Reserved values:
-- `handler_not_found`: Fatal; scheduler moves job directly to DLQ.
+- `handler_not_found`: Fatal; orchestrator moves job directly to DLQ.
 
 ### retry_after_seconds (optional)
-Used with `status = retry` to request a specific delay. Scheduler may override
-per policy.
+Used with `status = retry` to request a specific delay. Orchestrator may
+override per policy.
 
 ## Scheduling Semantics
-- **Timeouts** are enforced by the scheduler. Executors may return `timeout` if
-  they implement their own local timeouts.
-- **Retries** are controlled by the scheduler. Executors return `retry` to
+- **Timeouts** are enforced by the orchestrator. Executors may return `timeout`
+  if they implement their own local timeouts.
+- **Retries** are controlled by the orchestrator. Executors return `retry` to
   request a retry.
-- **DLQ** decisions are controlled by the scheduler.
+- **DLQ** decisions are controlled by the orchestrator.
 - **Cancellation** (v1) applies only to **pending** jobs. Once execution starts,
   the outcome is always applied.
 
@@ -107,15 +109,17 @@ RRQ may embed executor selection in the job function name using:
 executor#handler
 ```
 
-Example: `rust#send_email`. The scheduler strips the prefix and sends only
+Example: `rust#send_email`. The orchestrator strips the prefix and sends only
 `handler` as `function_name` in the `ExecutionRequest`.
 
 ## Transport (v1)
 Stdio JSON Lines:
 - stdin: one `ExecutionRequest` per line
 - stdout: one `ExecutionOutcome` per line
+- stderr: runtime logs (ignored by the orchestrator)
 
 ## Reference Implementations
 - Python: `reference/python/stdio_executor.py`
 - Rust protocol types: `reference/rust/rrq-protocol`
-- Rust executor: `reference/rust/rrq-executor` (see `reference/rust/rrq-executor/examples/stdio_executor.rs`)
+- Rust executor: `reference/rust/rrq-executor` (see
+  `reference/rust/rrq-executor/examples/stdio_executor.rs`)

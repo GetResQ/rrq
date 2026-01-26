@@ -35,24 +35,21 @@ pub fn load_toml_settings(config_path: Option<&str>) -> Result<RRQSettings> {
 
     let (path, _) = resolve_config_source(config_path);
     let path = path.ok_or_else(|| {
-        anyhow::anyhow!(
-            "RRQ config not found. Provide --config, set RRQ_CONFIG, or add rrq.toml."
-        )
+        anyhow::anyhow!("RRQ config not found. Provide --config, set RRQ_CONFIG, or add rrq.toml.")
     })?;
 
     let payload = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read config at {path}"))?;
-    let toml_value: toml::Value = toml::from_str(&payload)
-        .with_context(|| format!("failed to parse TOML at {path}"))?;
-    let mut json_value = serde_json::to_value(toml_value)
-        .context("failed to convert TOML to JSON")?;
+    let toml_value: toml::Value =
+        toml::from_str(&payload).with_context(|| format!("failed to parse TOML at {path}"))?;
+    let mut json_value =
+        serde_json::to_value(toml_value).context("failed to convert TOML to JSON")?;
 
     json_value = normalize_toml_payload(json_value)?;
     let env_overrides = env_overrides()?;
     let merged = deep_merge(json_value, env_overrides);
 
-    let settings: RRQSettings = serde_json::from_value(merged)
-        .context("invalid RRQ config")?;
+    let settings: RRQSettings = serde_json::from_value(merged).context("invalid RRQ config")?;
     Ok(settings)
 }
 
@@ -81,7 +78,11 @@ fn env_overrides() -> Result<Value> {
     set_env_string(&mut payload, "redis_dsn", "RRQ_REDIS_DSN");
     set_env_string(&mut payload, "default_queue_name", "RRQ_DEFAULT_QUEUE_NAME");
     set_env_string(&mut payload, "default_dlq_name", "RRQ_DEFAULT_DLQ_NAME");
-    set_env_int(&mut payload, "default_max_retries", "RRQ_DEFAULT_MAX_RETRIES")?;
+    set_env_int(
+        &mut payload,
+        "default_max_retries",
+        "RRQ_DEFAULT_MAX_RETRIES",
+    )?;
     set_env_int(
         &mut payload,
         "default_job_timeout_seconds",
@@ -108,7 +109,11 @@ fn env_overrides() -> Result<Value> {
         "RRQ_DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS",
     )?;
     set_env_int(&mut payload, "worker_concurrency", "RRQ_WORKER_CONCURRENCY")?;
-    set_env_string(&mut payload, "default_executor_name", "RRQ_DEFAULT_EXECUTOR_NAME");
+    set_env_string(
+        &mut payload,
+        "default_executor_name",
+        "RRQ_DEFAULT_EXECUTOR_NAME",
+    );
     set_env_float(
         &mut payload,
         "worker_health_check_interval_seconds",
@@ -163,7 +168,13 @@ fn set_env_float(map: &mut Map<String, Value>, key: &str, env: &str) -> Result<(
         let parsed: f64 = value
             .parse()
             .with_context(|| format!("Invalid {env} value: {value}"))?;
-        map.insert(key.to_string(), Value::Number(serde_json::Number::from_f64(parsed).ok_or_else(|| anyhow::anyhow!("Invalid {env} value: {value}"))?));
+        map.insert(
+            key.to_string(),
+            Value::Number(
+                serde_json::Number::from_f64(parsed)
+                    .ok_or_else(|| anyhow::anyhow!("Invalid {env} value: {value}"))?,
+            ),
+        );
     }
     Ok(())
 }
