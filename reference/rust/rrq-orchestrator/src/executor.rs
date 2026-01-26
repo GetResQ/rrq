@@ -27,6 +27,49 @@ struct StdioProcess {
     stderr_task: Option<JoinHandle<()>>,
 }
 
+struct ProcessGuard {
+    pool: Arc<StdioExecutorPool>,
+    proc: Option<StdioProcess>,
+}
+
+impl ProcessGuard {
+    fn new(pool: Arc<StdioExecutorPool>, proc: StdioProcess) -> Self {
+        Self {
+            pool,
+            proc: Some(proc),
+        }
+    }
+
+    fn proc_mut(&mut self) -> Result<&mut StdioProcess> {
+        self.proc.as_mut().context("executor process missing")
+    }
+
+    async fn release(&mut self) -> Result<()> {
+        if let Some(proc) = self.proc.take() {
+            self.pool.release(proc).await?;
+        }
+        Ok(())
+    }
+
+    async fn invalidate(&mut self) -> Result<()> {
+        if let Some(proc) = self.proc.take() {
+            self.pool.invalidate(proc).await?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ProcessGuard {
+    fn drop(&mut self) {
+        if let Some(proc) = self.proc.take() {
+            let pool = self.pool.clone();
+            tokio::spawn(async move {
+                let _ = pool.invalidate(proc).await;
+            });
+        }
+    }
+}
+
 pub struct StdioExecutorPool {
     cmd: Vec<String>,
     pool_size: usize,
@@ -218,15 +261,19 @@ impl StdioExecutor {
 #[async_trait]
 impl Executor for StdioExecutor {
     async fn execute(&self, request: ExecutionRequest) -> Result<ExecutionOutcome> {
-        let mut proc = self.pool.acquire().await?;
-        let result = self.execute_with_process(&mut proc, &request).await;
+        let proc = self.pool.acquire().await?;
+        let mut guard = ProcessGuard::new(self.pool.clone(), proc);
+        let result = {
+            let proc = guard.proc_mut()?;
+            self.execute_with_process(proc, &request).await
+        };
         match result {
             Ok(outcome) => {
-                self.pool.release(proc).await?;
+                guard.release().await?;
                 Ok(outcome)
             }
             Err(err) => {
-                self.pool.invalidate(proc).await?;
+                guard.invalidate().await?;
                 Err(err)
             }
         }

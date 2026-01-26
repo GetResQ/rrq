@@ -499,26 +499,34 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
     )
     .await;
 
-    match exec_result {
+    let outcome_result = match exec_result {
         Ok(outcome_result) => {
             let outcome = outcome_result?;
-            handle_execution_outcome(&job, &queue_name, &settings, &mut job_store, outcome).await?;
+            handle_execution_outcome(&job, &queue_name, &settings, &mut job_store, outcome).await
         }
         Err(_) => {
             let message = format!("Job timed out after {}s.", job_timeout);
-            handle_job_timeout(&job, &queue_name, &mut job_store, &message).await?;
+            handle_job_timeout(&job, &queue_name, &mut job_store, &message).await
         }
-    }
+    };
 
-    cleanup_running(
+    let cleanup_result = cleanup_running(
         &job.id,
         &mut job_store,
         &worker_id,
         running_jobs,
         running_aborts,
     )
-    .await?;
+    .await;
 
+    if let Err(err) = outcome_result {
+        if let Err(cleanup_err) = cleanup_result {
+            tracing::error!("cleanup failed after outcome error: {cleanup_err}");
+        }
+        return Err(err);
+    }
+
+    cleanup_result?;
     Ok(())
 }
 
