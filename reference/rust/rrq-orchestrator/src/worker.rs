@@ -73,10 +73,12 @@ impl RRQWorker {
             ));
         }
         let worker_id = worker_id.unwrap_or_else(|| {
+            let short_id = Uuid::new_v4().to_string();
+            let suffix = &short_id[..6];
             format!(
                 "{DEFAULT_WORKER_ID_PREFIX}{}_{}",
                 std::process::id(),
-                Uuid::new_v4().to_string()[..6].to_string()
+                suffix
             )
         });
         Ok(Self {
@@ -306,9 +308,7 @@ impl RRQWorker {
 
                 let handle = tokio::spawn(async move {
                     let _permit = permit;
-                    if let Err(err) = execute_job(
-                        job_for_task,
-                        queue_name,
+                    let context = ExecuteJobContext {
                         settings,
                         job_store,
                         executors,
@@ -317,9 +317,8 @@ impl RRQWorker {
                         worker_id,
                         running_jobs,
                         running_aborts,
-                    )
-                    .await
-                    {
+                    };
+                    if let Err(err) = execute_job(job_for_task, queue_name, context).await {
                         tracing::error!("job execution error: {err}");
                     }
                 });
@@ -395,18 +394,28 @@ fn split_executor_name(function_name: &str) -> (Option<String>, String) {
     (None, function_name.to_string())
 }
 
-async fn execute_job(
-    job: Job,
-    queue_name: String,
+struct ExecuteJobContext {
     settings: RRQSettings,
-    mut job_store: JobStore,
+    job_store: JobStore,
     executors: HashMap<String, Arc<dyn Executor>>,
     default_executor_name: String,
     executor_routes: HashMap<String, String>,
     worker_id: String,
     running_jobs: Arc<Mutex<HashMap<String, RunningJobInfo>>>,
     running_aborts: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
-) -> Result<()> {
+}
+
+async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -> Result<()> {
+    let ExecuteJobContext {
+        settings,
+        mut job_store,
+        executors,
+        default_executor_name,
+        executor_routes,
+        worker_id,
+        running_jobs,
+        running_aborts,
+    } = context;
     let span = tracing::info_span!(
         "rrq.job",
         job_id = %job.id,

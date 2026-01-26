@@ -40,7 +40,7 @@ impl RRQClient {
         kwargs: serde_json::Map<String, Value>,
         options: EnqueueOptions,
     ) -> Result<Job> {
-        let job_id = options.job_id.unwrap_or_else(|| Job::new_id());
+        let job_id = options.job_id.unwrap_or_else(Job::new_id);
         let queue_name = options
             .queue_name
             .unwrap_or_else(|| self.settings.default_queue_name.clone());

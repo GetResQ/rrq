@@ -17,9 +17,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     #[cfg(feature = "otel")]
-    let telemetry = OtelTelemetry::default();
+    let telemetry = OtelTelemetry;
     #[cfg(not(feature = "otel"))]
-    let telemetry = NoopTelemetry::default();
+    let telemetry = NoopTelemetry;
 
     let mut registry = Registry::new();
     registry.register("echo", |request| async move {

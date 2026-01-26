@@ -37,7 +37,7 @@ impl Executor for ScenarioExecutor {
         let attempt = request.context.attempt;
         let value = request
             .args
-            .get(0)
+            .first()
             .and_then(|arg| arg.as_str())
             .unwrap_or("unknown");
         match request.function_name.as_str() {
@@ -198,16 +198,18 @@ fn normalize_job_extended(job: &Job, in_dlq: bool) -> Value {
 
 #[tokio::test]
 async fn test_engine_conformance_basic() -> Result<()> {
-    let mut settings = RRQSettings::default();
-    settings.redis_dsn = "redis://localhost:6379/3".to_string();
-    settings.default_job_timeout_seconds = 1;
-    settings.default_result_ttl_seconds = 10;
-    settings.default_max_retries = 3;
-    settings.worker_concurrency = 2;
-    settings.default_poll_delay_seconds = 0.01;
-    settings.worker_shutdown_grace_period_seconds = 0.2;
-    settings.base_retry_delay_seconds = 0.01;
-    settings.max_retry_delay_seconds = 0.05;
+    let settings = RRQSettings {
+        redis_dsn: "redis://localhost:6379/3".to_string(),
+        default_job_timeout_seconds: 1,
+        default_result_ttl_seconds: 10,
+        default_max_retries: 3,
+        worker_concurrency: 2,
+        default_poll_delay_seconds: 0.01,
+        worker_shutdown_grace_period_seconds: 0.2,
+        base_retry_delay_seconds: 0.01,
+        max_retry_delay_seconds: 0.05,
+        ..Default::default()
+    };
 
     let mut store = JobStore::new(settings.clone()).await?;
     store.flushdb().await?;
@@ -318,17 +320,19 @@ async fn test_engine_conformance_basic() -> Result<()> {
 
 #[tokio::test]
 async fn test_engine_conformance_extended() -> Result<()> {
-    let mut settings = RRQSettings::default();
-    settings.redis_dsn = "redis://localhost:6379/4".to_string();
-    settings.default_job_timeout_seconds = 1;
-    settings.default_result_ttl_seconds = 10;
-    settings.default_max_retries = 3;
-    settings.worker_concurrency = 2;
-    settings.default_poll_delay_seconds = 0.01;
-    settings.worker_shutdown_grace_period_seconds = 0.2;
-    settings.base_retry_delay_seconds = 0.01;
-    settings.max_retry_delay_seconds = 0.05;
-    settings.default_unique_job_lock_ttl_seconds = 1;
+    let settings = RRQSettings {
+        redis_dsn: "redis://localhost:6379/4".to_string(),
+        default_job_timeout_seconds: 1,
+        default_result_ttl_seconds: 10,
+        default_max_retries: 3,
+        worker_concurrency: 2,
+        default_poll_delay_seconds: 0.01,
+        worker_shutdown_grace_period_seconds: 0.2,
+        base_retry_delay_seconds: 0.01,
+        max_retry_delay_seconds: 0.05,
+        default_unique_job_lock_ttl_seconds: 1,
+        ..Default::default()
+    };
 
     let mut store = JobStore::new(settings.clone()).await?;
     store.flushdb().await?;
@@ -449,16 +453,18 @@ async fn test_engine_conformance_extended() -> Result<()> {
 
 #[tokio::test]
 async fn test_engine_conformance_retry_backoff() -> Result<()> {
-    let mut settings = RRQSettings::default();
-    settings.redis_dsn = "redis://localhost:6379/5".to_string();
-    settings.default_job_timeout_seconds = 1;
-    settings.default_result_ttl_seconds = 10;
-    settings.default_max_retries = 3;
-    settings.worker_concurrency = 1;
-    settings.default_poll_delay_seconds = 0.01;
-    settings.worker_shutdown_grace_period_seconds = 0.2;
-    settings.base_retry_delay_seconds = 0.01;
-    settings.max_retry_delay_seconds = 0.05;
+    let settings = RRQSettings {
+        redis_dsn: "redis://localhost:6379/5".to_string(),
+        default_job_timeout_seconds: 1,
+        default_result_ttl_seconds: 10,
+        default_max_retries: 3,
+        worker_concurrency: 1,
+        default_poll_delay_seconds: 0.01,
+        worker_shutdown_grace_period_seconds: 0.2,
+        base_retry_delay_seconds: 0.01,
+        max_retry_delay_seconds: 0.05,
+        ..Default::default()
+    };
 
     let mut store = JobStore::new(settings.clone()).await?;
     store.flushdb().await?;
@@ -518,17 +524,19 @@ async fn test_engine_conformance_retry_backoff() -> Result<()> {
 
 #[tokio::test]
 async fn test_engine_conformance_routing() -> Result<()> {
-    let mut settings = RRQSettings::default();
-    settings.redis_dsn = "redis://localhost:6379/6".to_string();
-    settings.default_job_timeout_seconds = 1;
-    settings.default_result_ttl_seconds = 10;
-    settings.default_max_retries = 3;
-    settings.worker_concurrency = 2;
-    settings.default_poll_delay_seconds = 0.01;
-    settings.worker_shutdown_grace_period_seconds = 0.2;
-    settings
-        .executor_routes
-        .insert("rrq:queue:routed".to_string(), "alt".to_string());
+    let mut executor_routes = HashMap::new();
+    executor_routes.insert("rrq:queue:routed".to_string(), "alt".to_string());
+    let settings = RRQSettings {
+        redis_dsn: "redis://localhost:6379/6".to_string(),
+        default_job_timeout_seconds: 1,
+        default_result_ttl_seconds: 10,
+        default_max_retries: 3,
+        worker_concurrency: 2,
+        default_poll_delay_seconds: 0.01,
+        worker_shutdown_grace_period_seconds: 0.2,
+        executor_routes,
+        ..Default::default()
+    };
 
     let mut store = JobStore::new(settings.clone()).await?;
     store.flushdb().await?;

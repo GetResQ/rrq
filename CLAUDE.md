@@ -37,6 +37,9 @@ Use VS Code clickable format: `rrq/queue.py:45` or `rrq/worker.py:120-135`
     - Tests may use `unwrap`/`expect` for setup and assertions.
   - Avoid blocking calls in async contexts; use async I/O or `spawn_blocking` for CPU-bound work.
   - Enable overflow checks in release builds in `Cargo.toml`.
-  - Evaluate third-party crates for maintenance/security; add `cargo audit` to CI.
+  - Evaluate third-party crates for maintenance/security; try to install and update to latest or reasonably new versions; run `cargo audit` after major changes.
   - Always run `cargo fmt` and `clippy` when you finish a piece of work
   - Warnings from clippy and compiler should be treated like errors.
+
+- Adopt Idiomatic Rust Patterns: Use match expressions, enums, and traits to create expressive, functional-style logic; avoid C-like imperative constructs like long if-else chains or raw pointers, making the code more readable and maintainable.
+- Structure generated code into modules and crates for reusability and separation of concerns; avoid monolithic files by advising on proper file organization to improve scalability and collaboration.

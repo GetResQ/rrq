@@ -166,9 +166,7 @@ mod tests {
         });
         let request: ExecutionRequest = serde_json::from_value(payload).unwrap();
 
-        let outcome = registry
-            .execute_with(request, &NoopTelemetry::default())
-            .await;
+        let outcome = registry.execute_with(request, &NoopTelemetry).await;
         assert_eq!(outcome.status, OutcomeStatus::Success);
     }
 
@@ -192,9 +190,7 @@ mod tests {
         });
         let request: ExecutionRequest = serde_json::from_value(payload).unwrap();
 
-        let outcome = registry
-            .execute_with(request, &NoopTelemetry::default())
-            .await;
+        let outcome = registry.execute_with(request, &NoopTelemetry).await;
         assert_eq!(outcome.status, OutcomeStatus::Error);
         assert_eq!(outcome.error_type.as_deref(), Some("handler_not_found"));
     }

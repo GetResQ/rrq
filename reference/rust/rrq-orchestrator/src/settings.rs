@@ -9,16 +9,11 @@ use crate::constants::{
 };
 use crate::cron::CronJob;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutorType {
+    #[default]
     Stdio,
-}
-
-impl Default for ExecutorType {
-    fn default() -> Self {
-        ExecutorType::Stdio
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

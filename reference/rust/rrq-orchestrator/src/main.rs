@@ -362,9 +362,16 @@ async fn main() -> Result<()> {
                 raw,
                 batch_size,
             } => {
-                dlq_list(
-                    config, queue, function, limit, offset, dlq_name, raw, batch_size,
-                )
+                dlq_list(DlqListOptions {
+                    config,
+                    queue,
+                    function,
+                    limit,
+                    offset,
+                    dlq_name,
+                    raw,
+                    batch_size,
+                })
                 .await?;
             }
             DlqCommand::Stats { config, dlq_name } => {
@@ -388,7 +395,7 @@ async fn main() -> Result<()> {
                 all,
                 dry_run,
             } => {
-                dlq_requeue(
+                dlq_requeue(DlqRequeueOptions {
                     config,
                     dlq_name,
                     target_queue,
@@ -398,7 +405,7 @@ async fn main() -> Result<()> {
                     limit,
                     all,
                     dry_run,
-                )
+                })
                 .await?;
             }
         },
@@ -1288,7 +1295,7 @@ async fn job_trace(job_id: String, config: Option<String>) -> Result<()> {
 
     events.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    println!("{:<12} {:<20} {}", "Event", "Timestamp", "Details");
+    println!("{:<12} {:<20} Details", "Event", "Timestamp");
     let mut prev = None;
     for (event, ts, details) in &events {
         let time_val = cli_utils::to_utc_rfc3339(*ts);
@@ -1311,7 +1318,7 @@ async fn job_trace(job_id: String, config: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn dlq_list(
+struct DlqListOptions {
     config: Option<String>,
     queue: Option<String>,
     function: Option<String>,
@@ -1320,23 +1327,27 @@ async fn dlq_list(
     dlq_name: Option<String>,
     raw: bool,
     batch_size: usize,
-) -> Result<()> {
-    let settings = load_toml_settings(config.as_deref())?;
+}
+
+async fn dlq_list(options: DlqListOptions) -> Result<()> {
+    let settings = load_toml_settings(options.config.as_deref())?;
     let mut store = JobStore::new(settings.clone()).await?;
-    let dlq_name = dlq_name.unwrap_or(settings.default_dlq_name.clone());
+    let dlq_name = options
+        .dlq_name
+        .unwrap_or(settings.default_dlq_name.clone());
     let job_ids = store.get_dlq_job_ids(&dlq_name).await?;
     let mut jobs: Vec<HashMap<String, String>> = Vec::new();
-    let chunk_size = std::cmp::max(1, batch_size);
+    let chunk_size = std::cmp::max(1, options.batch_size);
     for batch in job_ids.chunks(chunk_size) {
         let batch_maps = store.get_job_data_maps(batch).await?;
         for job_map in batch_maps.into_iter().flatten() {
-            if let Some(filter) = queue.as_deref() {
+            if let Some(filter) = options.queue.as_deref() {
                 let job_queue = job_map.get("queue_name").cloned().unwrap_or_default();
                 if !queue_matches(filter, &job_queue) {
                     continue;
                 }
             }
-            if let Some(filter) = function.as_deref() {
+            if let Some(filter) = options.function.as_deref() {
                 if job_map.get("function_name").map(|v| v.as_str()) != Some(filter) {
                     continue;
                 }
@@ -1359,11 +1370,11 @@ async fn dlq_list(
 
     let jobs = jobs
         .into_iter()
-        .skip(offset)
-        .take(limit)
+        .skip(options.offset)
+        .take(options.limit)
         .collect::<Vec<_>>();
 
-    if raw {
+    if options.raw {
         for job in &jobs {
             println!("{}", serde_json::to_string_pretty(job)?);
         }
@@ -1412,12 +1423,15 @@ async fn dlq_list(
     }
 
     let total = store.dlq_len(&dlq_name).await?;
-    let showing_start = offset + 1;
+    let showing_start = options.offset + 1;
     let jobs_shown = jobs.len();
-    let showing_end = std::cmp::min(offset + jobs_shown, total as usize);
+    let showing_end = std::cmp::min(options.offset + jobs_shown, total as usize);
     println!("\nShowing {showing_start}-{showing_end} of {total} jobs");
     if showing_end < total as usize {
-        println!("Use --offset {} to see more", offset + limit);
+        println!(
+            "Use --offset {} to see more",
+            options.offset + options.limit
+        );
     }
 
     Ok(())
@@ -1524,7 +1538,7 @@ async fn dlq_inspect(job_id: String, config: Option<String>, raw: bool) -> Resul
     Ok(())
 }
 
-async fn dlq_requeue(
+struct DlqRequeueOptions {
     config: Option<String>,
     dlq_name: Option<String>,
     target_queue: Option<String>,
@@ -1534,14 +1548,21 @@ async fn dlq_requeue(
     limit: Option<usize>,
     all: bool,
     dry_run: bool,
-) -> Result<()> {
-    let settings = load_toml_settings(config.as_deref())?;
-    let mut store = JobStore::new(settings.clone()).await?;
-    let dlq_name = dlq_name.unwrap_or(settings.default_dlq_name.clone());
-    let target_queue = target_queue.unwrap_or(settings.default_queue_name.clone());
+}
 
-    let has_filter = queue.is_some() || function.is_some() || job_id.is_some();
-    if !has_filter && !all {
+async fn dlq_requeue(options: DlqRequeueOptions) -> Result<()> {
+    let settings = load_toml_settings(options.config.as_deref())?;
+    let mut store = JobStore::new(settings.clone()).await?;
+    let dlq_name = options
+        .dlq_name
+        .unwrap_or(settings.default_dlq_name.clone());
+    let target_queue = options
+        .target_queue
+        .unwrap_or(settings.default_queue_name.clone());
+
+    let has_filter =
+        options.queue.is_some() || options.function.is_some() || options.job_id.is_some();
+    if !has_filter && !options.all {
         println!("Refusing to requeue all jobs without --all or filters.");
         return Ok(());
     }
@@ -1550,18 +1571,18 @@ async fn dlq_requeue(
     let mut jobs: Vec<HashMap<String, String>> = Vec::new();
     for id in job_ids {
         if let Some(job_map) = store.get_job_data_map(&id).await? {
-            if let Some(filter) = job_id.as_deref() {
+            if let Some(filter) = options.job_id.as_deref() {
                 if id != filter {
                     continue;
                 }
             }
-            if let Some(filter) = queue.as_deref() {
+            if let Some(filter) = options.queue.as_deref() {
                 let job_queue = job_map.get("queue_name").cloned().unwrap_or_default();
                 if !queue_matches(filter, &job_queue) {
                     continue;
                 }
             }
-            if let Some(filter) = function.as_deref() {
+            if let Some(filter) = options.function.as_deref() {
                 if job_map.get("function_name").map(|v| v.as_str()) != Some(filter) {
                     continue;
                 }
@@ -1570,11 +1591,11 @@ async fn dlq_requeue(
         }
     }
 
-    if let Some(limit) = limit {
+    if let Some(limit) = options.limit {
         jobs.truncate(limit);
     }
 
-    if dry_run {
+    if options.dry_run {
         println!("Dry run: would requeue {} job(s).", jobs.len());
         for job in &jobs {
             let id = job.get("id").cloned().unwrap_or_default();
@@ -1871,7 +1892,7 @@ async fn debug_submit(
             kwargs_map,
             EnqueueOptions {
                 queue_name: Some(queue.unwrap_or(settings.default_queue_name.clone())),
-                defer_by: delay.map(|secs| chrono::Duration::seconds(secs)),
+                defer_by: delay.map(chrono::Duration::seconds),
                 ..Default::default()
             },
         )

@@ -475,10 +475,11 @@ impl JobStore {
         start_time: DateTime<Utc>,
     ) -> Result<()> {
         let job_key = format!("{JOB_KEY_PREFIX}{job_id}");
-        let mut mapping: Vec<(&str, String)> = Vec::new();
-        mapping.push(("status", JobStatus::Active.as_str().to_string()));
-        mapping.push(("start_time", start_time.to_rfc3339()));
-        mapping.push(("worker_id", worker_id.to_string()));
+        let mapping: Vec<(&str, String)> = vec![
+            ("status", JobStatus::Active.as_str().to_string()),
+            ("start_time", start_time.to_rfc3339()),
+            ("worker_id", worker_id.to_string()),
+        ];
         let mapping_ref: Vec<(&str, &str)> = mapping
             .iter()
             .map(|(key, value)| (*key, value.as_str()))

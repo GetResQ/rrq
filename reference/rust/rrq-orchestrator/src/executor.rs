@@ -93,16 +93,14 @@ impl StdioExecutorPool {
         }
         let mut child = command.spawn().context("failed to spawn stdio executor")?;
         let stderr = child.stderr.take();
-        let stderr_task = if let Some(stderr) = stderr {
-            Some(tokio::spawn(async move {
+        let stderr_task = stderr.map(|stderr| {
+            tokio::spawn(async move {
                 let mut reader = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
                     tracing::warn!("[executor] {}", line);
                 }
-            }))
-        } else {
-            None
-        };
+            })
+        });
         Ok(StdioProcess { child, stderr_task })
     }
 
