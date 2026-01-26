@@ -1,0 +1,37 @@
+[package]
+name = "rrq-orchestrator"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+description = "Rust orchestrator/scheduler for RRQ."
+
+[[bin]]
+name = "rrq"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+cron = "0.12"
+dotenvy = "0.15"
+globset = "0.4"
+num_cpus = "1"
+notify = "6"
+redis = { version = "0.24", features = ["tokio-comp"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+toml = "0.8"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+
+rrq-protocol = { path = "../rrq-protocol" }
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+rrq-producer = { path = "../rrq-producer" }

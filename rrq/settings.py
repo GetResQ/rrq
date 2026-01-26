@@ -3,7 +3,7 @@
 Settings are loaded from TOML files via rrq.config and validated with Pydantic.
 """
 
-from typing import List, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -17,7 +17,6 @@ from .constants import (
     DEFAULT_RESULT_TTL_SECONDS,
     DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
 )
-from .cron import CronJob
 
 
 class ExecutorConfig(BaseModel):
@@ -34,8 +33,8 @@ class ExecutorConfig(BaseModel):
 class RRQSettings(BaseModel):
     """Configuration settings for the RRQ (Reliable Redis Queue) system.
 
-    These settings control various aspects of the client, worker, and job store behavior,
-    such as Redis connection, queue names, timeouts, retry policies, and worker concurrency.
+    These settings control various aspects of the client, executor runtime, and job store behavior,
+    such as Redis connection, queue names, timeouts, retry policies, and concurrency hints.
     """
 
     redis_dsn: str = Field(
@@ -108,14 +107,6 @@ class RRQSettings(BaseModel):
     worker_shutdown_grace_period_seconds: float = Field(
         default=10.0,
         description="Grace period (in seconds) for active job tasks to finish during worker shutdown.",
-    )
-    cron_jobs: list[CronJob] = Field(
-        default_factory=list,
-        description="Optional list of cron job specifications to run periodically.",
-    )
-    event_handlers: List[str] = Field(
-        default_factory=list,
-        description="List of module paths to event handler classes that implement RRQHook.",
     )
     expected_job_ttl: int = Field(
         default=30,

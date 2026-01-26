@@ -4,7 +4,7 @@ RRQ intentionally keeps telemetry optional: the core queue semantics must work
 even when tracing/metrics libraries are missing or misconfigured.
 
 Telemetry is configured per-process via :func:`configure` and used internally by
-RRQClient and RRQWorker.
+RRQClient and the Python executor runtime.
 """
 
 from __future__ import annotations

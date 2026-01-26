@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import importlib
 import inspect
@@ -136,3 +137,25 @@ async def run_python_executor(settings_object_path: str | None) -> None:
         await executor.close()
         await client.close()
         await job_store.aclose()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="RRQ Python executor runtime")
+    parser.add_argument(
+        "--settings",
+        dest="settings_object_path",
+        help=(
+            "PythonExecutorSettings object path "
+            "(e.g., myapp.executor_config.python_executor_settings). "
+            f"Defaults to {ENV_EXECUTOR_SETTINGS} if unset."
+        ),
+    )
+    args = parser.parse_args()
+    asyncio.run(run_python_executor(args.settings_object_path))
+
+
+__all__ = ["run_python_executor", "load_executor_settings", "main"]
+
+
+if __name__ == "__main__":
+    main()

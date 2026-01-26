@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 const JOB_KEY_PREFIX: &str = "rrq:job:";
 const QUEUE_KEY_PREFIX: &str = "rrq:queue:";
+const DEFAULT_QUEUE_NAME: &str = "rrq:queue:default";
 
 #[derive(Debug, Clone, Default)]
 pub struct EnqueueOptions {
@@ -48,7 +49,7 @@ impl Producer {
     ) -> Result<String> {
         let queue_name = options
             .queue_name
-            .unwrap_or_else(|| "default".to_string());
+            .unwrap_or_else(|| DEFAULT_QUEUE_NAME.to_string());
         let job_id = options
             .job_id
             .unwrap_or_else(|| Uuid::new_v4().to_string());

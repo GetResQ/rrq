@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "rrq-executor",
+    "rrq-orchestrator",
     "rrq-producer",
     "rrq-protocol",
 ]

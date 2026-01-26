@@ -1,0 +1,14 @@
+{
+  "engine": "python",
+  "jobs": {
+    "job-retry-backoff": {
+      "current_retries": 3,
+      "in_dlq": true,
+      "last_error": "boom: backoff",
+      "max_retries": 3,
+      "result": null,
+      "status": "FAILED"
+    }
+  },
+  "scenario": "retry_backoff"
+}

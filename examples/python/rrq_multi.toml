@@ -5,7 +5,7 @@ worker_concurrency = 4
 
 [rrq.executors.python]
 type = "stdio"
-cmd = ["rrq", "executor", "python", "--settings", "examples.python.executor_config.python_executor_settings"]
+cmd = ["rrq-executor", "--settings", "examples.python.executor_config.python_executor_settings"]
 pool_size = 1
 
 [rrq.executors.rust]

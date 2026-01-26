@@ -5,6 +5,7 @@ This directory is a Cargo workspace containing:
 - `rrq-protocol`: shared protocol types for stdio executors
 - `rrq-producer`: minimal producer that writes jobs to Redis
 - `rrq-executor`: stdio executor reference implementation
+- `rrq-orchestrator`: Rust scheduler/orchestrator (worker) implementation
 
 ## Git dependency example
 

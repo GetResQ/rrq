@@ -1,4 +1,4 @@
-"""TOML-based configuration loader for RRQ orchestrator settings."""
+"""TOML-based configuration loader for RRQ settings."""
 
 from __future__ import annotations
 

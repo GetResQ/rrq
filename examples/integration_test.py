@@ -1,7 +1,7 @@
 """Integration test script for RRQ example apps.
 
 Runs Python and Rust producers against Python/Rust executors, verifying that
-queued work drains once a worker is started.
+queued work drains once the Rust orchestrator is started.
 """
 
 from __future__ import annotations
@@ -111,20 +111,52 @@ def _run(
     subprocess.run(cmd, cwd=cwd, env=env, check=True)
 
 
+def _resolve_rrq_cmd(root: Path) -> list[str]:
+    packaged = root / "rrq" / "bin"
+    if sys.platform == "win32":
+        packaged_bin = packaged / "rrq.exe"
+    else:
+        packaged_bin = packaged / "rrq"
+    if packaged_bin.exists():
+        return [str(packaged_bin)]
+
+    rrq_path = shutil.which("rrq")
+    if rrq_path:
+        resolved = Path(rrq_path).resolve()
+        # Prefer cargo run if rrq comes from the repo's .venv (often stale in dev).
+        if ".venv" not in resolved.parts or root not in resolved.parents:
+            return [str(resolved)]
+
+    if shutil.which("cargo") is None:
+        raise SystemExit(
+            "rrq CLI not found on PATH and cargo is unavailable to build it."
+        )
+
+    manifest_path = root / "reference" / "rust" / "Cargo.toml"
+    return [
+        "cargo",
+        "run",
+        "--quiet",
+        "-p",
+        "rrq-orchestrator",
+        "--bin",
+        "rrq",
+        "--manifest-path",
+        str(manifest_path),
+        "--",
+    ]
+
+
 def _start_worker(
     *,
+    rrq_cmd: list[str],
     config_path: Path,
     queues: list[str] | None,
     env: dict[str, str],
     cwd: Path,
     burst: bool,
 ) -> subprocess.Popen:
-    cmd = [
-        sys.executable,
-        "examples/python/consumer.py",
-        "--config",
-        str(config_path),
-    ]
+    cmd = [*rrq_cmd, "worker", "run", "--config", str(config_path)]
     if burst:
         cmd.append("--burst")
     if queues:
@@ -252,7 +284,12 @@ def main() -> int:
     parser.add_argument(
         "--flush",
         action="store_true",
-        help="Flush Redis DB before each scenario",
+        help="Flush Redis DB before each scenario (default)",
+    )
+    parser.add_argument(
+        "--no-flush",
+        action="store_true",
+        help="Do not flush Redis DB before each scenario",
     )
     parser.add_argument(
         "--no-build-rust",
@@ -272,18 +309,25 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.no_flush and args.flush:
+        raise SystemExit("Use either --flush or --no-flush, not both.")
+
+    if args.no_flush:
+        args.flush = False
+    else:
+        args.flush = True
+
     root = Path(__file__).resolve().parents[1]
     client = redis.Redis.from_url(args.redis_dsn, decode_responses=False)
 
-    if shutil.which("rrq") is None:
-        raise SystemExit("rrq CLI not found on PATH. Run via `uv run` or install rrq.")
+    rrq_cmd = _resolve_rrq_cmd(root)
     if shutil.which("cargo") is None:
         raise SystemExit("cargo not found on PATH. Install Rust to run Rust scenarios.")
 
     python_executor_cmd = [
-        "rrq",
-        "executor",
-        "python",
+        sys.executable,
+        "-m",
+        "rrq.executor_runtime",
         "--settings",
         "examples.python.executor_config.python_executor_settings",
     ]
@@ -342,7 +386,8 @@ def main() -> int:
                     ProducerSpec(
                         cmd=[
                             sys.executable,
-                            "examples/python/producer.py",
+                            "-m",
+                            "examples.python.producer",
                             "--config",
                             str(python_config),
                             "--count",
@@ -377,7 +422,8 @@ def main() -> int:
                     ProducerSpec(
                         cmd=[
                             sys.executable,
-                            "examples/python/producer.py",
+                            "-m",
+                            "examples.python.producer",
                             "--config",
                             str(mixed_config),
                             "--count",
@@ -442,6 +488,7 @@ def main() -> int:
             worker_env = env_base.copy()
             worker_env["RRQ_EXECUTOR_CONFIG"] = str(scenario.config)
             worker = _start_worker(
+                rrq_cmd=rrq_cmd,
                 config_path=scenario.config,
                 queues=scenario.queues,
                 env=worker_env,

@@ -2,12 +2,19 @@
 
 ## Configure
 
-`examples/python/rrq.toml` configures the worker and points at the Python stdio executor.
+`examples/python/rrq.toml` configures the Rust orchestrator and points at the Python
+stdio executor.
 
-## Run a consumer (orchestrator)
+## Run the Rust orchestrator + Python executor
 
 ```
-python examples/python/consumer.py --config examples/python/rrq.toml
+rrq worker run --config examples/python/rrq.toml
+```
+
+In another terminal, run the Python executor runtime:
+
+```
+rrq-executor --settings examples.python.executor_config.python_executor_settings
 ```
 
 ## Run a producer
@@ -18,7 +25,7 @@ python examples/python/producer.py --config examples/python/rrq.toml
 
 ## Perf test
 
-Start a worker first, then run:
+Start the orchestrator/executor first, then run:
 
 ```
 python examples/python/perf_test.py --config examples/python/rrq.toml --count 500

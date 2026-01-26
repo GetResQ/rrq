@@ -1,6 +1,6 @@
 # RRQ Command Line Interface Reference
 
-RRQ provides a comprehensive command-line interface (CLI) for managing workers, monitoring queues, and debugging.
+RRQ provides a Rust-based command-line interface (CLI) for managing workers, queues, and debugging.
 
 ## Worker Management
 
@@ -28,7 +28,8 @@ Run an RRQ worker with auto-restart on file changes.
 ## Executor Management
 
 ### `rrq executor python`
-Run the Python stdio executor runtime (for out-of-process Python handlers).
+Run the Python stdio executor runtime (for out-of-process Python handlers). This
+subcommand spawns the `rrq-executor` entrypoint from the Python package.
 
 **Options:**
 - `--settings` (optional): Python executor settings object path (e.g., `myapp.executor_config.python_executor_settings`). If not provided, uses `RRQ_EXECUTOR_SETTINGS`.
@@ -102,24 +103,6 @@ Show job execution timeline with durations.
 
 **Options:**
 - `--config` (optional): Same as above.
-
-## Real-time Monitoring
-
-### `rrq monitor`
-Launch real-time monitoring dashboard with live statistics.
-
-**Options:**
-- `--config` (optional): Same as above.
-- `--refresh` (optional): Refresh interval in seconds (default: 1.0).
-- `--queues` (optional, multiple): Specific queues to monitor.
-
-**Refresh Rate Guidelines:**
-- **Small deployments** (< 10 queues, < 5 workers): 0.5-2.0 seconds
-- **Medium deployments** (10-100 queues, 5-20 workers): 2.0-5.0 seconds  
-- **Large deployments** (> 100 queues, > 20 workers): 5.0-10.0 seconds
-- **Very large deployments**: Consider using `--queues` filter to monitor specific queues
-
-⚠️ **Warning**: Refresh rates below 1.0 second can overwhelm Redis with scan operations. Monitor Redis CPU usage and adjust accordingly.
 
 ## Dead Letter Queue Management
 
@@ -230,12 +213,9 @@ rrq queue list --config rrq.toml
 
 # Use environment variable
 export RRQ_CONFIG=rrq.toml
-rrq monitor
-
 # Debug workflow
 rrq debug generate-jobs --count 100 --queue urgent
 rrq queue inspect urgent --limit 10
-rrq monitor --queues urgent --refresh 0.5
 
 # DLQ management workflow
 rrq dlq list --queue urgent --limit 10      # List failed jobs from urgent queue
