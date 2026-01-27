@@ -1,4 +1,4 @@
-"""Python stdio executor runtime for RRQ."""
+"""Python Unix socket executor runtime for RRQ."""
 
 from __future__ import annotations
 
@@ -7,18 +7,21 @@ import asyncio
 import importlib
 import inspect
 import os
-import sys
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
+from pathlib import Path
 
 from .client import RRQClient
 from .exc import HandlerNotFound
-from .executor import ExecutionOutcome, ExecutionRequest, PythonExecutor
+from .executor import ExecutionError, ExecutionOutcome, ExecutionRequest, PythonExecutor
 from .executor_settings import PythonExecutorSettings
+from .protocol import read_message, write_message
 from .registry import JobRegistry
 from .store import JobStore
 
 
 ENV_EXECUTOR_SETTINGS = "RRQ_EXECUTOR_SETTINGS"
+ENV_EXECUTOR_SOCKET = "RRQ_EXECUTOR_SOCKET"
 
 
 def load_executor_settings(
@@ -46,13 +49,14 @@ def load_executor_settings(
     return settings_object
 
 
-async def _read_line() -> bytes:
-    return await asyncio.to_thread(sys.stdin.buffer.readline)
-
-
-async def _write_line(payload: str) -> None:
-    await asyncio.to_thread(sys.stdout.write, payload)
-    await asyncio.to_thread(sys.stdout.flush)
+def resolve_socket_path(socket_path: str | None) -> str:
+    if socket_path is None:
+        socket_path = os.getenv(ENV_EXECUTOR_SOCKET)
+    if socket_path is None:
+        raise ValueError(
+            f"Executor socket path not provided. Use --socket or {ENV_EXECUTOR_SOCKET}."
+        )
+    return socket_path
 
 
 async def _call_hook(
@@ -65,8 +69,66 @@ async def _call_hook(
         await result
 
 
-async def run_python_executor(settings_object_path: str | None) -> None:
+async def _handle_connection(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    executor: PythonExecutor,
+    ready_event: asyncio.Event,
+) -> None:
+    try:
+        await ready_event.wait()
+        while True:
+            message = await read_message(reader)
+            if message is None:
+                break
+            message_type, payload = message
+            if message_type != "request":
+                raise ValueError(f"Unexpected message type: {message_type}")
+            request = ExecutionRequest.model_validate(payload)
+
+            if request.protocol_version != "1":
+                outcome = ExecutionOutcome(
+                    job_id=request.job_id,
+                    request_id=request.request_id,
+                    status="error",
+                    error=ExecutionError(message="Unsupported protocol version"),
+                )
+                await write_message(writer, "response", outcome.model_dump(mode="json"))
+                continue
+
+            try:
+                outcome = await executor.execute(request)
+            except HandlerNotFound as exc:
+                outcome = ExecutionOutcome(
+                    job_id=request.job_id,
+                    request_id=request.request_id,
+                    status="error",
+                    error=ExecutionError(
+                        message=str(exc),
+                        type="handler_not_found",
+                    ),
+                )
+            except Exception as exc:
+                outcome = ExecutionOutcome(
+                    job_id=request.job_id,
+                    request_id=request.request_id,
+                    status="error",
+                    error=ExecutionError(message=str(exc)),
+                )
+
+            await write_message(writer, "response", outcome.model_dump(mode="json"))
+    finally:
+        writer.close()
+        with suppress(Exception):
+            await writer.wait_closed()
+
+
+async def run_python_executor(
+    settings_object_path: str | None,
+    socket_path: str | None = None,
+) -> None:
     executor_settings = load_executor_settings(settings_object_path)
+    socket_path = resolve_socket_path(socket_path)
     settings = executor_settings.rrq_settings
     job_registry = executor_settings.job_registry
     if not isinstance(job_registry, JobRegistry):
@@ -83,55 +145,28 @@ async def run_python_executor(settings_object_path: str | None) -> None:
         worker_id=None,
     )
     startup_completed = False
+    ready_event = asyncio.Event()
+    server: asyncio.AbstractServer | None = None
 
     try:
+        path = Path(socket_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            path.unlink()
+        server = await asyncio.start_unix_server(
+            lambda r, w: _handle_connection(r, w, executor, ready_event),
+            path=str(path),
+        )
         await _call_hook(executor_settings.on_startup)
         startup_completed = True
-        while True:
-            raw = await _read_line()
-            if not raw:
-                break
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                request = ExecutionRequest.model_validate_json(raw)
-            except Exception as exc:
-                error = ExecutionOutcome(
-                    job_id="unknown",
-                    status="error",
-                    error_message=f"Invalid request: {exc}",
-                )
-                await _write_line(error.model_dump_json() + "\n")
-                continue
-
-            if request.protocol_version != "1":
-                outcome = ExecutionOutcome(
-                    job_id=request.job_id,
-                    status="error",
-                    error_message="Unsupported protocol version",
-                )
-                await _write_line(outcome.model_dump_json() + "\n")
-                continue
-
-            try:
-                outcome = await executor.execute(request)
-            except HandlerNotFound as exc:
-                outcome = ExecutionOutcome(
-                    job_id=request.job_id,
-                    status="error",
-                    error_message=str(exc),
-                    error_type="handler_not_found",
-                )
-            except Exception as exc:
-                outcome = ExecutionOutcome(
-                    job_id=request.job_id,
-                    status="error",
-                    error_message=str(exc),
-                )
-
-            await _write_line(outcome.model_dump_json() + "\n")
+        ready_event.set()
+        async with server:
+            await server.serve_forever()
     finally:
+        if server is not None:
+            server.close()
+            with suppress(Exception):
+                await server.wait_closed()
         if startup_completed:
             await _call_hook(executor_settings.on_shutdown)
         await executor.close()
@@ -140,7 +175,9 @@ async def run_python_executor(settings_object_path: str | None) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="RRQ Python executor runtime")
+    parser = argparse.ArgumentParser(
+        description="RRQ Python executor runtime (Unix socket)"
+    )
     parser.add_argument(
         "--settings",
         dest="settings_object_path",
@@ -150,8 +187,13 @@ def main() -> None:
             f"Defaults to {ENV_EXECUTOR_SETTINGS} if unset."
         ),
     )
+    parser.add_argument(
+        "--socket",
+        dest="socket_path",
+        help=f"Unix socket path. Defaults to {ENV_EXECUTOR_SOCKET} if unset.",
+    )
     args = parser.parse_args()
-    asyncio.run(run_python_executor(args.settings_object_path))
+    asyncio.run(run_python_executor(args.settings_object_path, args.socket_path))
 
 
 __all__ = ["run_python_executor", "load_executor_settings", "main"]

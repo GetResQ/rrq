@@ -1,9 +1,9 @@
 # Python reference implementation
 
-`reference/python/stdio_executor.py` shows the stdio protocol in the simplest form.
+`reference/python/socket_executor.py` shows the socket protocol in the simplest form.
 
 ```
-python reference/python/stdio_executor.py
+RRQ_EXECUTOR_SOCKET=/tmp/rrq-executor.sock python reference/python/socket_executor.py
 ```
 
 ## Tests

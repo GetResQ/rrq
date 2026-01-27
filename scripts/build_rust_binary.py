@@ -12,7 +12,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-RUST_WORKSPACE = ROOT / "reference" / "rust"
+RUST_WORKSPACE = ROOT / "rrq-rs"
 TARGET_DIR = RUST_WORKSPACE / "target"
 PACKAGE_BIN_DIR = ROOT / "rrq" / "bin"
 
@@ -92,7 +92,7 @@ def _build_binary(target: str) -> Path:
             "build",
             "--release",
             "-p",
-            "rrq-orchestrator",
+            "rrq",
             "--bin",
             "rrq",
             "--target",

@@ -2,7 +2,7 @@
 
 This protocol defines the contract between the RRQ orchestrator (Rust `rrq`
 worker) and executor runtimes (Python, Rust, or any other language). The v1
-transport is JSON Lines over stdio.
+transport is a Unix domain socket with length-delimited JSON frames.
 
 ## Design Goals
 - **Centralized scheduling** in the Rust orchestrator (timeouts, retries, DLQ).
@@ -14,10 +14,35 @@ transport is JSON Lines over stdio.
 - Timestamps are **RFC 3339** (UTC).
 - Field names are **snake_case**.
 
-## ExecutionRequest
+## Transport (v1)
+- The orchestrator sets `RRQ_EXECUTOR_SOCKET` to a filesystem path.
+- The executor **binds** a Unix socket at that path and accepts connections.
+- Each connection is a stream of **length-delimited frames**:
+  - 4-byte **big-endian** unsigned length prefix
+  - followed by a UTF-8 JSON payload of that length
+- Each frame is a JSON envelope:
+
+```json
+{
+  "type": "request",
+  "payload": { "..." : "..." }
+}
+```
+
+Message types:
+- `request`: `payload` is an `ExecutionRequest`.
+- `response`: `payload` is an `ExecutionOutcome`.
+
+Executors should read requests and write responses **sequentially** on a single
+connection. The orchestrator correlates responses by `request_id` and expects
+exactly one response per request. Protocol logging is not supported; executors
+should emit logs to stdout/stderr as needed.
+
+## ExecutionRequest (payload)
 ```json
 {
   "protocol_version": "1",
+  "request_id": "uuid",
   "job_id": "uuid",
   "function_name": "my_handler",
   "args": [1, "two"],
@@ -36,6 +61,7 @@ transport is JSON Lines over stdio.
 
 ### Fields
 - `protocol_version` (string): Always `"1"` for v1.
+- `request_id` (string): Unique ID for this request/response pair.
 - `job_id` (string): Unique job ID.
 - `function_name` (string): Handler name to execute.
 - `args` (array): Positional arguments.
@@ -60,14 +86,14 @@ The Rust reference executor supports OpenTelemetry with W3C
 
 For cross-language tracing, all runtimes must use the same propagation format.
 
-## ExecutionOutcome
+## ExecutionOutcome (payload)
 ```json
 {
   "job_id": "uuid",
+  "request_id": "uuid",
   "status": "success",
   "result": {"ok": true},
-  "error_message": null,
-  "error_type": null,
+  "error": null,
   "retry_after_seconds": null
 }
 ```
@@ -80,13 +106,26 @@ One of:
   timeout).
 - `error`: Execution failed. Orchestrator applies retry policy.
 
-### job_id
-The job ID this outcome corresponds to. Required for stdio executors so the
-orchestrator can correlate responses and guard against stray or out-of-order
-stdout lines.
+### request_id
+The request ID this outcome corresponds to. Required so the orchestrator can
+correlate responses and guard against mismatched or out-of-order results.
 
-### error_type (optional)
-Reserved values:
+### job_id
+The job ID this outcome corresponds to.
+
+### error (optional)
+Structured error payload:
+
+```json
+{
+  "message": "string",
+  "type": "handler_not_found",
+  "code": "optional_code",
+  "details": { "any": "json" }
+}
+```
+
+Reserved `type` values:
 - `handler_not_found`: Fatal; orchestrator moves job directly to DLQ.
 
 ### retry_after_seconds (optional)
@@ -112,14 +151,8 @@ executor#handler
 Example: `rust#send_email`. The orchestrator strips the prefix and sends only
 `handler` as `function_name` in the `ExecutionRequest`.
 
-## Transport (v1)
-Stdio JSON Lines:
-- stdin: one `ExecutionRequest` per line
-- stdout: one `ExecutionOutcome` per line
-- stderr: runtime logs (ignored by the orchestrator)
-
 ## Reference Implementations
-- Python: `reference/python/stdio_executor.py`
-- Rust protocol types: `reference/rust/rrq-protocol`
-- Rust executor: `reference/rust/rrq-executor` (see
-  `reference/rust/rrq-executor/examples/stdio_executor.rs`)
+- Python: `reference/python/socket_executor.py`
+- Rust protocol types: `rrq-rs/rrq-protocol`
+- Rust executor: `rrq-rs/rrq-executor` (see
+  `rrq-rs/rrq-executor/examples/socket_executor.rs`)

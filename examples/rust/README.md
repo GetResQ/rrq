@@ -7,7 +7,7 @@ cd examples/rust/producer
 cargo run
 ```
 
-This example uses the `rrq-producer` crate from `reference/rust/rrq-producer`.
+This example uses the `rrq-producer` crate from `rrq-rs/rrq-producer`.
 
 Env vars:
 - `RRQ_REDIS_DSN` (default: `redis://localhost:6379/3`)
@@ -17,17 +17,17 @@ Env vars:
 
 ## Executor (consumer)
 
-The reference Rust stdio executor lives in `reference/rust/rrq-executor`.
+The reference Rust socket executor lives in `rrq-rs/rrq-executor`.
 
 ```
-cd reference/rust/rrq-executor
-cargo run --example stdio_executor
+cd rrq-rs/rrq-executor
+RRQ_EXECUTOR_SOCKET=/tmp/rrq-executor.sock cargo run --example socket_executor
 ```
 
 Then point your worker config to the binary:
 
 ```toml
 [rrq.executors.rust]
-type = "stdio"
-cmd = ["/path/to/stdio_executor"]
+type = "socket"
+cmd = ["/path/to/socket_executor"]
 ```

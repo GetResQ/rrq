@@ -20,13 +20,14 @@ from .constants import (
 
 
 class ExecutorConfig(BaseModel):
-    """Configuration for external executors (stdio)."""
+    """Configuration for external executors (Unix socket)."""
 
-    type: Literal["stdio"] = "stdio"
+    type: Literal["socket"] = "socket"
     cmd: list[str] | None = None
     pool_size: int | None = None
     env: dict[str, str] | None = None
     cwd: str | None = None
+    socket_dir: str | None = None
     response_timeout_seconds: float | None = None
 
 

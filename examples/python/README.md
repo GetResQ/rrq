@@ -3,7 +3,7 @@
 ## Configure
 
 `examples/python/rrq.toml` configures the Rust orchestrator and points at the Python
-stdio executor.
+socket executor.
 
 ## Run the Rust orchestrator + Python executor
 

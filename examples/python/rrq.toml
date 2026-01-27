@@ -4,6 +4,6 @@ default_executor_name = "python"
 worker_concurrency = 4
 
 [rrq.executors.python]
-type = "stdio"
+type = "socket"
 cmd = ["rrq-executor", "--settings", "examples.python.executor_config.python_executor_settings"]
 pool_size = 1

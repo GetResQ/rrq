@@ -5,6 +5,6 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-rrq-producer = { path = "../../../reference/rust/rrq-producer" }
+rrq-producer = { path = "../../../rrq-rs/rrq-producer" }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

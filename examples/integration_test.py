@@ -79,7 +79,7 @@ def _write_config(
         lines.extend(
             [
                 "[rrq.executors.python]",
-                'type = "stdio"',
+                'type = "socket"',
                 f"cmd = {_toml_list(python_cmd)}",
                 "",
             ]
@@ -89,7 +89,7 @@ def _write_config(
         lines.extend(
             [
                 "[rrq.executors.rust]",
-                'type = "stdio"',
+                'type = "socket"',
                 f"cmd = {_toml_list(rust_cmd)}",
                 "",
             ]
@@ -132,13 +132,13 @@ def _resolve_rrq_cmd(root: Path) -> list[str]:
             "rrq CLI not found on PATH and cargo is unavailable to build it."
         )
 
-    manifest_path = root / "reference" / "rust" / "Cargo.toml"
+    manifest_path = root / "rrq-rs" / "Cargo.toml"
     return [
         "cargo",
         "run",
         "--quiet",
         "-p",
-        "rrq-orchestrator",
+        "rrq",
         "--bin",
         "rrq",
         "--manifest-path",
@@ -244,12 +244,12 @@ def _resolve_rust_executor_cmd(
     if "RRQ_RUST_EXECUTOR_CMD" in os.environ:
         return shlex.split(os.environ["RRQ_RUST_EXECUTOR_CMD"])
 
-    executor_dir = root / "reference" / "rust" / "rrq-executor"
-    workspace_target = root / "reference" / "rust" / "target"
-    binary = executor_dir / "target" / "debug" / "examples" / "stdio_executor"
-    workspace_binary = workspace_target / "debug" / "examples" / "stdio_executor"
+    executor_dir = root / "rrq-rs" / "rrq-executor"
+    workspace_target = root / "rrq-rs" / "target"
+    binary = executor_dir / "target" / "debug" / "examples" / "socket_executor"
+    workspace_binary = workspace_target / "debug" / "examples" / "socket_executor"
     if not binary.exists() and not workspace_binary.exists() and build:
-        _run(["cargo", "build", "--example", "stdio_executor"], cwd=executor_dir)
+        _run(["cargo", "build", "--example", "socket_executor"], cwd=executor_dir)
     if workspace_binary.exists():
         return [str(workspace_binary)]
     return [str(binary)]
@@ -294,13 +294,13 @@ def main() -> int:
     parser.add_argument(
         "--no-build-rust",
         action="store_true",
-        help="Skip building the Rust stdio executor",
+        help="Skip building the Rust socket executor",
     )
     parser.add_argument(
         "--rust-executor-cmd",
         type=str,
         default=None,
-        help="Command to launch the Rust stdio executor (overrides build)",
+        help="Command to launch the Rust socket executor (overrides build)",
     )
     parser.add_argument(
         "--burst-worker",

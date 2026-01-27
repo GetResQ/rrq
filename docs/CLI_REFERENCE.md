@@ -17,16 +17,22 @@ Options:
 Watch a directory and restart the worker on file changes.
 
 Options:
-- `--path` Directory to watch (default: `.`)
+- `--path` Directory to watch (defaults to `[rrq.watch].path` or `.`)
 - `--config` Path to `rrq.toml` (optional)
 - `--queue` Queue(s) to poll (repeatable)
 - `--pattern` Include glob(s) (repeatable, default: `*.py`, `*.toml`)
 - `--ignore-pattern` Ignore glob(s) (repeatable)
+- `--no-gitignore` Disable `.gitignore` and `.git/info/exclude` filtering
 
 Notes:
 - Watch mode forces executor pool sizes to 1.
 - A change that matches `--pattern` and does not match `--ignore-pattern`
   triggers a worker restart.
+- Executors can write to stdout/stderr; the orchestrator will capture and emit
+  those lines with executor prefixes. Use `RUST_LOG` to control orchestrator
+  verbosity.
+- Watch defaults can be set in `rrq.toml` under `[rrq.watch]`. CLI flags take
+  precedence over config values.
 
 ## Executor
 
@@ -36,6 +42,11 @@ Spawn the Python executor runtime (`rrq-executor`).
 Options:
 - `--settings` PythonExecutorSettings object path (optional; falls back to
   `RRQ_EXECUTOR_SETTINGS`)
+- `--socket` Unix socket path (optional; falls back to `RRQ_EXECUTOR_SOCKET`)
+
+Notes:
+- The orchestrator sets `RRQ_EXECUTOR_SOCKET` automatically when it launches
+  executors. For manual runs, pass `--socket` or set the env var.
 
 ## Health
 

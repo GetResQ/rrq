@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -14,7 +16,7 @@ from rrq.executor import (
     PythonExecutor,
     QueueRoutingExecutor,
     resolve_executor_pool_sizes,
-    StdioExecutor,
+    SocketExecutor,
 )
 from rrq.registry import JobRegistry
 from rrq.settings import ExecutorConfig, RRQSettings
@@ -32,6 +34,7 @@ async def test_queue_routing_executor() -> None:
             self.calls.append(request.job_id)
             return ExecutionOutcome(
                 job_id=request.job_id,
+                request_id=request.request_id,
                 status="success",
                 result={"executor": self.name},
             )
@@ -51,6 +54,7 @@ async def test_queue_routing_executor() -> None:
     )
 
     rust_request = ExecutionRequest(
+        request_id="req-rust",
         job_id="job-3",
         function_name="echo",
         args=[],
@@ -67,6 +71,7 @@ async def test_queue_routing_executor() -> None:
     assert rust_executor.calls == ["job-3"]
 
     default_request = ExecutionRequest(
+        request_id="req-default",
         job_id="job-4",
         function_name="echo",
         args=[],
@@ -87,37 +92,67 @@ async def test_queue_routing_executor() -> None:
     assert rust_executor.closed is True
 
 
+def _make_socket_dir() -> tempfile.TemporaryDirectory[str]:
+    base_dir = Path("/tmp")
+    if base_dir.exists():
+        return tempfile.TemporaryDirectory(dir=base_dir, prefix="rrq-socket-")
+    return tempfile.TemporaryDirectory(prefix="rrq-socket-")
+
+
 @pytest.mark.asyncio
-async def test_stdio_executor_success(tmp_path) -> None:
+async def test_socket_executor_success() -> None:
     script = (
-        "import json,sys\n"
-        "for line in sys.stdin:\n"
-        "    req=json.loads(line)\n"
-        "    out={'job_id':req['job_id'],'status':'success','result':{'job_id':req['job_id']}}\n"
-        "    sys.stdout.write(json.dumps(out)+'\\n')\n"
-        "    sys.stdout.flush()\n"
+        "import json,os,struct,socket\n"
+        "def read_exact(conn, size):\n"
+        "    data=b''\n"
+        "    while len(data) < size:\n"
+        "        chunk=conn.recv(size-len(data))\n"
+        "        if not chunk:\n"
+        "            return None\n"
+        "        data+=chunk\n"
+        "    return data\n"
+        "path=os.environ['RRQ_EXECUTOR_SOCKET']\n"
+        "server=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+        "server.bind(path)\n"
+        "server.listen(1)\n"
+        "conn,_=server.accept()\n"
+        "header=read_exact(conn,4)\n"
+        "if header:\n"
+        "    length=struct.unpack('>I', header)[0]\n"
+        "    payload=read_exact(conn,length)\n"
+        "    msg=json.loads(payload.decode('utf-8'))\n"
+        "    req=msg['payload']\n"
+        "    out={'job_id':req['job_id'],'request_id':req['request_id'],'status':'success','result':{'job_id':req['job_id']}}\n"
+        "    resp={'type':'response','payload':out}\n"
+        "    data=json.dumps(resp).encode('utf-8')\n"
+        "    conn.sendall(struct.pack('>I', len(data)) + data)\n"
+        "conn.close()\n"
+        "server.close()\n"
     )
     cmd = [sys.executable, "-u", "-c", script]
-    executor = StdioExecutor(cmd=cmd, pool_size=1)
-    request = ExecutionRequest(
-        job_id="job-stdio",
-        function_name="echo",
-        args=[],
-        kwargs={},
-        context=ExecutionContext(
-            job_id="job-stdio",
-            attempt=1,
-            enqueue_time=datetime.now(timezone.utc),
-            queue_name="default",
-        ),
-    )
-    try:
-        outcome = await executor.execute(request)
-    finally:
-        await executor.close()
+    with _make_socket_dir() as socket_dir:
+        executor = SocketExecutor(cmd=cmd, pool_size=1, socket_dir=socket_dir)
+        request = ExecutionRequest(
+            request_id="req-socket",
+            job_id="job-socket",
+            function_name="echo",
+            args=[],
+            kwargs={},
+            context=ExecutionContext(
+                job_id="job-socket",
+                attempt=1,
+                enqueue_time=datetime.now(timezone.utc),
+                queue_name="default",
+            ),
+        )
+        try:
+            outcome = await executor.execute(request)
+        finally:
+            await executor.close()
 
     assert outcome.status == "success"
-    assert outcome.result == {"job_id": "job-stdio"}
+    assert outcome.request_id == "req-socket"
+    assert outcome.result == {"job_id": "job-socket"}
 
 
 @pytest.mark.asyncio
@@ -138,6 +173,7 @@ async def test_python_executor_context_includes_trace_and_deadline() -> None:
     )
     deadline = datetime.now(timezone.utc)
     request = ExecutionRequest(
+        request_id="req-ctx",
         job_id="job-ctx",
         function_name="echo",
         args=[],
@@ -156,6 +192,7 @@ async def test_python_executor_context_includes_trace_and_deadline() -> None:
     outcome = await executor.execute(request)
 
     assert outcome.status == "success"
+    assert outcome.request_id == "req-ctx"
     assert captured["trace_context"] == {"traceparent": "00-abc-123-01"}
     assert captured["deadline"] == deadline
     assert captured["worker_id"] == "worker-123"

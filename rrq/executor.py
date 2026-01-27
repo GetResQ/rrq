@@ -3,25 +3,40 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
+import shutil
+import sys
+import tempfile
 import time
 from collections.abc import Mapping, Sequence
-from asyncio.subprocess import PIPE, Process
+from asyncio.subprocess import PIPE, DEVNULL, Process
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal, Protocol
+from uuid import uuid4
 from pydantic import BaseModel, Field
 
 from .client import RRQClient
 from .exc import HandlerNotFound, RetryJob
+from .protocol import read_message, write_message
 from .registry import JobRegistry
 from .settings import RRQSettings
 from .telemetry import get_telemetry
 
 logger = logging.getLogger(__name__)
+
+ENV_EXECUTOR_SOCKET = "RRQ_EXECUTOR_SOCKET"
+DEFAULT_SOCKET_CONNECT_TIMEOUT_SECONDS = 5.0
+SOCKET_PATH_MAX_BYTES = (
+    104
+    if sys.platform == "darwin"
+    else 108
+    if sys.platform.startswith("linux")
+    else None
+)
 
 
 class ExecutionContext(BaseModel):
@@ -40,6 +55,7 @@ class ExecutionRequest(BaseModel):
     """Job data sent to an executor."""
 
     protocol_version: str = "1"
+    request_id: str
     job_id: str
     function_name: str
     args: list[Any] = Field(default_factory=list)
@@ -47,14 +63,23 @@ class ExecutionRequest(BaseModel):
     context: ExecutionContext
 
 
+class ExecutionError(BaseModel):
+    """Structured error information from an executor."""
+
+    message: str
+    type: str | None = None
+    code: str | None = None
+    details: dict[str, Any] | None = None
+
+
 class ExecutionOutcome(BaseModel):
     """Result returned by an executor."""
 
     job_id: str | None = None
+    request_id: str | None = None
     status: Literal["success", "retry", "timeout", "error"]
     result: Any | None = None
-    error_message: str | None = None
-    error_type: str | None = None
+    error: ExecutionError | None = None
     retry_after_seconds: float | None = None
 
 
@@ -129,7 +154,10 @@ class PythonExecutor:
                 )
                 span.success(duration_seconds=time.monotonic() - start_time)
                 return ExecutionOutcome(
-                    job_id=request.job_id, status="success", result=result
+                    job_id=request.job_id,
+                    request_id=request.request_id,
+                    status="success",
+                    result=result,
                 )
             except RetryJob as exc:
                 logger.info("Job %s requested retry: %s", request.job_id, exc)
@@ -140,8 +168,9 @@ class PythonExecutor:
                 )
                 return ExecutionOutcome(
                     job_id=request.job_id,
+                    request_id=request.request_id,
                     status="retry",
-                    error_message=str(exc) or None,
+                    error=ExecutionError(message=str(exc) or "Job requested retry"),
                     retry_after_seconds=exc.defer_seconds,
                 )
             except (asyncio.TimeoutError, TimeoutError) as exc:
@@ -156,8 +185,9 @@ class PythonExecutor:
                 )
                 return ExecutionOutcome(
                     job_id=request.job_id,
+                    request_id=request.request_id,
                     status="timeout",
-                    error_message=error_message,
+                    error=ExecutionError(message=error_message),
                 )
             except Exception as exc:
                 logger.error(
@@ -169,8 +199,9 @@ class PythonExecutor:
                 span.error(duration_seconds=time.monotonic() - start_time, error=exc)
                 return ExecutionOutcome(
                     job_id=request.job_id,
+                    request_id=request.request_id,
                     status="error",
-                    error_message=str(exc) or "Unhandled handler error",
+                    error=ExecutionError(message=str(exc) or "Unhandled handler error"),
                 )
 
     async def cancel(self, job_id: str) -> None:
@@ -223,33 +254,37 @@ class QueueRoutingExecutor:
             await executor.close()
 
 
-@dataclass(frozen=True)
-class _StdioProcess:
+@dataclass(eq=False)
+class _SocketProcess:
     process: Process
+    socket_path: str
+    reader: asyncio.StreamReader
+    writer: asyncio.StreamWriter
+    stdout_task: asyncio.Task | None = None
     stderr_task: asyncio.Task | None = None
 
 
 @dataclass
-class StdioReservation:
-    pool: "StdioExecutorPool"
-    stdio_proc: _StdioProcess
+class SocketReservation:
+    pool: "SocketExecutorPool"
+    socket_proc: _SocketProcess
     _released: bool = False
 
     async def release(self) -> None:
         if self._released:
             return
         self._released = True
-        await self.pool.release(self.stdio_proc)
+        await self.pool.release(self.socket_proc)
 
     async def invalidate(self) -> None:
         if self._released:
             return
         self._released = True
-        await self.pool.invalidate(self.stdio_proc)
+        await self.pool.invalidate(self.socket_proc)
 
 
-class StdioExecutorPool:
-    """Manage a pool of long-lived stdio executor processes."""
+class SocketExecutorPool:
+    """Manage a pool of long-lived Unix socket executor processes."""
 
     def __init__(
         self,
@@ -259,6 +294,7 @@ class StdioExecutorPool:
         env: dict[str, str] | None = None,
         cwd: str | None = None,
         stderr_prefix: str | None = None,
+        socket_dir: str | None = None,
     ) -> None:
         if pool_size <= 0:
             raise ValueError("pool_size must be positive")
@@ -269,49 +305,147 @@ class StdioExecutorPool:
         self._env = env
         self._cwd = cwd
         self._stderr_prefix = stderr_prefix or "executor"
-        self._idle: asyncio.Queue[_StdioProcess] = asyncio.Queue()
-        self._all: set[_StdioProcess] = set()
+        self._socket_dir = socket_dir
+        self._owned_socket_dir: Path | None = None
+        self._idle: asyncio.Queue[_SocketProcess] = asyncio.Queue()
+        self._all: set[_SocketProcess] = set()
         self._closing = False
         self._closing_event = asyncio.Event()
         self._start_lock = asyncio.Lock()
 
-    async def _spawn_process(self) -> _StdioProcess:
+    async def _spawn_process(self) -> _SocketProcess:
+        socket_path = self._next_socket_path()
         env = None
         if self._env is not None:
             env = os.environ.copy()
             env.update(self._env)
+        else:
+            env = os.environ.copy()
+        env[ENV_EXECUTOR_SOCKET] = socket_path
         proc = await asyncio.create_subprocess_exec(
             *self._cmd,
-            stdin=PIPE,
+            stdin=DEVNULL,
             stdout=PIPE,
             stderr=PIPE,
             env=env,
             cwd=self._cwd,
         )
-        if proc.stdin is None or proc.stdout is None:
-            raise RuntimeError("Executor process missing stdio pipes")
-        stdio_proc = _StdioProcess(process=proc)
+        stdout_task = None
+        stderr_task = None
+        if proc.stdout is not None:
+            stdout_task = asyncio.create_task(
+                self._pump_output(proc.stdout, "stdout"),
+                name="rrq-executor-stdout",
+            )
         if proc.stderr is not None:
             stderr_task = asyncio.create_task(
-                self._pump_stderr(stdio_proc), name="rrq-executor-stderr"
+                self._pump_output(proc.stderr, "stderr"),
+                name="rrq-executor-stderr",
             )
-            stdio_proc = _StdioProcess(process=proc, stderr_task=stderr_task)
-        return stdio_proc
 
-    async def _pump_stderr(self, stdio_proc: _StdioProcess) -> None:
-        stderr = stdio_proc.process.stderr
-        if stderr is None:
+        try:
+            reader, writer = await self._connect_socket(socket_path, proc)
+        except Exception:
+            if stdout_task is not None:
+                stdout_task.cancel()
+            if stderr_task is not None:
+                stderr_task.cancel()
+            proc.kill()
+            with suppress(Exception):
+                await proc.wait()
+            raise
+
+        return _SocketProcess(
+            process=proc,
+            socket_path=socket_path,
+            reader=reader,
+            writer=writer,
+            stdout_task=stdout_task,
+            stderr_task=stderr_task,
+        )
+
+    def _socket_dir_path(self) -> Path:
+        if self._socket_dir:
+            path = self._resolve_socket_dir()
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+        if self._owned_socket_dir is None:
+            self._owned_socket_dir = self._make_temp_socket_dir()
+        return self._owned_socket_dir
+
+    def _next_socket_path(self) -> str:
+        path = self._socket_dir_path() / f"exec-{uuid4().hex}.sock"
+        self._validate_socket_path(path)
+        if path.exists():
+            path.unlink()
+        return str(path)
+
+    def _resolve_base_dir(self) -> Path:
+        if self._cwd:
+            base = Path(self._cwd).expanduser()
+            if not base.is_absolute():
+                base = (Path.cwd() / base).resolve()
+            else:
+                base = base.resolve()
+            return base
+        return Path.cwd()
+
+    def _resolve_socket_dir(self) -> Path:
+        path = Path(self._socket_dir).expanduser()
+        if not path.is_absolute():
+            path = self._resolve_base_dir() / path
+        return path.resolve()
+
+    def _make_temp_socket_dir(self) -> Path:
+        base_dir = Path("/tmp")
+        if not base_dir.is_dir():
+            base_dir = Path(tempfile.gettempdir())
+        return Path(tempfile.mkdtemp(prefix="rrq-executor-", dir=str(base_dir)))
+
+    def _validate_socket_path(self, path: Path) -> None:
+        if SOCKET_PATH_MAX_BYTES is None:
             return
+        encoded_len = len(str(path).encode("utf-8"))
+        if encoded_len > SOCKET_PATH_MAX_BYTES:
+            raise RuntimeError(
+                "Executor socket path is too long "
+                f"({encoded_len} > {SOCKET_PATH_MAX_BYTES} bytes). "
+                "Set socket_dir to a shorter absolute path, e.g. /tmp/rrq."
+            )
+
+    async def _connect_socket(
+        self,
+        socket_path: str,
+        proc: Process,
+        *,
+        timeout_seconds: float = DEFAULT_SOCKET_CONNECT_TIMEOUT_SECONDS,
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        deadline = time.monotonic() + timeout_seconds
+        last_error: Exception | None = None
+        while True:
+            if proc.returncode is not None:
+                raise RuntimeError("Executor process exited before socket ready")
+            try:
+                return await asyncio.open_unix_connection(socket_path)
+            except (FileNotFoundError, ConnectionRefusedError, OSError) as exc:
+                last_error = exc
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Executor socket not ready: {last_error}"
+                ) from last_error
+            await asyncio.sleep(0.05)
+
+    async def _pump_output(self, stream: asyncio.StreamReader, label: str) -> None:
         prefix = self._stderr_prefix
         while True:
             try:
-                line = await stderr.readline()
+                line = await stream.readline()
             except asyncio.CancelledError:
                 break
             if not line:
                 break
             message = line.decode("utf-8", errors="replace").rstrip()
-            logger.warning("[%s] %s", prefix, message)
+            logger.warning("[%s:%s] %s", prefix, label, message)
 
     async def _ensure_started(self) -> None:
         if self._all:
@@ -320,62 +454,69 @@ class StdioExecutorPool:
             if self._all:
                 return
             for _ in range(self._pool_size):
-                stdio_proc = await self._spawn_process()
-                self._all.add(stdio_proc)
-                await self._idle.put(stdio_proc)
+                socket_proc = await self._spawn_process()
+                self._all.add(socket_proc)
+                await self._idle.put(socket_proc)
 
-    async def acquire(self) -> _StdioProcess:
+    async def acquire(self) -> _SocketProcess:
         if self._closing:
             raise RuntimeError("Executor pool is closing")
         await self._ensure_started()
         while True:
-            stdio_proc = await self._wait_for_idle()
-            if stdio_proc.process.returncode is None:
-                return stdio_proc
-            await self._replace(stdio_proc)
+            socket_proc = await self._wait_for_idle()
+            if socket_proc.process.returncode is None:
+                return socket_proc
+            await self._replace(socket_proc)
 
-    async def release(self, stdio_proc: _StdioProcess) -> None:
-        if stdio_proc.process.returncode is not None:
-            await self._replace(stdio_proc)
+    async def release(self, socket_proc: _SocketProcess) -> None:
+        if socket_proc.process.returncode is not None:
+            await self._replace(socket_proc)
             return
         if self._closing:
-            await self._terminate(stdio_proc)
+            await self._terminate(socket_proc)
             return
-        await self._idle.put(stdio_proc)
+        await self._idle.put(socket_proc)
 
-    async def try_acquire(self) -> _StdioProcess | None:
+    async def try_acquire(self) -> _SocketProcess | None:
         if self._closing:
             return None
         await self._ensure_started()
         while True:
             try:
-                stdio_proc = self._idle.get_nowait()
+                socket_proc = self._idle.get_nowait()
             except asyncio.QueueEmpty:
                 return None
-            if stdio_proc.process.returncode is None:
-                return stdio_proc
-            await self._replace(stdio_proc)
+            if socket_proc.process.returncode is None:
+                return socket_proc
+            await self._replace(socket_proc)
 
-    async def _replace(self, stdio_proc: _StdioProcess) -> None:
-        await self._terminate(stdio_proc)
+    async def _replace(self, socket_proc: _SocketProcess) -> None:
+        await self._terminate(socket_proc)
         if self._closing:
             return
         replacement = await self._spawn_process()
         self._all.add(replacement)
         await self._idle.put(replacement)
 
-    async def invalidate(self, stdio_proc: _StdioProcess) -> None:
-        await self._replace(stdio_proc)
+    async def invalidate(self, socket_proc: _SocketProcess) -> None:
+        await self._replace(socket_proc)
 
     async def _terminate(
-        self, stdio_proc: _StdioProcess, *, grace_seconds: float = 1.0
+        self, socket_proc: _SocketProcess, *, grace_seconds: float = 1.0
     ) -> None:
-        self._all.discard(stdio_proc)
-        if stdio_proc.stderr_task is not None:
-            stdio_proc.stderr_task.cancel()
+        self._all.discard(socket_proc)
+        socket_proc.writer.close()
+        with suppress(Exception):
+            await socket_proc.writer.wait_closed()
+        if socket_proc.stdout_task is not None:
+            socket_proc.stdout_task.cancel()
             with suppress(asyncio.CancelledError):
-                await stdio_proc.stderr_task
-        proc = stdio_proc.process
+                await socket_proc.stdout_task
+        if socket_proc.stderr_task is not None:
+            socket_proc.stderr_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await socket_proc.stderr_task
+        proc = socket_proc.process
         if proc.returncode is None:
             proc.terminate()
             try:
@@ -384,8 +525,12 @@ class StdioExecutorPool:
                 proc.kill()
                 with suppress(Exception):
                     await proc.wait()
+        socket_path = Path(socket_proc.socket_path)
+        if socket_path.exists():
+            with suppress(OSError):
+                socket_path.unlink()
 
-    async def _wait_for_idle(self) -> _StdioProcess:
+    async def _wait_for_idle(self) -> _SocketProcess:
         while True:
             if self._closing:
                 raise RuntimeError("Executor pool is closing")
@@ -408,14 +553,16 @@ class StdioExecutorPool:
         self._closing = True
         self._closing_event.set()
         while not self._idle.empty():
-            stdio_proc = self._idle.get_nowait()
-            await self._terminate(stdio_proc, grace_seconds=grace_seconds)
-        for stdio_proc in list(self._all):
-            await self._terminate(stdio_proc, grace_seconds=grace_seconds)
+            socket_proc = self._idle.get_nowait()
+            await self._terminate(socket_proc, grace_seconds=grace_seconds)
+        for socket_proc in list(self._all):
+            await self._terminate(socket_proc, grace_seconds=grace_seconds)
+        if self._owned_socket_dir is not None:
+            shutil.rmtree(self._owned_socket_dir, ignore_errors=True)
 
 
-class StdioExecutor:
-    """Executes jobs by sending requests to a stdio executor process pool."""
+class SocketExecutor:
+    """Executes jobs by sending requests to Unix socket executor processes."""
 
     def __init__(
         self,
@@ -425,98 +572,61 @@ class StdioExecutor:
         env: dict[str, str] | None = None,
         cwd: str | None = None,
         stderr_prefix: str | None = None,
+        socket_dir: str | None = None,
         response_timeout_seconds: float | None = None,
     ) -> None:
-        self._pool = StdioExecutorPool(
+        self._pool = SocketExecutorPool(
             cmd=cmd,
             pool_size=pool_size,
             env=env,
             cwd=cwd,
             stderr_prefix=stderr_prefix,
+            socket_dir=socket_dir,
         )
         self._response_timeout_seconds = response_timeout_seconds
 
     async def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
-        stdio_proc = await self._pool.acquire()
+        socket_proc = await self._pool.acquire()
         replaced = False
         try:
             payload = request.model_dump(mode="json")
-            data = json.dumps(payload).encode("utf-8") + b"\n"
-            stdin = stdio_proc.process.stdin
-            stdout = stdio_proc.process.stdout
-            if stdin is None or stdout is None:
-                raise RuntimeError("Executor process missing stdio pipes")
-            stdin.write(data)
-            await stdin.drain()
-            read = stdout.readline()
-            if self._response_timeout_seconds is not None:
-                line = await asyncio.wait_for(
-                    read, timeout=self._response_timeout_seconds
-                )
-            else:
-                line = await read
-            if not line:
-                raise RuntimeError("Executor process exited")
-            outcome = ExecutionOutcome.model_validate_json(line)
-            if outcome.job_id is None:
-                raise RuntimeError("Executor outcome missing job_id")
-            if outcome.job_id != request.job_id:
-                raise RuntimeError(
-                    f"Executor outcome job_id mismatch (expected {request.job_id}, got {outcome.job_id})"
-                )
+            await write_message(socket_proc.writer, "request", payload)
+            outcome = await self._read_response(socket_proc.reader, request)
             return outcome
         except asyncio.CancelledError:
-            await self._pool.invalidate(stdio_proc)
+            await self._pool.invalidate(socket_proc)
             replaced = True
             raise
         except Exception as exc:
-            await self._pool.invalidate(stdio_proc)
+            await self._pool.invalidate(socket_proc)
             replaced = True
             return ExecutionOutcome(
-                job_id=request.job_id, status="error", error_message=str(exc)
+                job_id=request.job_id,
+                request_id=request.request_id,
+                status="error",
+                error=ExecutionError(message=str(exc)),
             )
         finally:
             if not replaced:
-                await self._pool.release(stdio_proc)
+                await self._pool.release(socket_proc)
 
-    async def try_reserve(self) -> StdioReservation | None:
-        stdio_proc = await self._pool.try_acquire()
-        if stdio_proc is None:
+    async def try_reserve(self) -> SocketReservation | None:
+        socket_proc = await self._pool.try_acquire()
+        if socket_proc is None:
             return None
-        return StdioReservation(pool=self._pool, stdio_proc=stdio_proc)
+        return SocketReservation(pool=self._pool, socket_proc=socket_proc)
 
     async def execute_with_reservation(
         self,
-        reservation: StdioReservation,
+        reservation: SocketReservation,
         request: ExecutionRequest,
     ) -> ExecutionOutcome:
-        stdio_proc = reservation.stdio_proc
+        socket_proc = reservation.socket_proc
         replaced = False
         try:
             payload = request.model_dump(mode="json")
-            data = json.dumps(payload).encode("utf-8") + b"\n"
-            stdin = stdio_proc.process.stdin
-            stdout = stdio_proc.process.stdout
-            if stdin is None or stdout is None:
-                raise RuntimeError("Executor process missing stdio pipes")
-            stdin.write(data)
-            await stdin.drain()
-            read = stdout.readline()
-            if self._response_timeout_seconds is not None:
-                line = await asyncio.wait_for(
-                    read, timeout=self._response_timeout_seconds
-                )
-            else:
-                line = await read
-            if not line:
-                raise RuntimeError("Executor process exited")
-            outcome = ExecutionOutcome.model_validate_json(line)
-            if outcome.job_id is None:
-                raise RuntimeError("Executor outcome missing job_id")
-            if outcome.job_id != request.job_id:
-                raise RuntimeError(
-                    f"Executor outcome job_id mismatch (expected {request.job_id}, got {outcome.job_id})"
-                )
+            await write_message(socket_proc.writer, "request", payload)
+            outcome = await self._read_response(socket_proc.reader, request)
             return outcome
         except asyncio.CancelledError:
             await reservation.invalidate()
@@ -526,7 +636,10 @@ class StdioExecutor:
             await reservation.invalidate()
             replaced = True
             return ExecutionOutcome(
-                job_id=request.job_id, status="error", error_message=str(exc)
+                job_id=request.job_id,
+                request_id=request.request_id,
+                status="error",
+                error=ExecutionError(message=str(exc)),
             )
         finally:
             if not replaced:
@@ -537,6 +650,43 @@ class StdioExecutor:
 
     async def close(self) -> None:
         await self._pool.close()
+
+    async def _read_response(
+        self,
+        reader: asyncio.StreamReader,
+        request: ExecutionRequest,
+    ) -> ExecutionOutcome:
+        deadline = None
+        if self._response_timeout_seconds is not None:
+            deadline = time.monotonic() + self._response_timeout_seconds
+        read = read_message(reader)
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("Executor response timeout")
+            message = await asyncio.wait_for(read, timeout=remaining)
+        else:
+            message = await read
+        if message is None:
+            raise RuntimeError("Executor process exited")
+        message_type, payload = message
+        if message_type != "response":
+            raise RuntimeError(f"Unexpected executor message type: {message_type}")
+        outcome = ExecutionOutcome.model_validate(payload)
+        if outcome.job_id is None:
+            raise RuntimeError("Executor outcome missing job_id")
+        if outcome.request_id is None:
+            raise RuntimeError("Executor outcome missing request_id")
+        if outcome.job_id != request.job_id:
+            raise RuntimeError(
+                f"Executor outcome job_id mismatch (expected {request.job_id}, got {outcome.job_id})"
+            )
+        if outcome.request_id != request.request_id:
+            raise RuntimeError(
+                "Executor outcome request_id mismatch "
+                f"(expected {request.request_id}, got {outcome.request_id})"
+            )
+        return outcome
 
 
 def resolve_executor_pool_sizes(
@@ -572,19 +722,20 @@ def build_executors_from_settings(
     if pool_sizes is None:
         pool_sizes = resolve_executor_pool_sizes(settings, watch_mode=watch_mode)
     for name, config in settings.executors.items():
-        if config.type != "stdio":
+        if config.type != "socket":
             raise ValueError(f"Unknown executor type '{config.type}' for '{name}'")
         if not config.cmd:
-            raise ValueError(f"Executor '{name}' requires cmd for stdio mode")
+            raise ValueError(f"Executor '{name}' requires cmd for socket mode")
         pool_size = pool_sizes.get(name)
         if pool_size is None:
             raise ValueError(f"Missing pool size for executor '{name}'")
-        executors[name] = StdioExecutor(
+        executors[name] = SocketExecutor(
             cmd=config.cmd,
             pool_size=pool_size,
             env=config.env,
             cwd=config.cwd,
             stderr_prefix=name,
+            socket_dir=config.socket_dir,
             response_timeout_seconds=config.response_timeout_seconds,
         )
     return executors

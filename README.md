@@ -3,13 +3,13 @@
 RRQ is a Redis-backed job queue **system** with a Rust orchestrator and a
 language-agnostic executor protocol. Producers can enqueue jobs from Python,
 Rust, or any language that can write the job schema to Redis. Executors can be
-written in any language that can speak the stdio protocol. Python remains a
-first-class runtime for producers and executors; orchestration is Rust-first.
+written in any language that can speak the socket protocol. The orchestrator is
+implemented in Rust, with executors available in multiple languages.
 
 ## At a Glance
 
 - **Rust orchestrator**: schedules, retries, timeouts, DLQ, cron.
-- **Stdio executors**: Python, Rust, or any other runtime.
+- **Unix socket executors**: Python, Rust, or any other runtime.
 - **Python SDK**: enqueue jobs and run a Python executor runtime.
 
 ## Architecture
@@ -26,7 +26,7 @@ first-class runtime for producers and executors; orchestration is Rust-first.
       │  - queues (ZSETs)     │
       │  - job hashes         │
       │  - locks              │
-      │  - DLQ list           │
+      │  - DLQ lists          │
       └──────────┬────────────┘
                  │ poll/lock
                  ▼
@@ -38,20 +38,17 @@ first-class runtime for producers and executors; orchestration is Rust-first.
       │ - queue routing              │
       │ - cron jobs                  │
       └──────────┬───────────────────┘
-                 │ stdio JSONL protocol
+                 │ Unix socket protocol
+                 │ (request <-> outcome)
                  ▼
    ┌─────────────────────┬─────────────────────┐
    │ Python Executor     │ Rust/Other Executor │
    │ (rrq-executor)      │ (rrq-executor)      │
-   └─────────┬───────────┴─────────┬───────────┘
-             │ ExecutionOutcome     │
-             └──────────┬──────────┘
-                        ▼
-                 ┌─────────────┐
-                 │    Redis    │
-                 │ job updates │
-                 └─────────────┘
+   └───────────────────────────────────────────┘
 ```
+
+Executors return outcomes to the orchestrator; the orchestrator persists job
+state/results back to Redis.
 
 ## Requirements
 
@@ -77,17 +74,16 @@ redis_dsn = "redis://localhost:6379/1"
 default_executor_name = "python"
 
 [rrq.executors.python]
-type = "stdio"
+type = "socket"
 cmd = ["rrq-executor", "--settings", "myapp.executor_config.python_executor_settings"]
+# Optional: override the directory used for executor sockets.
+# socket_dir = "/tmp/rrq-executor"
 ```
 
 ### 3) Register Python handlers
 
 ```python
 # executor_config.py
-import os
-from pathlib import Path
-
 from rrq.config import load_toml_settings
 from rrq.executor_settings import PythonExecutorSettings
 from rrq.registry import JobRegistry
@@ -97,8 +93,7 @@ from . import handlers
 job_registry = JobRegistry()
 job_registry.register("process_message", handlers.process_message)
 
-config_path = Path(os.getenv("RRQ_EXECUTOR_CONFIG", "rrq.toml"))
-rrq_settings = load_toml_settings(str(config_path))
+rrq_settings = load_toml_settings("rrq.toml")
 
 python_executor_settings = PythonExecutorSettings(
     rrq_settings=rrq_settings,
@@ -139,11 +134,13 @@ asyncio.run(main())
 `rrq.toml` is the source of truth for the orchestrator and executors. Key areas:
 
 - `[rrq]` basic settings (Redis, retries, timeouts, poll delay)
-- `[rrq.executors.<name>]` stdio executor commands and pool sizes
+- `[rrq.executors.<name>]` socket executor commands and pool sizes
 - `[rrq.routing]` queue → executor mapping
 - `[[rrq.cron_jobs]]` periodic scheduling
+- `[rrq.watch]` watch mode defaults (path/patterns)
 
-See `docs/CLI_REFERENCE.md` for CLI details and `docs/EXECUTOR_PROTOCOL.md` for
+See `docs/CONFIG_REFERENCE.md` for the full TOML schema,
+`docs/CLI_REFERENCE.md` for CLI details, and `docs/EXECUTOR_PROTOCOL.md` for
 wire format.
 
 ## Cron Jobs (rrq.toml)
@@ -184,7 +181,24 @@ watches a path recursively and normalizes change paths before matching include
 globs (default `*.py`, `*.toml`) and ignore globs. A matching change triggers a
 graceful worker shutdown, closes executors, and starts a fresh worker. Watch
 mode is intended for local development; executor pool sizes are forced to 1 to
-keep restarts lightweight.
+keep restarts lightweight. It also respects `.gitignore` and `.git/info/exclude`
+by default; disable with `--no-gitignore`.
+
+You can also configure watch defaults in `rrq.toml`:
+
+```toml
+[rrq.watch]
+path = "."
+include_patterns = ["*.py", "*.toml"]
+ignore_patterns = [".venv/**", "dist/**"]
+no_gitignore = false
+```
+
+## Executor Logs
+
+Executors can emit logs to stdout/stderr. The orchestrator captures these lines
+and emits them with executor prefixes. Structured logging is not part of the
+wire protocol.
 
 ## Testing
 
@@ -197,8 +211,8 @@ uv run pytest
 Rust conformance tests (parity vs golden snapshots):
 
 ```
-cd reference/rust
-cargo test -p rrq-orchestrator --test engine_conformance
+cd rrq-rs
+cargo test -p rrq --test engine_conformance
 ```
 
 End-to-end integration (Python-only, Rust-only, mixed):
@@ -207,18 +221,13 @@ End-to-end integration (Python-only, Rust-only, mixed):
 uv run python -m examples.integration_test
 ```
 
-## Legacy Python Orchestrator
-
-The retired Python orchestrator and its tests/examples are preserved under
-`legacy/` for reference.
-
 ## Reference Implementations
 
-- Rust orchestrator: `reference/rust/rrq-orchestrator`
-- Rust producer: `reference/rust/rrq-producer`
-- Rust executor: `reference/rust/rrq-executor`
-- Protocol types: `reference/rust/rrq-protocol`
-- Python stdio executor example: `reference/python/stdio_executor.py`
+- Rust orchestrator (crate `rrq`): `rrq-rs/rrq-orchestrator`
+- Rust producer: `rrq-rs/rrq-producer`
+- Rust executor: `rrq-rs/rrq-executor`
+- Protocol types: `rrq-rs/rrq-protocol`
+- Python socket executor example: `reference/python/socket_executor.py`
 
 ## Telemetry
 
