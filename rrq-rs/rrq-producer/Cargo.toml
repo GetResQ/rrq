@@ -1,7 +1,7 @@
 [package]
 name = "rrq-producer"
-version = "0.1.0"
-edition = "2021"
+version = "0.9.0"
+edition = "2024"
 license = "Apache-2.0"
 description = "RRQ producer client for enqueuing jobs into Redis."
 repository = "https://github.com/getresq/rrq"

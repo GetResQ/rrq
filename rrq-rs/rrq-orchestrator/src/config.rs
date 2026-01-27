@@ -13,10 +13,10 @@ pub fn resolve_config_source(config_path: Option<&str>) -> (Option<String>, Stri
         return (Some(path.to_string()), "--config parameter".to_string());
     }
 
-    if let Ok(env_path) = std::env::var(ENV_CONFIG_KEY) {
-        if !env_path.is_empty() {
-            return (Some(env_path), format!("{ENV_CONFIG_KEY} env var"));
-        }
+    if let Ok(env_path) = std::env::var(ENV_CONFIG_KEY)
+        && !env_path.is_empty()
+    {
+        return (Some(env_path), format!("{ENV_CONFIG_KEY} env var"));
     }
 
     let default_path = Path::new(DEFAULT_CONFIG_FILENAME);
@@ -140,10 +140,10 @@ fn env_overrides() -> Result<Value> {
 }
 
 fn set_env_string(map: &mut Map<String, Value>, key: &str, env: &str) {
-    if let Ok(value) = std::env::var(env) {
-        if !value.is_empty() {
-            map.insert(key.to_string(), Value::String(value));
-        }
+    if let Ok(value) = std::env::var(env)
+        && !value.is_empty()
+    {
+        map.insert(key.to_string(), Value::String(value));
     }
 }
 

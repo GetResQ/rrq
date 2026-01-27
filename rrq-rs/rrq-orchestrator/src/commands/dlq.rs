@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::cli_utils;
+use rrq::JobStatus;
 use rrq::config::load_toml_settings;
 use rrq::store::JobStore;
-use rrq::JobStatus;
 
 use super::shared::{queue_matches, top_counts};
 
@@ -38,10 +38,10 @@ pub(crate) async fn dlq_list(options: DlqListOptions) -> Result<()> {
                     continue;
                 }
             }
-            if let Some(filter) = options.function.as_deref() {
-                if job_map.get("function_name").map(|v| v.as_str()) != Some(filter) {
-                    continue;
-                }
+            if let Some(filter) = options.function.as_deref()
+                && job_map.get("function_name").map(|v| v.as_str()) != Some(filter)
+            {
+                continue;
             }
             jobs.push(job_map);
         }
@@ -270,10 +270,10 @@ pub(crate) async fn dlq_requeue(options: DlqRequeueOptions) -> Result<()> {
     let mut jobs: Vec<HashMap<String, String>> = Vec::new();
     for id in job_ids {
         if let Some(job_map) = store.get_job_data_map(&id).await? {
-            if let Some(filter) = options.job_id.as_deref() {
-                if id != filter {
-                    continue;
-                }
+            if let Some(filter) = options.job_id.as_deref()
+                && id != filter
+            {
+                continue;
             }
             if let Some(filter) = options.queue.as_deref() {
                 let job_queue = job_map.get("queue_name").cloned().unwrap_or_default();
@@ -281,10 +281,10 @@ pub(crate) async fn dlq_requeue(options: DlqRequeueOptions) -> Result<()> {
                     continue;
                 }
             }
-            if let Some(filter) = options.function.as_deref() {
-                if job_map.get("function_name").map(|v| v.as_str()) != Some(filter) {
-                    continue;
-                }
+            if let Some(filter) = options.function.as_deref()
+                && job_map.get("function_name").map(|v| v.as_str()) != Some(filter)
+            {
+                continue;
             }
             jobs.push(job_map);
         }

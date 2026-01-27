@@ -1,6 +1,6 @@
 use anyhow::Result;
 use rrq_producer::{EnqueueOptions, Producer};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 #[tokio::main]
 async fn main() -> Result<()> {

@@ -1,9 +1,9 @@
-use rrq_executor::{ExecutionOutcome, ExecutorRuntime, Registry, ENV_EXECUTOR_SOCKET};
+use rrq_executor::{ENV_EXECUTOR_SOCKET, ExecutionOutcome, ExecutorRuntime, Registry};
 
-#[cfg(feature = "otel")]
-use rrq_executor::telemetry::otel::{init_tracing, OtelTelemetry};
 #[cfg(not(feature = "otel"))]
 use rrq_executor::telemetry::NoopTelemetry;
+#[cfg(feature = "otel")]
+use rrq_executor::telemetry::otel::{OtelTelemetry, init_tracing};
 use serde_json::json;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

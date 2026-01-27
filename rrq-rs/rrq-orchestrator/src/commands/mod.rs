@@ -11,7 +11,7 @@ pub(crate) use debug::{
     debug_clear, debug_generate_jobs, debug_generate_workers, debug_stress_test, debug_submit,
 };
 pub(crate) use dlq::{
-    dlq_inspect, dlq_list, dlq_requeue, dlq_stats, DlqListOptions, DlqRequeueOptions,
+    DlqListOptions, DlqRequeueOptions, dlq_inspect, dlq_list, dlq_requeue, dlq_stats,
 };
 pub(crate) use executor::executor_python;
 pub(crate) use health::check_workers;

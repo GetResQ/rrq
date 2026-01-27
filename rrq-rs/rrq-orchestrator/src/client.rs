@@ -129,10 +129,8 @@ impl RRQClient {
 
         let score_ms = desired_run_time.timestamp_millis() as f64;
         if let Err(err) = self.job_store.save_job_definition(&job).await {
-            if unique_acquired {
-                if let Some(unique_key) = options.unique_key.as_deref() {
-                    let _ = self.job_store.release_unique_job_lock(unique_key).await;
-                }
+            if unique_acquired && let Some(unique_key) = options.unique_key.as_deref() {
+                let _ = self.job_store.release_unique_job_lock(unique_key).await;
             }
             return Err(err);
         }
@@ -141,10 +139,8 @@ impl RRQClient {
             .add_job_to_queue(&queue_name, &job.id, score_ms)
             .await
         {
-            if unique_acquired {
-                if let Some(unique_key) = options.unique_key.as_deref() {
-                    let _ = self.job_store.release_unique_job_lock(unique_key).await;
-                }
+            if unique_acquired && let Some(unique_key) = options.unique_key.as_deref() {
+                let _ = self.job_store.release_unique_job_lock(unique_key).await;
             }
             return Err(err);
         }

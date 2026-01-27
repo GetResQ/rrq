@@ -10,7 +10,7 @@ use rrq::executor::Executor;
 use rrq::store::JobStore;
 use rrq::{EnqueueOptions, Job, JobStatus, RRQClient, RRQSettings, RRQWorker};
 use rrq_protocol::{ExecutionError, ExecutionOutcome, ExecutionRequest, OutcomeStatus};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Clone)]
 struct ScenarioExecutor {

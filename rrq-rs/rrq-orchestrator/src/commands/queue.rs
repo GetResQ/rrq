@@ -239,12 +239,11 @@ async fn count_dlq_for_queue(
     let job_ids = store.get_dlq_job_ids(dlq_name).await?;
     let mut count = 0i64;
     for job_id in job_ids {
-        if let Some(job_map) = store.get_job_data_map(&job_id).await? {
-            if let Some(job_queue) = job_map.get("queue_name") {
-                if queue_matches(queue_name, job_queue) {
-                    count += 1;
-                }
-            }
+        if let Some(job_map) = store.get_job_data_map(&job_id).await?
+            && let Some(job_queue) = job_map.get("queue_name")
+            && queue_matches(queue_name, job_queue)
+        {
+            count += 1;
         }
     }
     Ok(count)

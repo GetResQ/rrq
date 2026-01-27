@@ -1,9 +1,9 @@
 use std::time::{Duration as StdDuration, Instant};
 
 use anyhow::Result;
-use rand::prelude::IndexedRandom;
 use rand::Rng;
-use serde_json::{json, Value};
+use rand::prelude::IndexedRandom;
+use serde_json::{Value, json};
 use tokio::io::{self as tokio_io, AsyncBufReadExt, BufReader};
 use tokio::time::Duration;
 

@@ -6,14 +6,14 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rrq_protocol::{
-    encode_frame, ExecutionOutcome, ExecutionRequest, ExecutorMessage, FRAME_HEADER_LEN,
+    ExecutionOutcome, ExecutionRequest, ExecutorMessage, FRAME_HEADER_LEN, encode_frame,
 };
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
-use tokio::time::{timeout, Duration, Instant};
+use tokio::time::{Duration, Instant, timeout};
 use uuid::Uuid;
 
 const ENV_EXECUTOR_SOCKET: &str = "RRQ_EXECUTOR_SOCKET";

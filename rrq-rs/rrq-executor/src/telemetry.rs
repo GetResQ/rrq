@@ -19,8 +19,8 @@ pub mod otel {
     use std::collections::HashMap;
 
     use opentelemetry::propagation::Extractor;
-    use tracing::field::Empty;
     use tracing::Span;
+    use tracing::field::Empty;
     use tracing_opentelemetry::OpenTelemetrySpanExt;
 
     use crate::types::ExecutionRequest;

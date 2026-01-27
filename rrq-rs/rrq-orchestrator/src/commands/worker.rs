@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use notify::{event::ModifyKind, recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
+use notify::{Event, EventKind, RecursiveMode, Watcher, event::ModifyKind, recommended_watcher};
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 
@@ -339,7 +339,7 @@ pub(crate) async fn run_worker_watch(
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
 
         let sigint = signal(SignalKind::interrupt());
         let sigterm = signal(SignalKind::terminate());

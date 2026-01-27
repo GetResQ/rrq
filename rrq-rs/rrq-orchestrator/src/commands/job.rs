@@ -67,14 +67,13 @@ pub(crate) async fn job_list(
     for key in job_keys {
         let job_id = key.trim_start_matches(JOB_KEY_PREFIX).to_string();
         if let Some(job_map) = store.get_job_data_map_by_key(&key).await? {
-            if let Some(filter) = status.as_deref() {
-                if job_map
+            if let Some(filter) = status.as_deref()
+                && job_map
                     .get("status")
                     .map(|value| value.eq_ignore_ascii_case(filter))
                     != Some(true)
-                {
-                    continue;
-                }
+            {
+                continue;
             }
             if let Some(filter) = queue.as_deref() {
                 let job_queue = job_map.get("queue_name").cloned().unwrap_or_default();
@@ -82,10 +81,10 @@ pub(crate) async fn job_list(
                     continue;
                 }
             }
-            if let Some(filter) = function.as_deref() {
-                if job_map.get("function_name").map(|value| value.as_str()) != Some(filter) {
-                    continue;
-                }
+            if let Some(filter) = function.as_deref()
+                && job_map.get("function_name").map(|value| value.as_str()) != Some(filter)
+            {
+                continue;
             }
             jobs.push((job_id, job_map));
         }

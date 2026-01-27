@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use anyhow::Result;
@@ -10,7 +10,7 @@ use rand::Rng;
 use rrq_protocol::{ExecutionContext, ExecutionOutcome, ExecutionRequest, OutcomeStatus};
 use serde_json::Value;
 use tokio::sync::{Mutex, Semaphore};
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{Duration, sleep, timeout};
 use uuid::Uuid;
 
 use crate::client::{EnqueueOptions, RRQClient};
@@ -935,13 +935,12 @@ async fn cron_loop(
             } else {
                 None
             };
-            if let Some(ref key) = unique_key {
-                if let Ok(ttl) = job_store.get_lock_ttl(key).await {
-                    if ttl > 0 {
-                        let _ = job.schedule_next(now);
-                        continue;
-                    }
-                }
+            if let Some(ref key) = unique_key
+                && let Ok(ttl) = job_store.get_lock_ttl(key).await
+                && ttl > 0
+            {
+                let _ = job.schedule_next(now);
+                continue;
             }
             let options = EnqueueOptions {
                 queue_name: job.queue_name.clone(),

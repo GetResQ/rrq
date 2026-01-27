@@ -1,7 +1,7 @@
 use crate::registry::Registry;
 use crate::telemetry::{NoopTelemetry, Telemetry};
 use crate::types::{ExecutionError, ExecutionOutcome};
-use rrq_protocol::{encode_frame, ExecutorMessage, PROTOCOL_VERSION};
+use rrq_protocol::{ExecutorMessage, PROTOCOL_VERSION, encode_frame};
 use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
