@@ -10,6 +10,7 @@ from typing import Any, Literal
 ExecutorMessageType = Literal["request", "response"]
 
 FRAME_HEADER_SIZE = 4
+MAX_FRAME_SIZE = 16 * 1024 * 1024
 
 
 def encode_message(message_type: ExecutorMessageType, payload: dict[str, Any]) -> bytes:
@@ -42,6 +43,8 @@ async def read_message(
     (length,) = struct.unpack(">I", header)
     if length == 0:
         raise ValueError("Executor message payload cannot be empty")
+    if length > MAX_FRAME_SIZE:
+        raise ValueError("Executor message payload exceeds max size")
     payload = await reader.readexactly(length)
     return decode_message(payload)
 

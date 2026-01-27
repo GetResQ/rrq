@@ -7,6 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
 pub const ENV_EXECUTOR_SOCKET: &str = "RRQ_EXECUTOR_SOCKET";
+const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 
 pub struct ExecutorRuntime {
     runtime: tokio::runtime::Runtime,
@@ -140,6 +141,9 @@ async fn read_message(
     let length = u32::from_be_bytes(header) as usize;
     if length == 0 {
         return Err("executor message payload cannot be empty".into());
+    }
+    if length > MAX_FRAME_LEN {
+        return Err("executor message payload too large".into());
     }
     let mut payload = vec![0u8; length];
     stream.read_exact(&mut payload).await?;

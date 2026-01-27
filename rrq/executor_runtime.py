@@ -76,7 +76,6 @@ async def _handle_connection(
     ready_event: asyncio.Event,
 ) -> None:
     try:
-        await ready_event.wait()
         while True:
             message = await read_message(reader)
             if message is None:
@@ -85,6 +84,16 @@ async def _handle_connection(
             if message_type != "request":
                 raise ValueError(f"Unexpected message type: {message_type}")
             request = ExecutionRequest.model_validate(payload)
+
+            if not ready_event.is_set():
+                outcome = ExecutionOutcome(
+                    job_id=request.job_id,
+                    request_id=request.request_id,
+                    status="error",
+                    error=ExecutionError(message="Executor not ready"),
+                )
+                await write_message(writer, "response", outcome.model_dump(mode="json"))
+                continue
 
             if request.protocol_version != "1":
                 outcome = ExecutionOutcome(

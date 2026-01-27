@@ -42,7 +42,7 @@ pub(crate) async fn debug_generate_jobs(
     } else {
         statuses
     };
-    let function_names = vec![
+    let function_names = [
         "process_data",
         "send_email",
         "generate_report",

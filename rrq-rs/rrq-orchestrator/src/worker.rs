@@ -24,6 +24,7 @@ use crate::store::JobStore;
 #[derive(Debug, Clone)]
 struct RunningJobInfo {
     queue_name: String,
+    executor_name: Option<String>,
 }
 
 pub struct RRQWorker {
@@ -306,6 +307,7 @@ impl RRQWorker {
                         job.id.clone(),
                         RunningJobInfo {
                             queue_name: queue_name.clone(),
+                            executor_name: None,
                         },
                     );
                 }
@@ -357,6 +359,17 @@ impl RRQWorker {
 
         let running = self.running_jobs.lock().await.clone();
         let aborts = self.running_aborts.lock().await.clone();
+        for (job_id, info) in &running {
+            let resolved_executor = info.executor_name.clone().unwrap_or_else(|| {
+                self.executor_routes
+                    .get(&info.queue_name)
+                    .cloned()
+                    .unwrap_or_else(|| self.default_executor_name.clone())
+            });
+            if let Some(executor) = self.executors.get(&resolved_executor) {
+                let _ = executor.cancel(job_id).await;
+            }
+        }
         for (_job_id, abort) in aborts {
             abort.abort();
         }
@@ -456,6 +469,12 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
             .cloned()
             .unwrap_or(default_executor_name.clone()),
     };
+    {
+        let mut running = running_jobs.lock().await;
+        if let Some(info) = running.get_mut(&job.id) {
+            info.executor_name = Some(resolved_executor.clone());
+        }
+    }
 
     let executor = executors.get(&resolved_executor).cloned();
     let executor = match executor {
@@ -510,6 +529,7 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
             handle_execution_outcome(&job, &queue_name, &settings, &mut job_store, outcome).await
         }
         Err(_) => {
+            let _ = executor.cancel(&job.id).await;
             let message = format!("Job timed out after {}s.", job_timeout);
             handle_job_timeout(&job, &queue_name, &mut job_store, &message).await
         }
@@ -773,7 +793,8 @@ async fn process_failure_job(
 
 fn calculate_backoff_seconds(settings: &RRQSettings, retry_attempt: i64) -> f64 {
     let attempt = if retry_attempt <= 0 { 1 } else { retry_attempt } as u32;
-    let delay = settings.base_retry_delay_seconds * (2u64.pow(attempt - 1) as f64);
+    let exponent = attempt.saturating_sub(1).min(30);
+    let delay = settings.base_retry_delay_seconds * (2u64.pow(exponent) as f64);
     delay.min(settings.max_retry_delay_seconds)
 }
 

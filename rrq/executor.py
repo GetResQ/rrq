@@ -348,8 +348,12 @@ class SocketExecutorPool:
         except Exception:
             if stdout_task is not None:
                 stdout_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await stdout_task
             if stderr_task is not None:
                 stderr_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await stderr_task
             proc.kill()
             with suppress(Exception):
                 await proc.wait()

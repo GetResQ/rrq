@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 const ENV_EXECUTOR_SOCKET: &str = "RRQ_EXECUTOR_SOCKET";
 const DEFAULT_SOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 
 fn socket_path_max_len() -> Option<usize> {
     if cfg!(target_os = "macos") {
@@ -126,9 +127,13 @@ impl Drop for ProcessGuard {
     fn drop(&mut self) {
         if let Some(proc) = self.proc.take() {
             let pool = self.pool.clone();
-            tokio::spawn(async move {
-                let _ = pool.invalidate(proc).await;
-            });
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    let _ = pool.invalidate(proc).await;
+                });
+            } else {
+                tracing::debug!("executor process dropped without a Tokio runtime");
+            }
         }
     }
 }
@@ -537,6 +542,9 @@ where
     let length = u32::from_be_bytes(header) as usize;
     if length == 0 {
         return Err(anyhow::anyhow!("executor message payload cannot be empty"));
+    }
+    if length > MAX_FRAME_LEN {
+        return Err(anyhow::anyhow!("executor message payload too large"));
     }
     let mut payload = vec![0u8; length];
     stream.read_exact(&mut payload).await?;
