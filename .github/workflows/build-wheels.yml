@@ -7,31 +7,78 @@ on:
       - "v*"
 
 jobs:
-  build-linux:
-    runs-on: ubuntu-latest
-    env:
-      CIBW_ARCHS_LINUX: "x86_64 aarch64"
+  build-linux-x86_64:
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Build wheels
-        uses: pypa/cibuildwheel@v2.21.0
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          output-dir: wheelhouse
+          python-version: "3.11"
+
+      - name: Install uv CLI
+        run: |
+          python -m pip install --upgrade pip uv
+
+      - name: Sync dependencies
+        run: uv sync --extra dev
+
+      - name: Install build tooling
+        run: uv pip install build
+
+      - name: Build Rust binary
+        run: uv run python scripts/build_rust_binary.py
+
+      - name: Build wheel
+        run: uv run python -m build --wheel
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-linux
-          path: wheelhouse/*.whl
+          name: wheels-linux-x86_64
+          path: dist/*.whl
+
+  build-linux-aarch64:
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install uv CLI
+        run: |
+          python -m pip install --upgrade pip uv
+
+      - name: Sync dependencies
+        run: uv sync --extra dev
+
+      - name: Install build tooling
+        run: uv pip install build
+
+      - name: Build Rust binary
+        run: uv run python scripts/build_rust_binary.py
+
+      - name: Build wheel
+        run: uv run python -m build --wheel
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-aarch64
+          path: dist/*.whl
 
   build-macos:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
-          - os: macos-13
+          - os: macos-14
             arch: x86_64
           - os: macos-14
             arch: arm64
@@ -50,23 +97,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.arch }}
-          path: wheelhouse/*.whl
-
-  build-windows:
-    runs-on: windows-latest
-    env:
-      CIBW_ARCHS_WINDOWS: "AMD64"
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@v2.21.0
-        with:
-          output-dir: wheelhouse
-
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-windows
           path: wheelhouse/*.whl
