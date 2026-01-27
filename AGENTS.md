@@ -1,6 +1,7 @@
 # RRQ
 
-Redis-based async job queue library for Python.
+Reliable Redis-backed job queue system with a Rust orchestrator and multi-language
+executor support (Python, Rust, or any language via stdio protocol).
 
 See @tests/CLAUDE.md for testing guidelines.
 

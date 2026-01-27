@@ -1,11 +1,11 @@
-# Rust reference implementation
+# RRQ Rust Crates
 
-This directory is a Cargo workspace containing:
+This directory is a Cargo workspace containing the core RRQ components:
 
-- `rrq-protocol`: shared protocol types for stdio executors
-- `rrq-producer`: minimal producer that writes jobs to Redis
-- `rrq-executor`: stdio executor reference implementation
-- `rrq-orchestrator`: Rust scheduler/orchestrator (worker) implementation
+- `rrq-orchestrator`: The main orchestrator/scheduler (worker) binary
+- `rrq-producer`: Producer SDK for enqueuing jobs to Redis
+- `rrq-executor`: Executor SDK for building stdio-based job handlers
+- `rrq-protocol`: Shared protocol types for the executor interface
 
 ## Git dependency example
 

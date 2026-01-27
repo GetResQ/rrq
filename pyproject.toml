@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "rrq"
 version = "0.9.0"
 authors = [{ name = "Mazdak Rezvani", email = "mazdak@me.com" }]
-description = "RRQ is a library for creating reliable job queues using Rust, Redis and asyncio"
+description = "Reliable Redis-backed job queue with a Rust orchestrator and multi-language executor support"
 readme = "README.md"
 requires-python = ">=3.11"
 classifiers = [

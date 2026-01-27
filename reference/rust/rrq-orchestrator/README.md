@@ -1,22 +1,24 @@
-# RRQ Orchestrator (Rust)
+# RRQ Orchestrator
 
-This crate is the Rust orchestrator for RRQ. It is intended to be fully
-compatible with the Python producer (`rrq.client`) and Python stdio executor
-runtime (`rrq.executor_runtime`).
+The core orchestrator for RRQ, responsible for job scheduling, retries, timeouts,
+dead-letter queue (DLQ) handling, and cron job management.
 
-## Status
-- Core worker loop, Redis store ops, stdio executor pool, cron handling.
-- CLI parity for worker run/watch/check, queue/job/dlq, debug commands.
-- Engine conformance tests compare Rust outcomes to Python golden snapshots.
+## Features
 
-## Compatibility goals
-- Redis schema and key prefixes match the Python implementation.
-- Executor protocol matches `docs/EXECUTOR_PROTOCOL.md`.
-- Job lifecycle rules mirror the legacy Python worker (`legacy/rrq/worker.py`).
+- Worker loop with Redis-backed job storage
+- Stdio executor pool management
+- Cron job scheduling
+- CLI for worker management, queue inspection, and debugging
+
+## Compatibility
+
+- Works with the Python SDK (`rrq.client`) and Python executor runtime
+- Works with the Rust producer and executor crates
+- Executor protocol defined in `docs/EXECUTOR_PROTOCOL.md`
 
 ## CLI
 
-Run a worker using the same `rrq.toml` as the Python runtime:
+Run a worker:
 
 ```bash
 cd reference/rust
@@ -37,7 +39,7 @@ cd reference/rust
 cargo run -p rrq-orchestrator -- queue list --config ../../rrq.toml
 ```
 
-Watch mode:
+Watch mode (auto-restart on file changes):
 
 ```bash
 cd reference/rust
@@ -45,7 +47,7 @@ cargo run -p rrq-orchestrator -- worker watch --config ../../rrq.toml --path .
 ```
 
 ## Notes
-- The Rust orchestrator launches stdio executors (including the Python runtime
-  `rrq-executor`) via the configured `executors` section in TOML.
-- Python producers can continue using `rrq.client` against the same Redis
-  schema.
+
+- The orchestrator launches stdio executors (Python, Rust, or any language) via
+  the configured `executors` section in TOML.
+- Producers can enqueue jobs using either the Python SDK or Rust producer crate.

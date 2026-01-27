@@ -1,16 +1,15 @@
 # RRQ: Reliable Redis Queue
 
-RRQ is a Redis-backed job queue **system** with a Rust orchestrator and a
-language-agnostic executor protocol. Producers can enqueue jobs from Python,
-Rust, or any language that can write the job schema to Redis. Executors can be
-written in any language that can speak the stdio protocol. Python remains a
-first-class runtime for producers and executors; orchestration is Rust-first.
+RRQ is a reliable Redis-backed job queue system powered by a Rust orchestrator
+with a language-agnostic executor protocol. Producers can enqueue jobs from
+Python, Rust, or any language that can write the job schema to Redis. Executors
+can be written in any language that implements the stdio protocol.
 
 ## At a Glance
 
-- **Rust orchestrator**: schedules, retries, timeouts, DLQ, cron.
-- **Stdio executors**: Python, Rust, or any other runtime.
-- **Python SDK**: enqueue jobs and run a Python executor runtime.
+- **Rust orchestrator**: scheduling, retries, timeouts, DLQ, cron
+- **Multi-language executors**: Python, Rust, or any runtime via stdio protocol
+- **SDKs**: Python and Rust libraries for producing jobs and building executors
 
 ## Architecture
 
@@ -55,11 +54,12 @@ first-class runtime for producers and executors; orchestration is Rust-first.
 
 ## Requirements
 
-- Python 3.11+ (producer + Python executor runtime)
-- Rust `rrq` binary (bundled in wheels or provided separately)
 - Redis 5.0+
+- Rust `rrq` binary (bundled in Python wheels or available separately)
+- Python 3.11+ (for Python SDK and executor runtime)
 
-If you ship the Rust binary separately, set `RRQ_RUST_BIN` to its path.
+The Rust binary is included in the Python package. To use a custom binary path,
+set the `RRQ_RUST_BIN` environment variable.
 
 ## Quickstart
 
@@ -188,37 +188,32 @@ keep restarts lightweight.
 
 ## Testing
 
-Runtime-only Python tests (producer + executor + store):
+Python SDK tests (producer, executor, store):
 
 ```
 uv run pytest
 ```
 
-Rust conformance tests (parity vs golden snapshots):
+Rust orchestrator tests:
 
 ```
 cd reference/rust
-cargo test -p rrq-orchestrator --test engine_conformance
+cargo test
 ```
 
-End-to-end integration (Python-only, Rust-only, mixed):
+End-to-end integration tests:
 
 ```
 uv run python -m examples.integration_test
 ```
 
-## Legacy Python Orchestrator
-
-The retired Python orchestrator and its tests/examples are preserved under
-`legacy/` for reference.
-
 ## Reference Implementations
 
-- Rust orchestrator: `reference/rust/rrq-orchestrator`
-- Rust producer: `reference/rust/rrq-producer`
-- Rust executor: `reference/rust/rrq-executor`
-- Protocol types: `reference/rust/rrq-protocol`
-- Python stdio executor example: `reference/python/stdio_executor.py`
+- **Orchestrator**: `reference/rust/rrq-orchestrator`
+- **Producer SDK**: `reference/rust/rrq-producer`
+- **Executor SDK**: `reference/rust/rrq-executor`
+- **Protocol types**: `reference/rust/rrq-protocol`
+- **Python executor example**: `reference/python/stdio_executor.py`
 
 ## Telemetry
 

@@ -1,9 +1,8 @@
-# Legacy Python Orchestrator
+# Alternative Python Orchestrator
 
-This directory contains the retired Python orchestrator implementation and its
-associated tests/examples. It is kept for historical reference and parity
-validation only.
+This directory contains an alternative Python orchestrator implementation.
+It is not actively maintained and exists primarily for testing and validation.
 
-Active runtime code lives in:
-- Rust orchestrator: `reference/rust/rrq-orchestrator`
-- Python producer/executor: `rrq/`
+For production use, see the main orchestrator and SDKs:
+- Orchestrator: `reference/rust/rrq-orchestrator`
+- Python SDK: `rrq/`
