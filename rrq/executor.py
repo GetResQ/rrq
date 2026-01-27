@@ -87,7 +87,7 @@ class Executor(Protocol):
     async def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
         """Run a job and return an outcome."""
 
-    async def cancel(self, job_id: str) -> None:
+    async def cancel(self, job_id: str, request_id: str | None = None) -> None:
         """Best-effort cancellation for in-flight jobs."""
 
     async def close(self) -> None:
@@ -204,7 +204,7 @@ class PythonExecutor:
                     error=ExecutionError(message=str(exc) or "Unhandled handler error"),
                 )
 
-    async def cancel(self, job_id: str) -> None:
+    async def cancel(self, job_id: str, request_id: str | None = None) -> None:
         return None
 
     async def close(self) -> None:
@@ -242,10 +242,10 @@ class QueueRoutingExecutor:
         executor = self._select_executor(request)
         return await executor.execute(request)
 
-    async def cancel(self, job_id: str) -> None:
+    async def cancel(self, job_id: str, request_id: str | None = None) -> None:
         for executor in self._executors:
             try:
-                await executor.cancel(job_id)
+                await executor.cancel(job_id, request_id=request_id)
             except Exception as exc:
                 logger.debug("Executor cancel failed: %s", exc)
 
@@ -588,11 +588,18 @@ class SocketExecutor:
             socket_dir=socket_dir,
         )
         self._response_timeout_seconds = response_timeout_seconds
+        self._in_flight: dict[str, tuple[str, str]] = {}
+        self._in_flight_lock = asyncio.Lock()
 
     async def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
         socket_proc = await self._pool.acquire()
         replaced = False
         try:
+            async with self._in_flight_lock:
+                self._in_flight[request.request_id] = (
+                    request.job_id,
+                    socket_proc.socket_path,
+                )
             payload = request.model_dump(mode="json")
             await write_message(socket_proc.writer, "request", payload)
             outcome = await self._read_response(socket_proc.reader, request)
@@ -611,6 +618,8 @@ class SocketExecutor:
                 error=ExecutionError(message=str(exc)),
             )
         finally:
+            async with self._in_flight_lock:
+                self._in_flight.pop(request.request_id, None)
             if not replaced:
                 await self._pool.release(socket_proc)
 
@@ -628,6 +637,11 @@ class SocketExecutor:
         socket_proc = reservation.socket_proc
         replaced = False
         try:
+            async with self._in_flight_lock:
+                self._in_flight[request.request_id] = (
+                    request.job_id,
+                    socket_proc.socket_path,
+                )
             payload = request.model_dump(mode="json")
             await write_message(socket_proc.writer, "request", payload)
             outcome = await self._read_response(socket_proc.reader, request)
@@ -646,11 +660,41 @@ class SocketExecutor:
                 error=ExecutionError(message=str(exc)),
             )
         finally:
+            async with self._in_flight_lock:
+                self._in_flight.pop(request.request_id, None)
             if not replaced:
                 await reservation.release()
 
-    async def cancel(self, job_id: str) -> None:
-        return None
+    async def cancel(self, job_id: str, request_id: str | None = None) -> None:
+        async with self._in_flight_lock:
+            if request_id is None:
+                for key, value in self._in_flight.items():
+                    if value[0] == job_id:
+                        request_id = key
+                        break
+            if request_id is None:
+                return
+            entry = self._in_flight.pop(request_id, None)
+        if entry is None:
+            return
+        _, socket_path = entry
+        writer: asyncio.StreamWriter | None = None
+        try:
+            _, writer = await asyncio.open_unix_connection(socket_path)
+            await write_message(
+                writer,
+                "cancel",
+                {
+                    "job_id": job_id,
+                    "request_id": request_id,
+                    "hard_kill": True,
+                },
+            )
+        finally:
+            if writer is not None:
+                writer.close()
+                with suppress(Exception):
+                    await writer.wait_closed()
 
     async def close(self) -> None:
         await self._pool.close()

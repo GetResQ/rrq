@@ -25,6 +25,7 @@ use crate::store::JobStore;
 struct RunningJobInfo {
     queue_name: String,
     executor_name: Option<String>,
+    request_id: Option<String>,
 }
 
 pub struct RRQWorker {
@@ -308,6 +309,7 @@ impl RRQWorker {
                         RunningJobInfo {
                             queue_name: queue_name.clone(),
                             executor_name: None,
+                            request_id: None,
                         },
                     );
                 }
@@ -367,7 +369,7 @@ impl RRQWorker {
                     .unwrap_or_else(|| self.default_executor_name.clone())
             });
             if let Some(executor) = self.executors.get(&resolved_executor) {
-                let _ = executor.cancel(job_id).await;
+                let _ = executor.cancel(job_id, info.request_id.as_deref()).await;
             }
         }
         for (_job_id, abort) in aborts {
@@ -516,6 +518,13 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
             worker_id: Some(worker_id.clone()),
         },
     };
+    let request_id = request.request_id.clone();
+    {
+        let mut running = running_jobs.lock().await;
+        if let Some(info) = running.get_mut(&job.id) {
+            info.request_id = Some(request_id.clone());
+        }
+    }
 
     let exec_result = timeout(
         Duration::from_secs(job_timeout as u64),
@@ -529,7 +538,7 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
             handle_execution_outcome(&job, &queue_name, &settings, &mut job_store, outcome).await
         }
         Err(_) => {
-            let _ = executor.cancel(&job.id).await;
+            let _ = executor.cancel(&job.id, Some(request_id.as_str())).await;
             let message = format!("Job timed out after {}s.", job_timeout);
             handle_job_timeout(&job, &queue_name, &mut job_store, &message).await
         }

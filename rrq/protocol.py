@@ -7,7 +7,7 @@ import json
 import struct
 from typing import Any, Literal
 
-ExecutorMessageType = Literal["request", "response"]
+ExecutorMessageType = Literal["request", "response", "cancel"]
 
 FRAME_HEADER_SIZE = 4
 MAX_FRAME_SIZE = 16 * 1024 * 1024
@@ -24,7 +24,7 @@ def decode_message(data: bytes) -> tuple[ExecutorMessageType, dict[str, Any]]:
         raise ValueError("Executor message must be a JSON object")
     message_type = decoded.get("type")
     payload = decoded.get("payload")
-    if message_type not in {"request", "response"}:
+    if message_type not in {"request", "response", "cancel"}:
         raise ValueError("Executor message missing valid type")
     if not isinstance(payload, dict):
         raise ValueError("Executor message missing payload object")

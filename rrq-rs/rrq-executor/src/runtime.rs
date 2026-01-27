@@ -1,10 +1,14 @@
 use crate::registry::Registry;
 use crate::telemetry::{NoopTelemetry, Telemetry};
 use crate::types::{ExecutionError, ExecutionOutcome};
-use rrq_protocol::{ExecutorMessage, PROTOCOL_VERSION, encode_frame};
+use rrq_protocol::{encode_frame, CancelRequest, ExecutorMessage, PROTOCOL_VERSION};
+use std::collections::HashMap;
 use std::path::Path;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{mpsc, Mutex};
 
 pub const ENV_EXECUTOR_SOCKET: &str = "RRQ_EXECUTOR_SOCKET";
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -65,6 +69,9 @@ fn run_socket_loop<T: Telemetry + ?Sized>(
     telemetry: &T,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let registry = registry.clone();
+    let in_flight: Arc<Mutex<HashMap<String, InFlightTask>>> = Arc::new(Mutex::new(HashMap::new()));
+    let job_index: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let telemetry = telemetry.clone_box();
     runtime.block_on(async move {
         if let Some(parent) = socket_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -75,23 +82,98 @@ fn run_socket_loop<T: Telemetry + ?Sized>(
         let listener = UnixListener::bind(socket_path)?;
         loop {
             let (stream, _) = listener.accept().await?;
-            handle_connection(stream, &registry, telemetry).await?;
+            let registry = registry.clone();
+            let telemetry = telemetry.clone();
+            let in_flight = in_flight.clone();
+            let job_index = job_index.clone();
+            tokio::spawn(async move {
+                if let Err(err) =
+                    handle_connection(stream, &registry, telemetry.as_ref(), in_flight, job_index)
+                        .await
+                {
+                    tracing::error!("executor connection error: {err}");
+                }
+            });
         }
     })
 }
 
 async fn handle_connection<T: Telemetry + ?Sized>(
-    mut stream: UnixStream,
+    stream: UnixStream,
     registry: &Registry,
     telemetry: &T,
+    in_flight: Arc<Mutex<HashMap<String, InFlightTask>>>,
+    job_index: Arc<Mutex<HashMap<String, String>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let (mut reader, mut writer) = stream.into_split();
+    let (response_tx, mut response_rx) = mpsc::channel::<ExecutionOutcome>(16);
+    let writer_task = tokio::spawn(async move {
+        while let Some(outcome) = response_rx.recv().await {
+            let response = ExecutorMessage::Response { payload: outcome };
+            if write_message(&mut writer, &response).await.is_err() {
+                break;
+            }
+        }
+    });
+    let mut connection_requests: Vec<String> = Vec::new();
+
     loop {
-        let message = match read_message(&mut stream).await? {
+        let message = match read_message(&mut reader).await? {
             Some(message) => message,
             None => break,
         };
-        let request = match message {
-            ExecutorMessage::Request { payload } => payload,
+        match message {
+            ExecutorMessage::Request { payload } => {
+                if payload.protocol_version != PROTOCOL_VERSION {
+                    let outcome = ExecutionOutcome::error(
+                        payload.job_id.clone(),
+                        payload.request_id.clone(),
+                        "Unsupported protocol version",
+                    );
+                    let _ = response_tx.send(outcome).await;
+                    continue;
+                }
+
+                let request_id = payload.request_id.clone();
+                let job_id = payload.job_id.clone();
+                connection_requests.push(request_id.clone());
+                let response_tx = response_tx.clone();
+                let registry = registry.clone();
+                let telemetry = telemetry.clone_box();
+                let in_flight_for_task = in_flight.clone();
+                let job_index_for_task = job_index.clone();
+                let request_id_for_task = request_id.clone();
+                let job_id_for_task = job_id.clone();
+                let response_tx_for_task = response_tx.clone();
+
+                let handle = tokio::spawn(async move {
+                    let outcome = registry.execute_with(payload, telemetry.as_ref()).await;
+                    let _ = response_tx_for_task.send(outcome).await;
+                    let mut in_flight = in_flight_for_task.lock().await;
+                    in_flight.remove(&request_id_for_task);
+                    let mut job_index = job_index_for_task.lock().await;
+                    job_index.remove(&job_id_for_task);
+                });
+
+                {
+                    let mut in_flight = in_flight.lock().await;
+                    in_flight.insert(
+                        request_id.clone(),
+                        InFlightTask {
+                            job_id: job_id.clone(),
+                            handle,
+                            response_tx: response_tx.clone(),
+                        },
+                    );
+                }
+                {
+                    let mut job_index = job_index.lock().await;
+                    job_index.insert(job_id, request_id);
+                }
+            }
+            ExecutorMessage::Cancel { payload } => {
+                handle_cancel(payload, &in_flight, &job_index).await;
+            }
             ExecutorMessage::Response { .. } => {
                 let outcome = ExecutionOutcome {
                     job_id: Some("unknown".to_string()),
@@ -106,31 +188,70 @@ async fn handle_connection<T: Telemetry + ?Sized>(
                     }),
                     retry_after_seconds: None,
                 };
-                write_message(&mut stream, &ExecutorMessage::Response { payload: outcome }).await?;
-                continue;
+                let _ = response_tx.send(outcome).await;
             }
-        };
-
-        if request.protocol_version != PROTOCOL_VERSION {
-            let outcome = ExecutionOutcome::error(
-                request.job_id.clone(),
-                request.request_id.clone(),
-                "Unsupported protocol version",
-            );
-            write_message(&mut stream, &ExecutorMessage::Response { payload: outcome }).await?;
-            continue;
         }
-
-        let outcome = registry.execute_with(request, telemetry).await;
-        let response = ExecutorMessage::Response { payload: outcome };
-        write_message(&mut stream, &response).await?;
     }
+
+    for request_id in connection_requests {
+        let mut in_flight = in_flight.lock().await;
+        if let Some(task) = in_flight.remove(&request_id) {
+            task.handle.abort();
+        }
+    }
+    writer_task.abort();
 
     Ok(())
 }
 
-async fn read_message(
-    stream: &mut UnixStream,
+struct InFlightTask {
+    job_id: String,
+    handle: tokio::task::JoinHandle<()>,
+    response_tx: mpsc::Sender<ExecutionOutcome>,
+}
+
+async fn handle_cancel(
+    payload: CancelRequest,
+    in_flight: &Arc<Mutex<HashMap<String, InFlightTask>>>,
+    job_index: &Arc<Mutex<HashMap<String, String>>>,
+) {
+    if payload.protocol_version != PROTOCOL_VERSION {
+        return;
+    }
+    let request_id = match payload.request_id.clone() {
+        Some(request_id) => Some(request_id),
+        None => {
+            let job_index = job_index.lock().await;
+            job_index.get(&payload.job_id).cloned()
+        }
+    };
+    let Some(request_id) = request_id else {
+        return;
+    };
+
+    let task = {
+        let mut in_flight = in_flight.lock().await;
+        in_flight.remove(&request_id)
+    };
+    if let Some(task) = task {
+        task.handle.abort();
+        let outcome =
+            ExecutionOutcome::error(payload.job_id.clone(), request_id.clone(), "Job cancelled");
+        let _ = task.response_tx.send(outcome).await;
+        let mut job_index = job_index.lock().await;
+        job_index.remove(&task.job_id);
+    }
+
+    if payload.hard_kill {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            std::process::exit(1);
+        });
+    }
+}
+
+async fn read_message<R: AsyncRead + Unpin>(
+    stream: &mut R,
 ) -> Result<Option<ExecutorMessage>, Box<dyn std::error::Error>> {
     let mut header = [0u8; 4];
     match stream.read_exact(&mut header).await {
@@ -151,8 +272,8 @@ async fn read_message(
     Ok(Some(message))
 }
 
-async fn write_message(
-    stream: &mut UnixStream,
+async fn write_message<W: AsyncWrite + Unpin>(
+    stream: &mut W,
     message: &ExecutorMessage,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let framed = encode_frame(message)?;

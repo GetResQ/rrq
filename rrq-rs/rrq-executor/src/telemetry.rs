@@ -3,6 +3,13 @@ use tracing::Span;
 
 pub trait Telemetry: Send + Sync {
     fn executor_span(&self, request: &ExecutionRequest) -> Span;
+    fn clone_box(&self) -> Box<dyn Telemetry>;
+}
+
+impl Clone for Box<dyn Telemetry> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
 }
 
 #[derive(Clone, Default)]
@@ -11,6 +18,10 @@ pub struct NoopTelemetry;
 impl Telemetry for NoopTelemetry {
     fn executor_span(&self, _request: &ExecutionRequest) -> Span {
         Span::none()
+    }
+
+    fn clone_box(&self) -> Box<dyn Telemetry> {
+        Box::new(self.clone())
     }
 }
 
@@ -72,6 +83,10 @@ pub mod otel {
             }
 
             span
+        }
+
+        fn clone_box(&self) -> Box<dyn Telemetry> {
+            Box::new(Self)
         }
     }
 

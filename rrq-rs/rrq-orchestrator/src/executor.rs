@@ -6,7 +6,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rrq_protocol::{
-    ExecutionOutcome, ExecutionRequest, ExecutorMessage, FRAME_HEADER_LEN, encode_frame,
+    encode_frame, CancelRequest, ExecutionOutcome, ExecutionRequest, ExecutorMessage,
+    FRAME_HEADER_LEN, PROTOCOL_VERSION,
 };
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -75,7 +76,7 @@ async fn resolve_socket_dir(
 #[async_trait]
 pub trait Executor: Send + Sync {
     async fn execute(&self, request: ExecutionRequest) -> Result<ExecutionOutcome>;
-    async fn cancel(&self, _job_id: &str) -> Result<()> {
+    async fn cancel(&self, _job_id: &str, _request_id: Option<&str>) -> Result<()> {
         Ok(())
     }
     async fn close(&self) -> Result<()> {
@@ -377,6 +378,7 @@ set socket_dir to a shorter absolute path (e.g. /tmp/rrq).",
 
 pub struct SocketExecutor {
     pool: Arc<SocketExecutorPool>,
+    in_flight: Arc<Mutex<HashMap<String, InFlightRequest>>>,
 }
 
 impl SocketExecutor {
@@ -393,6 +395,7 @@ impl SocketExecutor {
             SocketExecutorPool::new(cmd, pool_size, env, cwd, socket_dir, response_timeout).await?;
         Ok(Self {
             pool: Arc::new(pool),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -401,6 +404,16 @@ impl SocketExecutor {
         proc: &mut SocketProcess,
         request: &ExecutionRequest,
     ) -> Result<ExecutionOutcome> {
+        {
+            let mut in_flight = self.in_flight.lock().await;
+            in_flight.insert(
+                request.request_id.clone(),
+                InFlightRequest {
+                    job_id: request.job_id.clone(),
+                    socket_path: proc.socket_path.clone(),
+                },
+            );
+        }
         let request_message = ExecutorMessage::Request {
             payload: request.clone(),
         };
@@ -437,8 +450,8 @@ impl SocketExecutor {
                 }
                 Ok(payload)
             }
-            ExecutorMessage::Request { .. } => {
-                Err(anyhow::anyhow!("unexpected executor request message"))
+            ExecutorMessage::Request { .. } | ExecutorMessage::Cancel { .. } => {
+                Err(anyhow::anyhow!("unexpected executor message"))
             }
         }
     }
@@ -453,6 +466,10 @@ impl Executor for SocketExecutor {
             let proc = guard.proc_mut()?;
             self.execute_with_process(proc, &request).await
         };
+        {
+            let mut in_flight = self.in_flight.lock().await;
+            in_flight.remove(&request.request_id);
+        }
         match result {
             Ok(outcome) => {
                 guard.release().await?;
@@ -465,9 +482,53 @@ impl Executor for SocketExecutor {
         }
     }
 
+    async fn cancel(&self, job_id: &str, request_id: Option<&str>) -> Result<()> {
+        let target = {
+            let mut in_flight = self.in_flight.lock().await;
+            let resolved_request_id = if let Some(request_id) = request_id {
+                Some(request_id.to_string())
+            } else {
+                in_flight.iter().find_map(|(request_id, info)| {
+                    if info.job_id == job_id {
+                        Some(request_id.clone())
+                    } else {
+                        None
+                    }
+                })
+            };
+            let Some(request_id) = resolved_request_id else {
+                return Ok(());
+            };
+            let info = in_flight.remove(&request_id);
+            info.map(|info| (request_id, info))
+        };
+        let Some((request_id, info)) = target else {
+            return Ok(());
+        };
+        let mut stream = match UnixStream::connect(&info.socket_path).await {
+            Ok(stream) => stream,
+            Err(_) => return Ok(()),
+        };
+        let message = ExecutorMessage::Cancel {
+            payload: CancelRequest {
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                job_id: info.job_id,
+                request_id: Some(request_id),
+                hard_kill: true,
+            },
+        };
+        let _ = write_message(&mut stream, &message).await;
+        Ok(())
+    }
+
     async fn close(&self) -> Result<()> {
         self.pool.close().await
     }
+}
+
+struct InFlightRequest {
+    job_id: String,
+    socket_path: PathBuf,
 }
 
 pub fn resolve_executor_pool_sizes(
