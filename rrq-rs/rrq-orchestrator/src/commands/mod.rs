@@ -7,6 +7,9 @@ pub(crate) mod queue;
 pub(crate) mod shared;
 pub(crate) mod worker;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub(crate) use debug::{
     debug_clear, debug_generate_jobs, debug_generate_workers, debug_stress_test, debug_submit,
 };

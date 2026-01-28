@@ -31,6 +31,7 @@ dev = [
     "pytest>=8.3.5",
     "pytest-asyncio>=1.0.0",
     "pytest-cov>=6.0.0",
+    "python-dotenv>=1.2.1",
     "ruff==0.14.9",
     "ty==0.0.1-alpha.26",
 ]
@@ -67,4 +68,5 @@ environment = { CARGO_TERM_COLOR = "always" }
 [dependency-groups]
 dev = [
     "cibuildwheel>=3.3.1",
+    "hatchling>=1.28.0",
 ]

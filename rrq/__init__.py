@@ -5,9 +5,6 @@ from .executor import (
     ExecutionOutcome,
     ExecutionRequest,
     PythonExecutor,
-    QueueRoutingExecutor,
-    SocketExecutor,
-    build_executors_from_settings,
 )
 from .executor_settings import PythonExecutorSettings
 from .registry import JobRegistry
@@ -24,7 +21,4 @@ __all__ = [
     "ExecutionRequest",
     "ExecutionOutcome",
     "PythonExecutor",
-    "QueueRoutingExecutor",
-    "SocketExecutor",
-    "build_executors_from_settings",
 ]

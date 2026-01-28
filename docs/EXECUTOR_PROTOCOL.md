@@ -32,11 +32,15 @@ transport is a Unix domain socket with length-delimited JSON frames.
 Message types:
 - `request`: `payload` is an `ExecutionRequest`.
 - `response`: `payload` is an `ExecutionOutcome`.
+- `cancel`: `payload` is a `CancelRequest`.
 
 Executors should read requests and write responses **sequentially** on a single
 connection. The orchestrator correlates responses by `request_id` and expects
-exactly one response per request. Protocol logging is not supported; executors
-should emit logs to stdout/stderr as needed.
+exactly one response per request. The orchestrator may open **multiple
+concurrent connections** to the same executor process (often one connection per
+request). Cancellation frames may be sent on their own short-lived connection.
+Protocol logging is not supported; executors should emit logs to stdout/stderr
+as needed.
 
 ## ExecutionRequest (payload)
 ```json
@@ -132,14 +136,34 @@ Reserved `type` values:
 Used with `status = retry` to request a specific delay. Orchestrator may
 override per policy.
 
+## CancelRequest (payload)
+```json
+{
+  "protocol_version": "1",
+  "job_id": "uuid",
+  "request_id": "uuid (optional)",
+  "hard_kill": false
+}
+```
+
+### Fields
+- `protocol_version` (string): Always `"1"` for v1.
+- `job_id` (string): Job ID to cancel.
+- `request_id` (string, optional): If present, cancel only the matching
+  in-flight request.
+- `hard_kill` (bool): Reserved for orchestrator-level process management;
+  executors may ignore it.
+
 ## Scheduling Semantics
 - **Timeouts** are enforced by the orchestrator. Executors may return `timeout`
   if they implement their own local timeouts.
 - **Retries** are controlled by the orchestrator. Executors return `retry` to
   request a retry.
 - **DLQ** decisions are controlled by the orchestrator.
-- **Cancellation** (v1) applies only to **pending** jobs. Once execution starts,
-  the outcome is always applied.
+- **Cancellation** (v1) is best-effort. Executors should attempt to cancel the
+  associated task and return an outcome (typically `error` with a `cancelled`
+  type/message). If `request_id` is omitted, executors may cancel any matching
+  in-flight task for the job ID or no-op if nothing is running.
 
 ## Executor Selection
 RRQ may embed executor selection in the job function name using:

@@ -66,6 +66,7 @@ fn normalize_toml_payload(mut payload: Value) -> Result<Value> {
         if let Some(routing) = map.remove("routing") {
             map.insert("executor_routes".to_string(), routing);
         }
+        map.remove("worker_concurrency");
         return Ok(Value::Object(map));
     }
 
@@ -108,7 +109,6 @@ fn env_overrides() -> Result<Value> {
         "default_unique_job_lock_ttl_seconds",
         "RRQ_DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS",
     )?;
-    set_env_int(&mut payload, "worker_concurrency", "RRQ_WORKER_CONCURRENCY")?;
     set_env_string(
         &mut payload,
         "default_executor_name",
@@ -193,5 +193,87 @@ fn deep_merge(base: Value, overlay: Value) -> Value {
             Value::Object(base_map)
         }
         (_, overlay_value) => overlay_value,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::{Mutex, OnceLock};
+    use uuid::Uuid;
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn env_lock() -> &'static Mutex<()> {
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let lock = env_lock().lock().unwrap();
+            let prev = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self {
+                _lock: lock,
+                key,
+                prev,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = self.prev.take() {
+                unsafe {
+                    std::env::set_var(self.key, prev);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_config_source_prefers_explicit_path() {
+        let (path, source) = resolve_config_source(Some("custom.toml"));
+        assert_eq!(path, Some("custom.toml".to_string()));
+        assert!(source.contains("--config"));
+    }
+
+    #[test]
+    fn load_toml_settings_merges_env_and_normalizes_fields() {
+        let tmp_path = std::env::temp_dir().join(format!("rrq-test-{}.toml", Uuid::new_v4()));
+        let payload = r#"
+[rrq]
+default_queue_name = "from_toml"
+worker_concurrency = 2
+
+[rrq.routing]
+alpha = "beta"
+"#;
+        fs::write(&tmp_path, payload).unwrap();
+        let _queue_guard = EnvGuard::set("RRQ_DEFAULT_QUEUE_NAME", "from_env");
+        let settings = load_toml_settings(Some(tmp_path.to_str().unwrap())).unwrap();
+        assert_eq!(settings.default_queue_name, "from_env");
+        assert_eq!(
+            settings.executor_routes.get("alpha"),
+            Some(&"beta".to_string())
+        );
+        assert_eq!(
+            settings.worker_concurrency,
+            RRQSettings::default().worker_concurrency
+        );
+        let _ = fs::remove_file(&tmp_path);
     }
 }

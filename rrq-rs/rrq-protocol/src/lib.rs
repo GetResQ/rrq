@@ -28,6 +28,18 @@ pub struct ExecutionContext {
 pub enum ExecutorMessage {
     Request { payload: ExecutionRequest },
     Response { payload: ExecutionOutcome },
+    Cancel { payload: CancelRequest },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelRequest {
+    #[serde(default = "default_protocol_version")]
+    pub protocol_version: String,
+    pub job_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub hard_kill: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -289,6 +301,27 @@ mod tests {
             ExecutorMessage::Request { payload } => {
                 assert_eq!(payload.protocol_version, PROTOCOL_VERSION);
                 assert_eq!(payload.request_id, "req-1");
+            }
+            _ => panic!("unexpected message type"),
+        }
+    }
+
+    #[test]
+    fn cancel_request_round_trip() {
+        let cancel = CancelRequest {
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            job_id: "job-1".to_string(),
+            request_id: Some("req-1".to_string()),
+            hard_kill: true,
+        };
+        let msg = ExecutorMessage::Cancel { payload: cancel };
+        let serialized = serde_json::to_string(&msg).unwrap();
+        let decoded: ExecutorMessage = serde_json::from_str(&serialized).unwrap();
+        match decoded {
+            ExecutorMessage::Cancel { payload } => {
+                assert_eq!(payload.protocol_version, PROTOCOL_VERSION);
+                assert_eq!(payload.request_id.as_deref(), Some("req-1"));
+                assert!(payload.hard_kill);
             }
             _ => panic!("unexpected message type"),
         }

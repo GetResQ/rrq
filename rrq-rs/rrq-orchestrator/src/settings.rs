@@ -22,6 +22,7 @@ pub struct ExecutorConfig {
     pub executor_type: ExecutorType,
     pub cmd: Option<Vec<String>>,
     pub pool_size: Option<usize>,
+    pub max_in_flight: Option<usize>,
     pub env: Option<HashMap<String, String>>,
     pub cwd: Option<String>,
     pub socket_dir: Option<String>,

@@ -46,3 +46,34 @@ pub(crate) async fn check_workers(config: Option<String>) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::test_support::RedisTestContext;
+    use serde_json::Value;
+
+    #[tokio::test]
+    async fn health_check_handles_missing_and_present_workers() -> Result<()> {
+        let mut ctx = RedisTestContext::new().await?;
+        let config = ctx.write_config().await?;
+        let config_path = Some(config.path().to_string_lossy().to_string());
+
+        check_workers(config_path.clone()).await?;
+
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "worker_id".to_string(),
+            Value::String("worker-1".to_string()),
+        );
+        payload.insert("status".to_string(), Value::String("running".to_string()));
+        payload.insert("active_jobs".to_string(), Value::from(1));
+        payload.insert("timestamp".to_string(), Value::from(1234));
+        ctx.store
+            .set_worker_health("worker-1", &payload, 60)
+            .await?;
+
+        check_workers(config_path).await?;
+        Ok(())
+    }
+}

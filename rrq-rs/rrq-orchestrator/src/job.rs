@@ -89,3 +89,31 @@ impl JobStatus {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn job_status_round_trip() {
+        let statuses = [
+            JobStatus::Pending,
+            JobStatus::Active,
+            JobStatus::Completed,
+            JobStatus::Failed,
+            JobStatus::Retrying,
+            JobStatus::Cancelled,
+        ];
+        for status in statuses {
+            let text = status.as_str();
+            assert_eq!(JobStatus::parse(text), Some(status));
+        }
+        assert_eq!(JobStatus::parse("NOPE"), None);
+    }
+
+    #[test]
+    fn job_new_id_is_uuid() {
+        let id = Job::new_id();
+        assert!(uuid::Uuid::parse_str(&id).is_ok());
+    }
+}

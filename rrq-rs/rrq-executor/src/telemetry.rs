@@ -3,6 +3,13 @@ use tracing::Span;
 
 pub trait Telemetry: Send + Sync {
     fn executor_span(&self, request: &ExecutionRequest) -> Span;
+    fn clone_box(&self) -> Box<dyn Telemetry>;
+}
+
+impl Clone for Box<dyn Telemetry> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
 }
 
 #[derive(Clone, Default)]
@@ -11,6 +18,45 @@ pub struct NoopTelemetry;
 impl Telemetry for NoopTelemetry {
     fn executor_span(&self, _request: &ExecutionRequest) -> Span {
         Span::none()
+    }
+
+    fn clone_box(&self) -> Box<dyn Telemetry> {
+        Box::new(self.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ExecutionContext, ExecutionRequest};
+
+    fn build_request() -> ExecutionRequest {
+        ExecutionRequest {
+            protocol_version: "1".to_string(),
+            request_id: "req-1".to_string(),
+            job_id: "job-1".to_string(),
+            function_name: "handler".to_string(),
+            args: vec![],
+            kwargs: std::collections::HashMap::new(),
+            context: ExecutionContext {
+                job_id: "job-1".to_string(),
+                attempt: 1,
+                enqueue_time: "2024-01-01T00:00:00Z".parse().unwrap(),
+                queue_name: "default".to_string(),
+                deadline: None,
+                trace_context: None,
+                worker_id: None,
+            },
+        }
+    }
+
+    #[test]
+    fn noop_telemetry_clone_box_works() {
+        let telemetry: Box<dyn Telemetry> = Box::new(NoopTelemetry);
+        let cloned = telemetry.clone();
+        let request = build_request();
+        let span = cloned.executor_span(&request);
+        let _guard = span.enter();
     }
 }
 
@@ -72,6 +118,10 @@ pub mod otel {
             }
 
             span
+        }
+
+        fn clone_box(&self) -> Box<dyn Telemetry> {
+            Box::new(Self)
         }
     }
 

@@ -8,6 +8,9 @@ pub mod settings;
 pub mod store;
 pub mod worker;
 
+#[cfg(test)]
+mod test_support;
+
 pub use client::{EnqueueOptions, RRQClient};
 pub use config::{load_toml_settings, resolve_config_source};
 pub use executor::{Executor, SocketExecutor};

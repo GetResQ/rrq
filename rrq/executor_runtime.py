@@ -7,12 +7,15 @@ import asyncio
 import importlib
 import inspect
 import os
+from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
 
 from .client import RRQClient
 from .exc import HandlerNotFound
+from pydantic import BaseModel, Field
+
 from .executor import ExecutionError, ExecutionOutcome, ExecutionRequest, PythonExecutor
 from .executor_settings import PythonExecutorSettings
 from .protocol import read_message, write_message
@@ -22,6 +25,88 @@ from .store import JobStore
 
 ENV_EXECUTOR_SETTINGS = "RRQ_EXECUTOR_SETTINGS"
 ENV_EXECUTOR_SOCKET = "RRQ_EXECUTOR_SOCKET"
+
+
+class CancelRequest(BaseModel):
+    protocol_version: str = "1"
+    job_id: str
+    request_id: str | None = None
+    hard_kill: bool = Field(default=False)
+
+
+async def _write_outcome(
+    writer: asyncio.StreamWriter,
+    outcome: ExecutionOutcome,
+    lock: asyncio.Lock,
+) -> None:
+    async with lock:
+        await write_message(writer, "response", outcome.model_dump(mode="json"))
+
+
+async def _execute_and_respond(
+    executor: PythonExecutor,
+    request: ExecutionRequest,
+    writer: asyncio.StreamWriter,
+    write_lock: asyncio.Lock,
+    in_flight: dict[str, asyncio.Task],
+    job_index: dict[str, str],
+    inflight_lock: asyncio.Lock,
+) -> None:
+    try:
+        try:
+            outcome = await _execute_with_deadline(executor, request)
+        except HandlerNotFound as exc:
+            outcome = ExecutionOutcome(
+                job_id=request.job_id,
+                request_id=request.request_id,
+                status="error",
+                error=ExecutionError(
+                    message=str(exc),
+                    type="handler_not_found",
+                ),
+            )
+        except asyncio.CancelledError:
+            outcome = ExecutionOutcome(
+                job_id=request.job_id,
+                request_id=request.request_id,
+                status="error",
+                error=ExecutionError(message="Job cancelled", type="cancelled"),
+            )
+        except asyncio.TimeoutError as exc:
+            outcome = ExecutionOutcome(
+                job_id=request.job_id,
+                request_id=request.request_id,
+                status="timeout",
+                error=ExecutionError(message=str(exc) or "Job execution timed out."),
+            )
+        except Exception as exc:
+            outcome = ExecutionOutcome(
+                job_id=request.job_id,
+                request_id=request.request_id,
+                status="error",
+                error=ExecutionError(message=str(exc)),
+            )
+        await _write_outcome(writer, outcome, write_lock)
+    finally:
+        async with inflight_lock:
+            in_flight.pop(request.request_id, None)
+            job_index.pop(request.job_id, None)
+
+
+async def _execute_with_deadline(
+    executor: PythonExecutor,
+    request: ExecutionRequest,
+) -> ExecutionOutcome:
+    deadline = request.context.deadline
+    if deadline is None:
+        return await executor.execute(request)
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    remaining = (deadline - now).total_seconds()
+    if remaining <= 0:
+        raise asyncio.TimeoutError("Job deadline exceeded")
+    return await asyncio.wait_for(executor.execute(request), timeout=remaining)
 
 
 def load_executor_settings(
@@ -74,49 +159,66 @@ async def _handle_connection(
     writer: asyncio.StreamWriter,
     executor: PythonExecutor,
     ready_event: asyncio.Event,
+    in_flight: dict[str, asyncio.Task],
+    job_index: dict[str, str],
+    inflight_lock: asyncio.Lock,
 ) -> None:
+    write_lock = asyncio.Lock()
     try:
-        await ready_event.wait()
         while True:
             message = await read_message(reader)
             if message is None:
                 break
             message_type, payload = message
-            if message_type != "request":
-                raise ValueError(f"Unexpected message type: {message_type}")
-            request = ExecutionRequest.model_validate(payload)
+            if message_type == "request":
+                request = ExecutionRequest.model_validate(payload)
 
-            if request.protocol_version != "1":
-                outcome = ExecutionOutcome(
-                    job_id=request.job_id,
-                    request_id=request.request_id,
-                    status="error",
-                    error=ExecutionError(message="Unsupported protocol version"),
+                if not ready_event.is_set():
+                    await ready_event.wait()
+
+                if request.protocol_version != "1":
+                    outcome = ExecutionOutcome(
+                        job_id=request.job_id,
+                        request_id=request.request_id,
+                        status="error",
+                        error=ExecutionError(message="Unsupported protocol version"),
+                    )
+                    await _write_outcome(writer, outcome, write_lock)
+                    continue
+
+                task = asyncio.create_task(
+                    _execute_and_respond(
+                        executor,
+                        request,
+                        writer,
+                        write_lock,
+                        in_flight,
+                        job_index,
+                        inflight_lock,
+                    ),
+                    name=f"rrq-executor-{request.request_id}",
                 )
-                await write_message(writer, "response", outcome.model_dump(mode="json"))
+                async with inflight_lock:
+                    in_flight[request.request_id] = task
+                    job_index[request.job_id] = request.request_id
                 continue
 
-            try:
-                outcome = await executor.execute(request)
-            except HandlerNotFound as exc:
-                outcome = ExecutionOutcome(
-                    job_id=request.job_id,
-                    request_id=request.request_id,
-                    status="error",
-                    error=ExecutionError(
-                        message=str(exc),
-                        type="handler_not_found",
-                    ),
-                )
-            except Exception as exc:
-                outcome = ExecutionOutcome(
-                    job_id=request.job_id,
-                    request_id=request.request_id,
-                    status="error",
-                    error=ExecutionError(message=str(exc)),
-                )
+            if message_type == "cancel":
+                cancel_request = CancelRequest.model_validate(payload)
+                if cancel_request.protocol_version != "1":
+                    continue
+                request_id = cancel_request.request_id
+                if request_id is None:
+                    async with inflight_lock:
+                        request_id = job_index.get(cancel_request.job_id)
+                if request_id is not None:
+                    async with inflight_lock:
+                        task = in_flight.get(request_id)
+                    if task is not None:
+                        task.cancel()
+                continue
 
-            await write_message(writer, "response", outcome.model_dump(mode="json"))
+            raise ValueError(f"Unexpected message type: {message_type}")
     finally:
         writer.close()
         with suppress(Exception):
@@ -146,6 +248,9 @@ async def run_python_executor(
     )
     startup_completed = False
     ready_event = asyncio.Event()
+    in_flight: dict[str, asyncio.Task] = {}
+    job_index: dict[str, str] = {}
+    inflight_lock = asyncio.Lock()
     server: asyncio.AbstractServer | None = None
 
     try:
@@ -154,7 +259,9 @@ async def run_python_executor(
         if path.exists():
             path.unlink()
         server = await asyncio.start_unix_server(
-            lambda r, w: _handle_connection(r, w, executor, ready_event),
+            lambda r, w: _handle_connection(
+                r, w, executor, ready_event, in_flight, job_index, inflight_lock
+            ),
             path=str(path),
         )
         await _call_hook(executor_settings.on_startup)

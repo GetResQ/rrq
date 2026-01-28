@@ -44,6 +44,7 @@ def _normalize_toml_payload(payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("[rrq] table must be a TOML table")
 
+    payload.pop("worker_concurrency", None)
     routing = payload.pop("routing", None)
     if routing is not None:
         if not isinstance(routing, dict):
@@ -118,7 +119,6 @@ def _env_overrides() -> dict[str, Any]:
         "RRQ_DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS",
         _parse_int,
     )
-    set_value("worker_concurrency", "RRQ_WORKER_CONCURRENCY", _parse_int)
     set_value("default_executor_name", "RRQ_DEFAULT_EXECUTOR_NAME")
     set_value(
         "worker_health_check_interval_seconds",

@@ -329,3 +329,101 @@ pub(crate) async fn job_trace(job_id: String, config: Option<String>) -> Result<
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::test_support::RedisTestContext;
+    use chrono::{Duration, Utc};
+    use rrq::Job;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn build_job(queue_name: &str, dlq_name: &str) -> Job {
+        Job {
+            id: Job::new_id(),
+            function_name: "trace_job".to_string(),
+            job_args: vec![json!("arg")],
+            job_kwargs: serde_json::Map::from_iter([("flag".to_string(), json!(true))]),
+            enqueue_time: Utc::now(),
+            start_time: Some(Utc::now() - Duration::seconds(10)),
+            status: JobStatus::Completed,
+            current_retries: 1,
+            next_scheduled_run_time: None,
+            max_retries: 3,
+            job_timeout_seconds: Some(30),
+            result_ttl_seconds: Some(60),
+            job_unique_key: None,
+            completion_time: Some(Utc::now()),
+            result: None,
+            last_error: None,
+            queue_name: Some(queue_name.to_string()),
+            dlq_name: Some(dlq_name.to_string()),
+            worker_id: Some("worker-1".to_string()),
+            trace_context: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn job_commands_cover_branches() -> Result<()> {
+        let mut ctx = RedisTestContext::new().await?;
+        let config = ctx.write_config().await?;
+        let config_path = Some(config.path().to_string_lossy().to_string());
+
+        job_show("missing".to_string(), config_path.clone(), false).await?;
+
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let job = client
+            .enqueue(
+                "do_work",
+                vec![json!(1)],
+                serde_json::Map::new(),
+                EnqueueOptions::default(),
+            )
+            .await?;
+
+        job_show(job.id.clone(), config_path.clone(), true).await?;
+        job_list(
+            config_path.clone(),
+            Some("pending".to_string()),
+            Some(ctx.settings.default_queue_name.clone()),
+            Some("do_work".to_string()),
+            10,
+        )
+        .await?;
+
+        let (cursor, before_keys) = ctx.store.scan_job_keys(0, 200).await?;
+        assert_eq!(cursor, 0);
+
+        job_replay(job.id.clone(), config_path.clone(), None).await?;
+        let (_, after_keys) = ctx.store.scan_job_keys(0, 200).await?;
+        assert!(after_keys.len() > before_keys.len());
+
+        let cancel_job = client
+            .enqueue(
+                "cancel_me",
+                vec![],
+                serde_json::Map::new(),
+                EnqueueOptions::default(),
+            )
+            .await?;
+        job_cancel(cancel_job.id.clone(), config_path.clone()).await?;
+        let updated = ctx.store.get_job_definition(&cancel_job.id).await?.unwrap();
+        assert_eq!(updated.status, JobStatus::Cancelled);
+
+        let trace_job = build_job(
+            &ctx.settings.default_queue_name,
+            &ctx.settings.default_dlq_name,
+        );
+        ctx.store.save_job_definition(&trace_job).await?;
+        let mut fields = HashMap::new();
+        fields.insert(
+            "retry_0_at".to_string(),
+            (Utc::now() - Duration::seconds(5)).to_rfc3339(),
+        );
+        ctx.store.update_job_fields(&trace_job.id, &fields).await?;
+        job_trace(trace_job.id, config_path.clone()).await?;
+
+        Ok(())
+    }
+}

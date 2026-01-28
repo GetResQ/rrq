@@ -124,6 +124,15 @@ fn format_queue_key(queue_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::sync::OnceLock;
+    use tokio::sync::Mutex;
+
+    static REDIS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn redis_lock() -> &'static Mutex<()> {
+        REDIS_LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn format_queue_key_adds_prefix() {
@@ -133,5 +142,34 @@ mod tests {
     #[test]
     fn format_queue_key_preserves_prefix() {
         assert_eq!(format_queue_key("rrq:queue:custom"), "rrq:queue:custom");
+    }
+
+    #[tokio::test]
+    async fn producer_enqueue_writes_job_and_queue() {
+        let _guard = redis_lock().lock().await;
+        let dsn = std::env::var("RRQ_TEST_REDIS_DSN")
+            .unwrap_or_else(|_| "redis://localhost:6379/15".to_string());
+        let client = redis::Client::open(dsn.as_str()).unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let _: () = redis::cmd("FLUSHDB").query_async(&mut conn).await.unwrap();
+
+        let mut producer = Producer::new(dsn).await.unwrap();
+        let job_id = producer
+            .enqueue(
+                "work",
+                vec![json!(1)],
+                serde_json::Map::new(),
+                EnqueueOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let job_key = format!("{JOB_KEY_PREFIX}{job_id}");
+        let status: String = conn.hget(&job_key, "status").await.unwrap();
+        assert_eq!(status, "PENDING");
+        let queue_key = format_queue_key("default");
+        let score: Option<f64> = conn.zscore(queue_key, &job_id).await.unwrap();
+        assert!(score.is_some());
     }
 }

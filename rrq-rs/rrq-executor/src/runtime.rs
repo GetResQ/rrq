@@ -1,12 +1,17 @@
 use crate::registry::Registry;
 use crate::telemetry::{NoopTelemetry, Telemetry};
 use crate::types::{ExecutionError, ExecutionOutcome};
-use rrq_protocol::{ExecutorMessage, PROTOCOL_VERSION, encode_frame};
+use chrono::{DateTime, Utc};
+use rrq_protocol::{CancelRequest, ExecutorMessage, OutcomeStatus, PROTOCOL_VERSION, encode_frame};
+use std::collections::HashMap;
 use std::path::Path;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{Mutex, mpsc};
 
 pub const ENV_EXECUTOR_SOCKET: &str = "RRQ_EXECUTOR_SOCKET";
+const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 
 pub struct ExecutorRuntime {
     runtime: tokio::runtime::Runtime,
@@ -64,6 +69,9 @@ fn run_socket_loop<T: Telemetry + ?Sized>(
     telemetry: &T,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let registry = registry.clone();
+    let in_flight: Arc<Mutex<HashMap<String, InFlightTask>>> = Arc::new(Mutex::new(HashMap::new()));
+    let job_index: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let telemetry = telemetry.clone_box();
     runtime.block_on(async move {
         if let Some(parent) = socket_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
@@ -74,23 +82,99 @@ fn run_socket_loop<T: Telemetry + ?Sized>(
         let listener = UnixListener::bind(socket_path)?;
         loop {
             let (stream, _) = listener.accept().await?;
-            handle_connection(stream, &registry, telemetry).await?;
+            let registry = registry.clone();
+            let telemetry = telemetry.clone();
+            let in_flight = in_flight.clone();
+            let job_index = job_index.clone();
+            tokio::spawn(async move {
+                if let Err(err) =
+                    handle_connection(stream, &registry, telemetry.as_ref(), in_flight, job_index)
+                        .await
+                {
+                    tracing::error!("executor connection error: {err}");
+                }
+            });
         }
     })
 }
 
 async fn handle_connection<T: Telemetry + ?Sized>(
-    mut stream: UnixStream,
+    stream: UnixStream,
     registry: &Registry,
     telemetry: &T,
+    in_flight: Arc<Mutex<HashMap<String, InFlightTask>>>,
+    job_index: Arc<Mutex<HashMap<String, String>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let (mut reader, mut writer) = stream.into_split();
+    let (response_tx, mut response_rx) = mpsc::channel::<ExecutionOutcome>(16);
+    let writer_task = tokio::spawn(async move {
+        while let Some(outcome) = response_rx.recv().await {
+            let response = ExecutorMessage::Response { payload: outcome };
+            if write_message(&mut writer, &response).await.is_err() {
+                break;
+            }
+        }
+    });
+    let mut connection_requests: Vec<String> = Vec::new();
+
     loop {
-        let message = match read_message(&mut stream).await? {
+        let message = match read_message(&mut reader).await? {
             Some(message) => message,
             None => break,
         };
-        let request = match message {
-            ExecutorMessage::Request { payload } => payload,
+        match message {
+            ExecutorMessage::Request { payload } => {
+                if payload.protocol_version != PROTOCOL_VERSION {
+                    let outcome = ExecutionOutcome::error(
+                        payload.job_id.clone(),
+                        payload.request_id.clone(),
+                        "Unsupported protocol version",
+                    );
+                    let _ = response_tx.send(outcome).await;
+                    continue;
+                }
+
+                let request_id = payload.request_id.clone();
+                let job_id = payload.job_id.clone();
+                connection_requests.push(request_id.clone());
+                let response_tx = response_tx.clone();
+                let registry = registry.clone();
+                let telemetry = telemetry.clone_box();
+                let in_flight_for_task = in_flight.clone();
+                let job_index_for_task = job_index.clone();
+                let request_id_for_task = request_id.clone();
+                let job_id_for_task = job_id.clone();
+                let response_tx_for_task = response_tx.clone();
+
+                let handle = tokio::spawn(async move {
+                    let outcome =
+                        execute_with_deadline(payload, registry, telemetry.as_ref()).await;
+                    let _ = response_tx_for_task.send(outcome).await;
+                    let mut in_flight = in_flight_for_task.lock().await;
+                    in_flight.remove(&request_id_for_task);
+                    let mut job_index = job_index_for_task.lock().await;
+                    job_index.remove(&job_id_for_task);
+                });
+
+                {
+                    let mut in_flight = in_flight.lock().await;
+                    in_flight.insert(
+                        request_id.clone(),
+                        InFlightTask {
+                            job_id: job_id.clone(),
+                            handle,
+                            response_tx: response_tx.clone(),
+                        },
+                    );
+                }
+                {
+                    let mut job_index = job_index.lock().await;
+                    job_index.insert(job_id, request_id);
+                }
+            }
+            ExecutorMessage::Cancel { payload } => {
+                handle_cancel(payload, &in_flight, &job_index).await;
+            }
             ExecutorMessage::Response { .. } => {
                 let outcome = ExecutionOutcome {
                     job_id: Some("unknown".to_string()),
@@ -105,31 +189,108 @@ async fn handle_connection<T: Telemetry + ?Sized>(
                     }),
                     retry_after_seconds: None,
                 };
-                write_message(&mut stream, &ExecutorMessage::Response { payload: outcome }).await?;
-                continue;
+                let _ = response_tx.send(outcome).await;
             }
-        };
-
-        if request.protocol_version != PROTOCOL_VERSION {
-            let outcome = ExecutionOutcome::error(
-                request.job_id.clone(),
-                request.request_id.clone(),
-                "Unsupported protocol version",
-            );
-            write_message(&mut stream, &ExecutorMessage::Response { payload: outcome }).await?;
-            continue;
         }
-
-        let outcome = registry.execute_with(request, telemetry).await;
-        let response = ExecutorMessage::Response { payload: outcome };
-        write_message(&mut stream, &response).await?;
     }
+
+    for request_id in connection_requests {
+        let mut in_flight = in_flight.lock().await;
+        if let Some(task) = in_flight.remove(&request_id) {
+            task.handle.abort();
+        }
+    }
+    writer_task.abort();
 
     Ok(())
 }
 
-async fn read_message(
-    stream: &mut UnixStream,
+struct InFlightTask {
+    job_id: String,
+    handle: tokio::task::JoinHandle<()>,
+    response_tx: mpsc::Sender<ExecutionOutcome>,
+}
+
+async fn handle_cancel(
+    payload: CancelRequest,
+    in_flight: &Arc<Mutex<HashMap<String, InFlightTask>>>,
+    job_index: &Arc<Mutex<HashMap<String, String>>>,
+) {
+    if payload.protocol_version != PROTOCOL_VERSION {
+        return;
+    }
+    let request_id = match payload.request_id.clone() {
+        Some(request_id) => Some(request_id),
+        None => {
+            let job_index = job_index.lock().await;
+            job_index.get(&payload.job_id).cloned()
+        }
+    };
+    let Some(request_id) = request_id else {
+        return;
+    };
+
+    let task = {
+        let mut in_flight = in_flight.lock().await;
+        in_flight.remove(&request_id)
+    };
+    if let Some(task) = task {
+        task.handle.abort();
+        let outcome = ExecutionOutcome {
+            job_id: Some(payload.job_id.clone()),
+            request_id: Some(request_id.clone()),
+            status: OutcomeStatus::Error,
+            result: None,
+            error: Some(ExecutionError {
+                message: "Job cancelled".to_string(),
+                error_type: Some("cancelled".to_string()),
+                code: None,
+                details: None,
+            }),
+            retry_after_seconds: None,
+        };
+        let _ = task.response_tx.send(outcome).await;
+        let mut job_index = job_index.lock().await;
+        job_index.remove(&task.job_id);
+    }
+}
+
+async fn execute_with_deadline<T: Telemetry + ?Sized>(
+    request: rrq_protocol::ExecutionRequest,
+    registry: Registry,
+    telemetry: &T,
+) -> ExecutionOutcome {
+    let job_id = request.job_id.clone();
+    let request_id = request.request_id.clone();
+    let deadline = request.context.deadline;
+    if let Some(deadline) = deadline {
+        let now: DateTime<Utc> = Utc::now();
+        if deadline <= now {
+            return ExecutionOutcome::timeout(
+                job_id.clone(),
+                request_id.clone(),
+                "Job deadline exceeded",
+            );
+        }
+        if let Ok(remaining) = (deadline - now).to_std() {
+            match tokio::time::timeout(remaining, registry.execute_with(request, telemetry)).await {
+                Ok(outcome) => return outcome,
+                Err(_) => {
+                    return ExecutionOutcome::timeout(
+                        job_id.clone(),
+                        request_id.clone(),
+                        "Job execution timed out",
+                    );
+                }
+            }
+        }
+        return ExecutionOutcome::timeout(job_id, request_id, "Job deadline exceeded");
+    }
+    registry.execute_with(request, telemetry).await
+}
+
+async fn read_message<R: AsyncRead + Unpin>(
+    stream: &mut R,
 ) -> Result<Option<ExecutorMessage>, Box<dyn std::error::Error>> {
     let mut header = [0u8; 4];
     match stream.read_exact(&mut header).await {
@@ -141,18 +302,362 @@ async fn read_message(
     if length == 0 {
         return Err("executor message payload cannot be empty".into());
     }
+    if length > MAX_FRAME_LEN {
+        return Err("executor message payload too large".into());
+    }
     let mut payload = vec![0u8; length];
     stream.read_exact(&mut payload).await?;
     let message = serde_json::from_slice(&payload)?;
     Ok(Some(message))
 }
 
-async fn write_message(
-    stream: &mut UnixStream,
+async fn write_message<W: AsyncWrite + Unpin>(
+    stream: &mut W,
     message: &ExecutorMessage,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let framed = encode_frame(message)?;
     stream.write_all(&framed).await?;
     stream.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::Registry;
+    use crate::telemetry::NoopTelemetry;
+    use chrono::Utc;
+    use rrq_protocol::{ExecutionContext, ExecutionRequest, OutcomeStatus};
+    use serde_json::json;
+    use tokio::time::Duration;
+
+    fn build_request(function_name: &str) -> ExecutionRequest {
+        ExecutionRequest {
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            request_id: "req-1".to_string(),
+            job_id: "job-1".to_string(),
+            function_name: function_name.to_string(),
+            args: vec![],
+            kwargs: std::collections::HashMap::new(),
+            context: ExecutionContext {
+                job_id: "job-1".to_string(),
+                attempt: 1,
+                enqueue_time: "2024-01-01T00:00:00Z".parse().unwrap(),
+                queue_name: "default".to_string(),
+                deadline: None,
+                trace_context: None,
+                worker_id: None,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_connection_executes_request() {
+        let mut registry = Registry::new();
+        registry.register("echo", |request| async move {
+            ExecutionOutcome::success(
+                request.job_id.clone(),
+                request.request_id.clone(),
+                json!({"ok": true}),
+            )
+        });
+        let (client, server) = UnixStream::pair().unwrap();
+        let in_flight = Arc::new(Mutex::new(HashMap::new()));
+        let job_index = Arc::new(Mutex::new(HashMap::new()));
+        let server_task = tokio::spawn(async move {
+            handle_connection(server, &registry, &NoopTelemetry, in_flight, job_index)
+                .await
+                .unwrap();
+        });
+        let mut client = client;
+        let request = build_request("echo");
+        let message = ExecutorMessage::Request { payload: request };
+        write_message(&mut client, &message).await.unwrap();
+        let response = read_message(&mut client).await.unwrap().unwrap();
+        match response {
+            ExecutorMessage::Response { payload } => {
+                assert_eq!(payload.status, OutcomeStatus::Success);
+                assert_eq!(payload.result, Some(json!({"ok": true})));
+            }
+            _ => panic!("expected response"),
+        }
+        drop(client);
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn handle_connection_rejects_bad_protocol() {
+        let registry = Registry::new();
+        let (client, server) = UnixStream::pair().unwrap();
+        let in_flight = Arc::new(Mutex::new(HashMap::new()));
+        let job_index = Arc::new(Mutex::new(HashMap::new()));
+        let server_task = tokio::spawn(async move {
+            handle_connection(server, &registry, &NoopTelemetry, in_flight, job_index)
+                .await
+                .unwrap();
+        });
+        let mut client = client;
+        let mut request = build_request("echo");
+        request.protocol_version = "0".to_string();
+        let message = ExecutorMessage::Request { payload: request };
+        write_message(&mut client, &message).await.unwrap();
+        let response = read_message(&mut client).await.unwrap().unwrap();
+        match response {
+            ExecutorMessage::Response { payload } => {
+                assert_eq!(payload.status, OutcomeStatus::Error);
+            }
+            _ => panic!("expected response"),
+        }
+        drop(client);
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn handle_connection_cancels_inflight() {
+        let mut registry = Registry::new();
+        registry.register("sleep", |request| async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            ExecutionOutcome::success(
+                request.job_id.clone(),
+                request.request_id.clone(),
+                json!({"ok": true}),
+            )
+        });
+        let (client, server) = UnixStream::pair().unwrap();
+        let in_flight = Arc::new(Mutex::new(HashMap::new()));
+        let job_index = Arc::new(Mutex::new(HashMap::new()));
+        let server_task = tokio::spawn(async move {
+            handle_connection(server, &registry, &NoopTelemetry, in_flight, job_index)
+                .await
+                .unwrap();
+        });
+        let mut client = client;
+        let request = ExecutionRequest {
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            request_id: "req-cancel".to_string(),
+            job_id: "job-cancel".to_string(),
+            function_name: "sleep".to_string(),
+            args: vec![],
+            kwargs: std::collections::HashMap::new(),
+            context: ExecutionContext {
+                job_id: "job-cancel".to_string(),
+                attempt: 1,
+                enqueue_time: "2024-01-01T00:00:00Z".parse().unwrap(),
+                queue_name: "default".to_string(),
+                deadline: None,
+                trace_context: None,
+                worker_id: None,
+            },
+        };
+        let message = ExecutorMessage::Request {
+            payload: request.clone(),
+        };
+        write_message(&mut client, &message).await.unwrap();
+        let cancel = ExecutorMessage::Cancel {
+            payload: CancelRequest {
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                job_id: request.job_id.clone(),
+                request_id: Some(request.request_id.clone()),
+                hard_kill: false,
+            },
+        };
+        write_message(&mut client, &cancel).await.unwrap();
+        let response = read_message(&mut client).await.unwrap().unwrap();
+        match response {
+            ExecutorMessage::Response { payload } => {
+                assert_eq!(payload.status, OutcomeStatus::Error);
+                let error_type = payload
+                    .error
+                    .as_ref()
+                    .and_then(|error| error.error_type.as_deref());
+                assert_eq!(error_type, Some("cancelled"));
+            }
+            _ => panic!("expected response"),
+        }
+        drop(client);
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn execute_with_deadline_times_out() {
+        let mut registry = Registry::new();
+        registry.register("echo", |request| async move {
+            ExecutionOutcome::success(
+                request.job_id.clone(),
+                request.request_id.clone(),
+                json!({"ok": true}),
+            )
+        });
+        let mut request = build_request("echo");
+        request.context.deadline = Some(
+            "2020-01-01T00:00:00Z"
+                .parse::<chrono::DateTime<Utc>>()
+                .unwrap(),
+        );
+        let outcome = execute_with_deadline(request, registry, &NoopTelemetry).await;
+        assert_eq!(outcome.status, OutcomeStatus::Timeout);
+    }
+
+    #[tokio::test]
+    async fn execute_with_deadline_succeeds_before_deadline() {
+        let mut registry = Registry::new();
+        registry.register("echo", |request| async move {
+            ExecutionOutcome::success(
+                request.job_id.clone(),
+                request.request_id.clone(),
+                json!({"ok": true}),
+            )
+        });
+        let mut request = build_request("echo");
+        request.context.deadline = Some(Utc::now() + chrono::Duration::seconds(5));
+        let outcome = execute_with_deadline(request, registry, &NoopTelemetry).await;
+        assert_eq!(outcome.status, OutcomeStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn handle_connection_handles_unexpected_response_message() {
+        let registry = Registry::new();
+        let (client, server) = UnixStream::pair().unwrap();
+        let in_flight = Arc::new(Mutex::new(HashMap::new()));
+        let job_index = Arc::new(Mutex::new(HashMap::new()));
+        let server_task = tokio::spawn(async move {
+            handle_connection(server, &registry, &NoopTelemetry, in_flight, job_index)
+                .await
+                .unwrap();
+        });
+        let mut client = client;
+        let response = ExecutorMessage::Response {
+            payload: ExecutionOutcome::error("job-x", "req-x", "oops"),
+        };
+        write_message(&mut client, &response).await.unwrap();
+        let reply = read_message(&mut client).await.unwrap().unwrap();
+        match reply {
+            ExecutorMessage::Response { payload } => {
+                assert_eq!(payload.status, OutcomeStatus::Error);
+                assert!(
+                    payload
+                        .error
+                        .as_ref()
+                        .unwrap()
+                        .message
+                        .contains("unexpected response")
+                );
+            }
+            _ => panic!("expected response"),
+        }
+        drop(client);
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn handle_connection_cancels_by_job_id() {
+        let mut registry = Registry::new();
+        registry.register("sleep", |request| async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            ExecutionOutcome::success(
+                request.job_id.clone(),
+                request.request_id.clone(),
+                json!({"ok": true}),
+            )
+        });
+        let (client, server) = UnixStream::pair().unwrap();
+        let in_flight = Arc::new(Mutex::new(HashMap::new()));
+        let job_index = Arc::new(Mutex::new(HashMap::new()));
+        let server_task = tokio::spawn(async move {
+            handle_connection(server, &registry, &NoopTelemetry, in_flight, job_index)
+                .await
+                .unwrap();
+        });
+        let mut client = client;
+        let request = build_request("sleep");
+        let message = ExecutorMessage::Request {
+            payload: request.clone(),
+        };
+        write_message(&mut client, &message).await.unwrap();
+        let cancel = ExecutorMessage::Cancel {
+            payload: CancelRequest {
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                job_id: request.job_id.clone(),
+                request_id: None,
+                hard_kill: false,
+            },
+        };
+        write_message(&mut client, &cancel).await.unwrap();
+        let response = read_message(&mut client).await.unwrap().unwrap();
+        match response {
+            ExecutorMessage::Response { payload } => {
+                assert_eq!(payload.status, OutcomeStatus::Error);
+                let error_type = payload
+                    .error
+                    .as_ref()
+                    .and_then(|error| error.error_type.as_deref());
+                assert_eq!(error_type, Some("cancelled"));
+            }
+            _ => panic!("expected response"),
+        }
+        drop(client);
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn handle_cancel_ignores_invalid_protocol() {
+        let in_flight = Arc::new(Mutex::new(HashMap::new()));
+        let job_index = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, _rx) = mpsc::channel(1);
+        let handle = tokio::spawn(async {});
+        {
+            let mut guard = in_flight.lock().await;
+            guard.insert(
+                "req-1".to_string(),
+                InFlightTask {
+                    job_id: "job-1".to_string(),
+                    handle,
+                    response_tx: tx,
+                },
+            );
+        }
+        let payload = CancelRequest {
+            protocol_version: "0".to_string(),
+            job_id: "job-1".to_string(),
+            request_id: None,
+            hard_kill: false,
+        };
+        handle_cancel(payload, &in_flight, &job_index).await;
+        let guard = in_flight.lock().await;
+        assert!(guard.contains_key("req-1"));
+        guard.get("req-1").unwrap().handle.abort();
+    }
+
+    #[tokio::test]
+    async fn read_message_handles_empty_and_invalid_payloads() {
+        let (mut client, mut server) = tokio::io::duplex(64);
+        // length = 0
+        client.write_all(&0u32.to_be_bytes()).await.unwrap();
+        let err = read_message(&mut server).await.unwrap_err();
+        assert!(err.to_string().contains("payload cannot be empty"));
+
+        // invalid json
+        let (mut client, mut server) = tokio::io::duplex(64);
+        let payload = b"not-json";
+        let len = (payload.len() as u32).to_be_bytes();
+        client.write_all(&len).await.unwrap();
+        client.write_all(payload).await.unwrap();
+        let err = read_message(&mut server).await.unwrap_err();
+        assert!(err.to_string().contains("expected"));
+
+        // oversized payload
+        let (mut client, mut server) = tokio::io::duplex(64);
+        let len = ((MAX_FRAME_LEN + 1) as u32).to_be_bytes();
+        client.write_all(&len).await.unwrap();
+        let err = read_message(&mut server).await.unwrap_err();
+        assert!(err.to_string().contains("payload too large"));
+    }
+
+    #[tokio::test]
+    async fn read_message_returns_none_on_eof() {
+        let (client, mut server) = tokio::io::duplex(8);
+        drop(client);
+        let message = read_message(&mut server).await.unwrap();
+        assert!(message.is_none());
+    }
 }

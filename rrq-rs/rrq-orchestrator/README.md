@@ -6,13 +6,10 @@ runtime (`rrq.executor_runtime`).
 
 ## Status
 - Core worker loop, Redis store ops, socket executor pool, cron handling.
-- CLI parity for worker run/watch/check, queue/job/dlq, debug commands.
-- Engine conformance tests compare Rust outcomes to Python golden snapshots.
 
 ## Compatibility goals
 - Redis schema and key prefixes match the Python implementation.
 - Executor protocol matches `docs/EXECUTOR_PROTOCOL.md`.
-- Job lifecycle rules mirror the Python worker implementation (`reference/python-orchestrator/python/rrq/worker.py`).
 
 ## CLI
 

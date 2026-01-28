@@ -1,23 +1,28 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rrq_protocol::{
-    ExecutionOutcome, ExecutionRequest, ExecutorMessage, FRAME_HEADER_LEN, encode_frame,
+    CancelRequest, ExecutionOutcome, ExecutionRequest, ExecutorMessage, FRAME_HEADER_LEN,
+    PROTOCOL_VERSION, encode_frame,
 };
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, timeout};
 use uuid::Uuid;
 
 const ENV_EXECUTOR_SOCKET: &str = "RRQ_EXECUTOR_SOCKET";
 const DEFAULT_SOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 
 fn socket_path_max_len() -> Option<usize> {
     if cfg!(target_os = "macos") {
@@ -74,7 +79,7 @@ async fn resolve_socket_dir(
 #[async_trait]
 pub trait Executor: Send + Sync {
     async fn execute(&self, request: ExecutionRequest) -> Result<ExecutionOutcome>;
-    async fn cancel(&self, _job_id: &str) -> Result<()> {
+    async fn cancel(&self, _job_id: &str, _request_id: Option<&str>) -> Result<()> {
         Ok(())
     }
     async fn close(&self) -> Result<()> {
@@ -85,71 +90,44 @@ pub trait Executor: Send + Sync {
 struct SocketProcess {
     child: Child,
     socket_path: PathBuf,
-    stream: UnixStream,
     stdout_task: Option<JoinHandle<()>>,
     stderr_task: Option<JoinHandle<()>>,
-}
-
-struct ProcessGuard {
-    pool: Arc<SocketExecutorPool>,
-    proc: Option<SocketProcess>,
-}
-
-impl ProcessGuard {
-    fn new(pool: Arc<SocketExecutorPool>, proc: SocketProcess) -> Self {
-        Self {
-            pool,
-            proc: Some(proc),
-        }
-    }
-
-    fn proc_mut(&mut self) -> Result<&mut SocketProcess> {
-        self.proc.as_mut().context("executor process missing")
-    }
-
-    async fn release(&mut self) -> Result<()> {
-        if let Some(proc) = self.proc.take() {
-            self.pool.release(proc).await?;
-        }
-        Ok(())
-    }
-
-    async fn invalidate(&mut self) -> Result<()> {
-        if let Some(proc) = self.proc.take() {
-            self.pool.invalidate(proc).await?;
-        }
-        Ok(())
-    }
-}
-
-impl Drop for ProcessGuard {
-    fn drop(&mut self) {
-        if let Some(proc) = self.proc.take() {
-            let pool = self.pool.clone();
-            tokio::spawn(async move {
-                let _ = pool.invalidate(proc).await;
-            });
-        }
-    }
+    permits: Arc<Semaphore>,
 }
 
 pub struct SocketExecutorPool {
     cmd: Vec<String>,
     pool_size: usize,
+    max_in_flight: usize,
     env: Option<HashMap<String, String>>,
     cwd: Option<String>,
     socket_dir: PathBuf,
     owned_socket_dir: Option<PathBuf>,
-    idle: Mutex<Vec<SocketProcess>>,
-    notify: Notify,
+    processes: Mutex<Vec<Arc<Mutex<SocketProcess>>>>,
+    cursor: AtomicUsize,
+    availability: Arc<Notify>,
     response_timeout: Option<Duration>,
     connect_timeout: Duration,
+    #[cfg(test)]
+    spawn_override: Option<Arc<dyn Fn() -> SocketProcess + Send + Sync>>,
+}
+
+struct ProcessPermit {
+    _permit: OwnedSemaphorePermit,
+    notify: Arc<Notify>,
+}
+
+impl Drop for ProcessPermit {
+    fn drop(&mut self) {
+        self.notify.notify_one();
+    }
 }
 
 impl SocketExecutorPool {
     pub async fn new(
         cmd: Vec<String>,
         pool_size: usize,
+        max_in_flight: usize,
         env: Option<HashMap<String, String>>,
         cwd: Option<String>,
         socket_dir: Option<String>,
@@ -157,6 +135,9 @@ impl SocketExecutorPool {
     ) -> Result<Self> {
         if pool_size == 0 {
             return Err(anyhow::anyhow!("pool_size must be positive"));
+        }
+        if max_in_flight == 0 {
+            return Err(anyhow::anyhow!("max_in_flight must be positive"));
         }
         if cmd.is_empty() {
             return Err(anyhow::anyhow!("cmd must not be empty"));
@@ -167,27 +148,31 @@ impl SocketExecutorPool {
         let pool = Self {
             cmd,
             pool_size,
+            max_in_flight,
             env,
             cwd,
             socket_dir,
             owned_socket_dir,
-            idle: Mutex::new(Vec::new()),
-            notify: Notify::new(),
+            processes: Mutex::new(Vec::new()),
+            cursor: AtomicUsize::new(0),
+            availability: Arc::new(Notify::new()),
             response_timeout,
             connect_timeout: DEFAULT_SOCKET_CONNECT_TIMEOUT,
+            #[cfg(test)]
+            spawn_override: None,
         };
         pool.ensure_started().await?;
         Ok(pool)
     }
 
     async fn ensure_started(&self) -> Result<()> {
-        let mut idle = self.idle.lock().await;
-        if !idle.is_empty() {
+        let mut processes = self.processes.lock().await;
+        if !processes.is_empty() {
             return Ok(());
         }
         for _ in 0..self.pool_size {
             let proc = self.spawn_process().await?;
-            idle.push(proc);
+            processes.push(Arc::new(Mutex::new(proc)));
         }
         Ok(())
     }
@@ -198,6 +183,10 @@ impl SocketExecutorPool {
     }
 
     async fn spawn_process(&self) -> Result<SocketProcess> {
+        #[cfg(test)]
+        if let Some(spawn_override) = &self.spawn_override {
+            return Ok((spawn_override)());
+        }
         let socket_path = self.next_socket_path();
         self.validate_socket_path(&socket_path)?;
         if socket_path.exists() {
@@ -237,8 +226,10 @@ impl SocketExecutorPool {
             })
         });
 
-        let stream = match self.connect_socket(&socket_path, &mut child).await {
-            Ok(stream) => stream,
+        match self.connect_socket(&socket_path, &mut child).await {
+            Ok(stream) => {
+                drop(stream);
+            }
             Err(err) => {
                 if let Some(task) = stdout_task.as_ref() {
                     task.abort();
@@ -255,9 +246,9 @@ impl SocketExecutorPool {
         Ok(SocketProcess {
             child,
             socket_path,
-            stream,
             stdout_task,
             stderr_task,
+            permits: Arc::new(Semaphore::new(self.max_in_flight)),
         })
     }
 
@@ -313,45 +304,70 @@ set socket_dir to a shorter absolute path (e.g. /tmp/rrq).",
         }
     }
 
-    async fn acquire(&self) -> Result<SocketProcess> {
+    async fn acquire_process(&self) -> Result<(Arc<Mutex<SocketProcess>>, ProcessPermit)> {
+        self.ensure_started().await?;
         loop {
-            {
-                let mut idle = self.idle.lock().await;
-                if let Some(mut proc) = idle.pop() {
-                    if let Ok(Some(_)) = proc.child.try_wait() {
-                        proc = self.spawn_process().await?;
-                    }
-                    return Ok(proc);
+            let notified = self.availability.notified();
+            let processes = {
+                let guard = self.processes.lock().await;
+                if guard.is_empty() {
+                    return Err(anyhow::anyhow!("executor pool has no processes"));
+                }
+                guard.clone()
+            };
+            let start = self.cursor.fetch_add(1, Ordering::Relaxed);
+            for offset in 0..processes.len() {
+                let idx = (start + offset) % processes.len();
+                let proc = processes[idx].clone();
+                self.ensure_process(&proc).await?;
+                let permits = {
+                    let guard = proc.lock().await;
+                    guard.permits.clone()
+                };
+                if let Ok(permit) = permits.try_acquire_owned() {
+                    return Ok((
+                        proc,
+                        ProcessPermit {
+                            _permit: permit,
+                            notify: self.availability.clone(),
+                        },
+                    ));
                 }
             }
-            self.notify.notified().await;
+            notified.await;
         }
     }
 
-    async fn release(&self, proc: SocketProcess) -> Result<()> {
-        let mut idle = self.idle.lock().await;
-        idle.push(proc);
-        self.notify.notify_one();
+    async fn ensure_process(&self, proc: &Arc<Mutex<SocketProcess>>) -> Result<()> {
+        let needs_respawn = {
+            let mut guard = proc.lock().await;
+            match guard.child.try_wait() {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(_) => true,
+            }
+        };
+        if needs_respawn {
+            self.respawn(proc).await?;
+        }
         Ok(())
     }
 
-    async fn invalidate(&self, proc: SocketProcess) -> Result<()> {
-        self.terminate(proc).await?;
-        let mut idle = self.idle.lock().await;
-        let replacement = self.spawn_process().await?;
-        idle.push(replacement);
-        self.notify.notify_one();
+    async fn respawn(&self, proc: &Arc<Mutex<SocketProcess>>) -> Result<()> {
+        let mut guard = proc.lock().await;
+        let _ = self.terminate(&mut guard).await;
+        *guard = self.spawn_process().await?;
+        self.availability.notify_waiters();
         Ok(())
     }
 
-    async fn terminate(&self, mut proc: SocketProcess) -> Result<()> {
+    async fn terminate(&self, proc: &mut SocketProcess) -> Result<()> {
         if let Some(task) = proc.stdout_task.take() {
             task.abort();
         }
         if let Some(task) = proc.stderr_task.take() {
             task.abort();
         }
-        let _ = proc.stream.shutdown().await;
         let _ = proc.child.kill().await;
         let _ = proc.child.wait().await;
         let _ = tokio::fs::remove_file(&proc.socket_path).await;
@@ -359,10 +375,12 @@ set socket_dir to a shorter absolute path (e.g. /tmp/rrq).",
     }
 
     pub async fn close(&self) -> Result<()> {
-        let mut idle = self.idle.lock().await;
-        while let Some(proc) = idle.pop() {
-            let _ = self.terminate(proc).await;
+        let mut processes = self.processes.lock().await;
+        for proc in processes.iter() {
+            let mut guard = proc.lock().await;
+            let _ = self.terminate(&mut guard).await;
         }
+        processes.clear();
         if let Some(path) = &self.owned_socket_dir {
             let _ = tokio::fs::remove_dir_all(path).await;
         }
@@ -372,36 +390,76 @@ set socket_dir to a shorter absolute path (e.g. /tmp/rrq).",
 
 pub struct SocketExecutor {
     pool: Arc<SocketExecutorPool>,
+    in_flight: Arc<Mutex<HashMap<String, InFlightRequest>>>,
 }
 
 impl SocketExecutor {
     pub async fn new(
         cmd: Vec<String>,
         pool_size: usize,
+        max_in_flight: usize,
         env: Option<HashMap<String, String>>,
         cwd: Option<String>,
         socket_dir: Option<String>,
         response_timeout_seconds: Option<f64>,
     ) -> Result<Self> {
         let response_timeout = response_timeout_seconds.map(Duration::from_secs_f64);
-        let pool =
-            SocketExecutorPool::new(cmd, pool_size, env, cwd, socket_dir, response_timeout).await?;
+        let pool = SocketExecutorPool::new(
+            cmd,
+            pool_size,
+            max_in_flight,
+            env,
+            cwd,
+            socket_dir,
+            response_timeout,
+        )
+        .await?;
         Ok(Self {
             pool: Arc::new(pool),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
     async fn execute_with_process(
         &self,
-        proc: &mut SocketProcess,
+        proc: &Arc<Mutex<SocketProcess>>,
         request: &ExecutionRequest,
     ) -> Result<ExecutionOutcome> {
+        let mut socket_path = {
+            let guard = proc.lock().await;
+            guard.socket_path.clone()
+        };
+        let mut stream = match UnixStream::connect(&socket_path).await {
+            Ok(stream) => stream,
+            Err(err) => {
+                let refreshed = {
+                    let guard = proc.lock().await;
+                    guard.socket_path.clone()
+                };
+                if refreshed != socket_path {
+                    socket_path = refreshed;
+                    UnixStream::connect(&socket_path).await?
+                } else {
+                    return Err(err.into());
+                }
+            }
+        };
+        {
+            let mut in_flight = self.in_flight.lock().await;
+            in_flight.insert(
+                request.request_id.clone(),
+                InFlightRequest {
+                    job_id: request.job_id.clone(),
+                    socket_path: socket_path.clone(),
+                },
+            );
+        }
         let request_message = ExecutorMessage::Request {
             payload: request.clone(),
         };
-        write_message(&mut proc.stream, &request_message).await?;
+        write_message(&mut stream, &request_message).await?;
         let deadline = self.pool.response_timeout.map(|d| Instant::now() + d);
-        let read = read_message(&mut proc.stream);
+        let read = read_message(&mut stream);
         let message = if let Some(deadline) = deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -432,8 +490,8 @@ impl SocketExecutor {
                 }
                 Ok(payload)
             }
-            ExecutorMessage::Request { .. } => {
-                Err(anyhow::anyhow!("unexpected executor request message"))
+            ExecutorMessage::Request { .. } | ExecutorMessage::Cancel { .. } => {
+                Err(anyhow::anyhow!("unexpected executor message"))
             }
         }
     }
@@ -442,27 +500,78 @@ impl SocketExecutor {
 #[async_trait]
 impl Executor for SocketExecutor {
     async fn execute(&self, request: ExecutionRequest) -> Result<ExecutionOutcome> {
-        let proc = self.pool.acquire().await?;
-        let mut guard = ProcessGuard::new(self.pool.clone(), proc);
-        let result = {
-            let proc = guard.proc_mut()?;
-            self.execute_with_process(proc, &request).await
-        };
+        let (proc, _permit) = self.pool.acquire_process().await?;
+        let result = self.execute_with_process(&proc, &request).await;
+        {
+            let mut in_flight = self.in_flight.lock().await;
+            in_flight.remove(&request.request_id);
+        }
         match result {
-            Ok(outcome) => {
-                guard.release().await?;
-                Ok(outcome)
-            }
+            Ok(outcome) => Ok(outcome),
             Err(err) => {
-                guard.invalidate().await?;
+                let exited = {
+                    let mut guard = proc.lock().await;
+                    match guard.child.try_wait() {
+                        Ok(Some(_)) => true,
+                        Ok(None) => false,
+                        Err(_) => true,
+                    }
+                };
+                if exited {
+                    let _ = self.pool.respawn(&proc).await;
+                }
                 Err(err)
             }
         }
     }
 
+    async fn cancel(&self, job_id: &str, request_id: Option<&str>) -> Result<()> {
+        let target = {
+            let mut in_flight = self.in_flight.lock().await;
+            let resolved_request_id = if let Some(request_id) = request_id {
+                Some(request_id.to_string())
+            } else {
+                in_flight.iter().find_map(|(request_id, info)| {
+                    if info.job_id == job_id {
+                        Some(request_id.clone())
+                    } else {
+                        None
+                    }
+                })
+            };
+            let Some(request_id) = resolved_request_id else {
+                return Ok(());
+            };
+            let info = in_flight.remove(&request_id);
+            info.map(|info| (request_id, info))
+        };
+        let Some((request_id, info)) = target else {
+            return Ok(());
+        };
+        let mut stream = match UnixStream::connect(&info.socket_path).await {
+            Ok(stream) => stream,
+            Err(_) => return Ok(()),
+        };
+        let message = ExecutorMessage::Cancel {
+            payload: CancelRequest {
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                job_id: info.job_id,
+                request_id: Some(request_id),
+                hard_kill: false,
+            },
+        };
+        let _ = write_message(&mut stream, &message).await;
+        Ok(())
+    }
+
     async fn close(&self) -> Result<()> {
         self.pool.close().await
     }
+}
+
+struct InFlightRequest {
+    job_id: String,
+    socket_path: PathBuf,
 }
 
 pub fn resolve_executor_pool_sizes(
@@ -489,13 +598,40 @@ pub fn resolve_executor_pool_sizes(
     Ok(pool_sizes)
 }
 
+pub fn resolve_executor_max_in_flight(
+    settings: &crate::settings::RRQSettings,
+    watch_mode: bool,
+) -> Result<HashMap<String, usize>> {
+    let mut max_in_flight = HashMap::new();
+    for (name, config) in &settings.executors {
+        let limit = if watch_mode {
+            1
+        } else {
+            config.max_in_flight.unwrap_or(1)
+        };
+        if limit == 0 {
+            return Err(anyhow::anyhow!(
+                "max_in_flight must be positive for executor '{}'",
+                name
+            ));
+        }
+        max_in_flight.insert(name.clone(), limit);
+    }
+    Ok(max_in_flight)
+}
+
 pub async fn build_executors_from_settings(
     settings: &crate::settings::RRQSettings,
     pool_sizes: Option<&HashMap<String, usize>>,
+    max_in_flight: Option<&HashMap<String, usize>>,
 ) -> Result<HashMap<String, Arc<dyn Executor>>> {
     let pool_sizes = match pool_sizes {
         Some(map) => map.clone(),
         None => resolve_executor_pool_sizes(settings, false, None)?,
+    };
+    let max_in_flight = match max_in_flight {
+        Some(map) => map.clone(),
+        None => resolve_executor_max_in_flight(settings, false)?,
     };
     let mut executors: HashMap<String, Arc<dyn Executor>> = HashMap::new();
     for (name, config) in &settings.executors {
@@ -509,10 +645,15 @@ pub async fn build_executors_from_settings(
             .get(name)
             .copied()
             .ok_or_else(|| anyhow::anyhow!("missing pool size for executor '{}'", name))?;
+        let max_in_flight = max_in_flight
+            .get(name)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("missing max_in_flight for executor '{}'", name))?;
         let cmd = config.cmd.clone().unwrap_or_default();
         let executor = SocketExecutor::new(
             cmd,
             pool_size,
+            max_in_flight,
             config.env.clone(),
             config.cwd.clone(),
             config.socket_dir.clone(),
@@ -538,6 +679,9 @@ where
     if length == 0 {
         return Err(anyhow::anyhow!("executor message payload cannot be empty"));
     }
+    if length > MAX_FRAME_LEN {
+        return Err(anyhow::anyhow!("executor message payload too large"));
+    }
     let mut payload = vec![0u8; length];
     stream.read_exact(&mut payload).await?;
     let message = serde_json::from_slice(&payload)?;
@@ -557,6 +701,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::{ExecutorConfig, ExecutorType, RRQSettings};
+    use tokio::process::Command;
+    use tokio::time::sleep;
 
     #[tokio::test]
     async fn socket_framing_round_trip() {
@@ -591,5 +738,289 @@ mod tests {
             }
             _ => panic!("unexpected message variant"),
         }
+    }
+
+    fn build_test_pool(max_in_flight: usize) -> SocketExecutorPool {
+        let child = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
+        let socket_path = std::env::temp_dir().join(format!("rrq-test-{}.sock", Uuid::new_v4()));
+        let process = SocketProcess {
+            child,
+            socket_path,
+            stdout_task: None,
+            stderr_task: None,
+            permits: Arc::new(Semaphore::new(max_in_flight)),
+        };
+        SocketExecutorPool {
+            cmd: vec!["sleep".to_string(), "60".to_string()],
+            pool_size: 1,
+            max_in_flight,
+            env: None,
+            cwd: None,
+            socket_dir: std::env::temp_dir(),
+            owned_socket_dir: None,
+            processes: Mutex::new(vec![Arc::new(Mutex::new(process))]),
+            cursor: AtomicUsize::new(0),
+            availability: Arc::new(Notify::new()),
+            response_timeout: None,
+            connect_timeout: DEFAULT_SOCKET_CONNECT_TIMEOUT,
+            spawn_override: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn pool_enforces_per_process_max_in_flight() {
+        let pool = Arc::new(build_test_pool(1));
+        let (_proc, permit) = pool.acquire_process().await.unwrap();
+        let pool_clone = pool.clone();
+        let waiter = tokio::spawn(async move { pool_clone.acquire_process().await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished());
+        drop(permit);
+        let result = timeout(Duration::from_millis(200), waiter)
+            .await
+            .expect("acquire should complete after release");
+        let (_proc2, permit2) = result.expect("join failed").expect("acquire failed");
+        drop(permit2);
+        pool.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ensure_process_respawns_exited_child() {
+        let spawn_override = Arc::new(|| {
+            let socket_path =
+                std::env::temp_dir().join(format!("rrq-test-{}.sock", Uuid::new_v4()));
+            let child = Command::new("sleep").arg("60").spawn().unwrap();
+            SocketProcess {
+                child,
+                socket_path,
+                stdout_task: None,
+                stderr_task: None,
+                permits: Arc::new(Semaphore::new(1)),
+            }
+        });
+        let pool = SocketExecutorPool {
+            cmd: vec!["sleep".to_string(), "60".to_string()],
+            pool_size: 1,
+            max_in_flight: 1,
+            env: None,
+            cwd: None,
+            socket_dir: std::env::temp_dir(),
+            owned_socket_dir: None,
+            processes: Mutex::new(Vec::new()),
+            cursor: AtomicUsize::new(0),
+            availability: Arc::new(Notify::new()),
+            response_timeout: None,
+            connect_timeout: DEFAULT_SOCKET_CONNECT_TIMEOUT,
+            spawn_override: Some(spawn_override),
+        };
+        pool.ensure_started().await.unwrap();
+        let proc = {
+            let processes = pool.processes.lock().await;
+            processes.first().cloned().unwrap()
+        };
+        let old_socket = { proc.lock().await.socket_path.clone() };
+        {
+            let mut guard = proc.lock().await;
+            let _ = guard.child.kill().await;
+            let _ = guard.child.wait().await;
+        }
+        sleep(Duration::from_millis(50)).await;
+        pool.ensure_process(&proc).await.unwrap();
+        let new_socket = { proc.lock().await.socket_path.clone() };
+        assert_ne!(old_socket, new_socket);
+        pool.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_socket_errors_when_child_exits() {
+        let pool = SocketExecutorPool {
+            cmd: vec!["true".to_string()],
+            pool_size: 1,
+            max_in_flight: 1,
+            env: None,
+            cwd: None,
+            socket_dir: std::env::temp_dir(),
+            owned_socket_dir: None,
+            processes: Mutex::new(Vec::new()),
+            cursor: AtomicUsize::new(0),
+            availability: Arc::new(Notify::new()),
+            response_timeout: None,
+            connect_timeout: Duration::from_millis(50),
+            spawn_override: None,
+        };
+        let socket_path = std::env::temp_dir().join(format!("rrq-missing-{}.sock", Uuid::new_v4()));
+        let mut child = Command::new("true").spawn().unwrap();
+        let err = pool
+            .connect_socket(&socket_path, &mut child)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("executor exited before socket ready")
+        );
+    }
+
+    #[test]
+    fn resolve_pool_sizes_and_max_in_flight_watch_mode() {
+        let mut settings = RRQSettings::default();
+        let mut executors = HashMap::new();
+        executors.insert(
+            "python".to_string(),
+            ExecutorConfig {
+                executor_type: ExecutorType::Socket,
+                cmd: Some(vec!["rrq-executor".to_string()]),
+                pool_size: Some(4),
+                max_in_flight: Some(5),
+                env: None,
+                cwd: None,
+                socket_dir: None,
+                response_timeout_seconds: None,
+            },
+        );
+        settings.executors = executors;
+
+        let pool_sizes = resolve_executor_pool_sizes(&settings, true, None).unwrap();
+        let max_in_flight = resolve_executor_max_in_flight(&settings, true).unwrap();
+        assert_eq!(pool_sizes.get("python"), Some(&1));
+        assert_eq!(max_in_flight.get("python"), Some(&1));
+    }
+
+    #[test]
+    fn resolve_pool_sizes_and_max_in_flight_validate_zero() {
+        let mut settings = RRQSettings::default();
+        let mut executors = HashMap::new();
+        executors.insert(
+            "python".to_string(),
+            ExecutorConfig {
+                executor_type: ExecutorType::Socket,
+                cmd: Some(vec!["rrq-executor".to_string()]),
+                pool_size: Some(0),
+                max_in_flight: Some(0),
+                env: None,
+                cwd: None,
+                socket_dir: None,
+                response_timeout_seconds: None,
+            },
+        );
+        settings.executors = executors;
+
+        let err = resolve_executor_pool_sizes(&settings, false, None).unwrap_err();
+        assert!(err.to_string().contains("pool_size must be positive"));
+        let err = resolve_executor_max_in_flight(&settings, false).unwrap_err();
+        assert!(err.to_string().contains("max_in_flight must be positive"));
+    }
+
+    #[tokio::test]
+    async fn cancel_sends_cancel_message() {
+        let socket_path = std::env::temp_dir().join(format!("rrq-cancel-{}.sock", Uuid::new_v4()));
+        let _ = tokio::fs::remove_file(&socket_path).await;
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let message = read_message(&mut stream).await.unwrap().unwrap();
+            match message {
+                ExecutorMessage::Cancel { payload } => {
+                    assert_eq!(payload.job_id, "job-1");
+                    assert_eq!(payload.request_id.as_deref(), Some("req-1"));
+                }
+                _ => panic!("expected cancel message"),
+            }
+        });
+
+        let pool = build_test_pool(1);
+        let executor = SocketExecutor {
+            pool: Arc::new(pool),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
+        };
+        {
+            let mut in_flight = executor.in_flight.lock().await;
+            in_flight.insert(
+                "req-1".to_string(),
+                InFlightRequest {
+                    job_id: "job-1".to_string(),
+                    socket_path: socket_path.clone(),
+                },
+            );
+        }
+        executor.cancel("job-1", None).await.unwrap();
+        server.await.unwrap();
+
+        let in_flight = executor.in_flight.lock().await;
+        assert!(in_flight.is_empty());
+        let _ = tokio::fs::remove_file(&socket_path).await;
+    }
+
+    #[tokio::test]
+    async fn execute_with_process_rejects_mismatched_request_id() {
+        let socket_path =
+            std::env::temp_dir().join(format!("rrq-mismatch-{}.sock", Uuid::new_v4()));
+        let _ = tokio::fs::remove_file(&socket_path).await;
+        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let message = read_message(&mut stream).await.unwrap().unwrap();
+            let request = match message {
+                ExecutorMessage::Request { payload } => payload,
+                _ => panic!("expected request"),
+            };
+            let response = ExecutionOutcome::success(
+                request.job_id,
+                "wrong-req",
+                serde_json::json!({"ok": true}),
+            );
+            write_message(
+                &mut stream,
+                &ExecutorMessage::Response { payload: response },
+            )
+            .await
+            .unwrap();
+        });
+
+        let child = Command::new("sleep").arg("60").spawn().unwrap();
+        let process = SocketProcess {
+            child,
+            socket_path: socket_path.clone(),
+            stdout_task: None,
+            stderr_task: None,
+            permits: Arc::new(Semaphore::new(1)),
+        };
+        let proc = Arc::new(Mutex::new(process));
+        let executor = SocketExecutor {
+            pool: Arc::new(build_test_pool(1)),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        let request = ExecutionRequest {
+            protocol_version: rrq_protocol::PROTOCOL_VERSION.to_string(),
+            request_id: "req-1".to_string(),
+            job_id: "job-1".to_string(),
+            function_name: "echo".to_string(),
+            args: Vec::new(),
+            kwargs: HashMap::new(),
+            context: rrq_protocol::ExecutionContext {
+                job_id: "job-1".to_string(),
+                attempt: 1,
+                enqueue_time: "2024-01-01T00:00:00Z".parse().unwrap(),
+                queue_name: "default".to_string(),
+                deadline: None,
+                trace_context: None,
+                worker_id: None,
+            },
+        };
+        let err = executor
+            .execute_with_process(&proc, &request)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("request_id mismatch"));
+
+        server.await.unwrap();
+        let _ = tokio::fs::remove_file(&socket_path).await;
+        let mut guard = proc.lock().await;
+        let _ = guard.child.kill().await;
+        let _ = guard.child.wait().await;
     }
 }
