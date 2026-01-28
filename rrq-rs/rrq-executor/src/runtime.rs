@@ -497,4 +497,167 @@ mod tests {
         let outcome = execute_with_deadline(request, registry, &NoopTelemetry).await;
         assert_eq!(outcome.status, OutcomeStatus::Timeout);
     }
+
+    #[tokio::test]
+    async fn execute_with_deadline_succeeds_before_deadline() {
+        let mut registry = Registry::new();
+        registry.register("echo", |request| async move {
+            ExecutionOutcome::success(
+                request.job_id.clone(),
+                request.request_id.clone(),
+                json!({"ok": true}),
+            )
+        });
+        let mut request = build_request("echo");
+        request.context.deadline = Some(Utc::now() + chrono::Duration::seconds(5));
+        let outcome = execute_with_deadline(request, registry, &NoopTelemetry).await;
+        assert_eq!(outcome.status, OutcomeStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn handle_connection_handles_unexpected_response_message() {
+        let registry = Registry::new();
+        let (client, server) = UnixStream::pair().unwrap();
+        let in_flight = Arc::new(Mutex::new(HashMap::new()));
+        let job_index = Arc::new(Mutex::new(HashMap::new()));
+        let server_task = tokio::spawn(async move {
+            handle_connection(server, &registry, &NoopTelemetry, in_flight, job_index)
+                .await
+                .unwrap();
+        });
+        let mut client = client;
+        let response = ExecutorMessage::Response {
+            payload: ExecutionOutcome::error("job-x", "req-x", "oops"),
+        };
+        write_message(&mut client, &response).await.unwrap();
+        let reply = read_message(&mut client).await.unwrap().unwrap();
+        match reply {
+            ExecutorMessage::Response { payload } => {
+                assert_eq!(payload.status, OutcomeStatus::Error);
+                assert!(
+                    payload
+                        .error
+                        .as_ref()
+                        .unwrap()
+                        .message
+                        .contains("unexpected response")
+                );
+            }
+            _ => panic!("expected response"),
+        }
+        drop(client);
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn handle_connection_cancels_by_job_id() {
+        let mut registry = Registry::new();
+        registry.register("sleep", |request| async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            ExecutionOutcome::success(
+                request.job_id.clone(),
+                request.request_id.clone(),
+                json!({"ok": true}),
+            )
+        });
+        let (client, server) = UnixStream::pair().unwrap();
+        let in_flight = Arc::new(Mutex::new(HashMap::new()));
+        let job_index = Arc::new(Mutex::new(HashMap::new()));
+        let server_task = tokio::spawn(async move {
+            handle_connection(server, &registry, &NoopTelemetry, in_flight, job_index)
+                .await
+                .unwrap();
+        });
+        let mut client = client;
+        let request = build_request("sleep");
+        let message = ExecutorMessage::Request {
+            payload: request.clone(),
+        };
+        write_message(&mut client, &message).await.unwrap();
+        let cancel = ExecutorMessage::Cancel {
+            payload: CancelRequest {
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                job_id: request.job_id.clone(),
+                request_id: None,
+                hard_kill: false,
+            },
+        };
+        write_message(&mut client, &cancel).await.unwrap();
+        let response = read_message(&mut client).await.unwrap().unwrap();
+        match response {
+            ExecutorMessage::Response { payload } => {
+                assert_eq!(payload.status, OutcomeStatus::Error);
+                let error_type = payload
+                    .error
+                    .as_ref()
+                    .and_then(|error| error.error_type.as_deref());
+                assert_eq!(error_type, Some("cancelled"));
+            }
+            _ => panic!("expected response"),
+        }
+        drop(client);
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn handle_cancel_ignores_invalid_protocol() {
+        let in_flight = Arc::new(Mutex::new(HashMap::new()));
+        let job_index = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, _rx) = mpsc::channel(1);
+        let handle = tokio::spawn(async {});
+        {
+            let mut guard = in_flight.lock().await;
+            guard.insert(
+                "req-1".to_string(),
+                InFlightTask {
+                    job_id: "job-1".to_string(),
+                    handle,
+                    response_tx: tx,
+                },
+            );
+        }
+        let payload = CancelRequest {
+            protocol_version: "0".to_string(),
+            job_id: "job-1".to_string(),
+            request_id: None,
+            hard_kill: false,
+        };
+        handle_cancel(payload, &in_flight, &job_index).await;
+        let guard = in_flight.lock().await;
+        assert!(guard.contains_key("req-1"));
+        guard.get("req-1").unwrap().handle.abort();
+    }
+
+    #[tokio::test]
+    async fn read_message_handles_empty_and_invalid_payloads() {
+        let (mut client, mut server) = tokio::io::duplex(64);
+        // length = 0
+        client.write_all(&0u32.to_be_bytes()).await.unwrap();
+        let err = read_message(&mut server).await.unwrap_err();
+        assert!(err.to_string().contains("payload cannot be empty"));
+
+        // invalid json
+        let (mut client, mut server) = tokio::io::duplex(64);
+        let payload = b"not-json";
+        let len = (payload.len() as u32).to_be_bytes();
+        client.write_all(&len).await.unwrap();
+        client.write_all(payload).await.unwrap();
+        let err = read_message(&mut server).await.unwrap_err();
+        assert!(err.to_string().contains("expected"));
+
+        // oversized payload
+        let (mut client, mut server) = tokio::io::duplex(64);
+        let len = ((MAX_FRAME_LEN + 1) as u32).to_be_bytes();
+        client.write_all(&len).await.unwrap();
+        let err = read_message(&mut server).await.unwrap_err();
+        assert!(err.to_string().contains("payload too large"));
+    }
+
+    #[tokio::test]
+    async fn read_message_returns_none_on_eof() {
+        let (client, mut server) = tokio::io::duplex(8);
+        drop(client);
+        let message = read_message(&mut server).await.unwrap();
+        assert!(message.is_none());
+    }
 }

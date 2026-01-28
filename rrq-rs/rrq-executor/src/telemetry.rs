@@ -25,6 +25,41 @@ impl Telemetry for NoopTelemetry {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ExecutionContext, ExecutionRequest};
+
+    fn build_request() -> ExecutionRequest {
+        ExecutionRequest {
+            protocol_version: "1".to_string(),
+            request_id: "req-1".to_string(),
+            job_id: "job-1".to_string(),
+            function_name: "handler".to_string(),
+            args: vec![],
+            kwargs: std::collections::HashMap::new(),
+            context: ExecutionContext {
+                job_id: "job-1".to_string(),
+                attempt: 1,
+                enqueue_time: "2024-01-01T00:00:00Z".parse().unwrap(),
+                queue_name: "default".to_string(),
+                deadline: None,
+                trace_context: None,
+                worker_id: None,
+            },
+        }
+    }
+
+    #[test]
+    fn noop_telemetry_clone_box_works() {
+        let telemetry: Box<dyn Telemetry> = Box::new(NoopTelemetry);
+        let cloned = telemetry.clone();
+        let request = build_request();
+        let span = cloned.executor_span(&request);
+        let _guard = span.enter();
+    }
+}
+
 #[cfg(feature = "otel")]
 pub mod otel {
     use std::collections::HashMap;
