@@ -2,13 +2,13 @@ use crate::registry::Registry;
 use crate::telemetry::{NoopTelemetry, Telemetry};
 use crate::types::{ExecutionError, ExecutionOutcome};
 use chrono::{DateTime, Utc};
-use rrq_protocol::{encode_frame, CancelRequest, ExecutorMessage, OutcomeStatus, PROTOCOL_VERSION};
+use rrq_protocol::{CancelRequest, ExecutorMessage, OutcomeStatus, PROTOCOL_VERSION, encode_frame};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 pub const ENV_EXECUTOR_SOCKET: &str = "RRQ_EXECUTOR_SOCKET";
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -280,7 +280,7 @@ async fn execute_with_deadline<T: Telemetry + ?Sized>(
                         job_id.clone(),
                         request_id.clone(),
                         "Job execution timed out",
-                    )
+                    );
                 }
             }
         }

@@ -37,7 +37,8 @@ pub(crate) async fn run_worker(
     let effective_concurrency = std::cmp::max(1, effective_concurrency);
     let mut settings = settings;
     settings.worker_concurrency = effective_concurrency;
-    let executors = build_executors_from_settings(&settings, Some(&pool_sizes)).await?;
+    let executors =
+        build_executors_from_settings(&settings, Some(&pool_sizes), Some(&max_in_flight)).await?;
     let queues = if queues.is_empty() {
         None
     } else {
@@ -259,7 +260,9 @@ pub(crate) async fn run_worker_watch(
         let mut settings = settings;
         settings.worker_concurrency = effective_concurrency;
         settings.worker_shutdown_grace_period_seconds = 0.0;
-        let executors = build_executors_from_settings(&settings, Some(&pool_sizes)).await?;
+        let executors =
+            build_executors_from_settings(&settings, Some(&pool_sizes), Some(&max_in_flight))
+                .await?;
         let queue_arg = if queues.is_empty() {
             None
         } else {

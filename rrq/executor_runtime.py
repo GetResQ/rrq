@@ -53,42 +53,44 @@ async def _execute_and_respond(
     inflight_lock: asyncio.Lock,
 ) -> None:
     try:
-        outcome = await _execute_with_deadline(executor, request)
-    except HandlerNotFound as exc:
-        outcome = ExecutionOutcome(
-            job_id=request.job_id,
-            request_id=request.request_id,
-            status="error",
-            error=ExecutionError(
-                message=str(exc),
-                type="handler_not_found",
-            ),
-        )
-    except asyncio.CancelledError:
-        outcome = ExecutionOutcome(
-            job_id=request.job_id,
-            request_id=request.request_id,
-            status="error",
-            error=ExecutionError(message="Job cancelled", type="cancelled"),
-        )
-    except asyncio.TimeoutError as exc:
-        outcome = ExecutionOutcome(
-            job_id=request.job_id,
-            request_id=request.request_id,
-            status="timeout",
-            error=ExecutionError(message=str(exc) or "Job execution timed out."),
-        )
-    except Exception as exc:
-        outcome = ExecutionOutcome(
-            job_id=request.job_id,
-            request_id=request.request_id,
-            status="error",
-            error=ExecutionError(message=str(exc)),
-        )
-    await _write_outcome(writer, outcome, write_lock)
-    async with inflight_lock:
-        in_flight.pop(request.request_id, None)
-        job_index.pop(request.job_id, None)
+        try:
+            outcome = await _execute_with_deadline(executor, request)
+        except HandlerNotFound as exc:
+            outcome = ExecutionOutcome(
+                job_id=request.job_id,
+                request_id=request.request_id,
+                status="error",
+                error=ExecutionError(
+                    message=str(exc),
+                    type="handler_not_found",
+                ),
+            )
+        except asyncio.CancelledError:
+            outcome = ExecutionOutcome(
+                job_id=request.job_id,
+                request_id=request.request_id,
+                status="error",
+                error=ExecutionError(message="Job cancelled", type="cancelled"),
+            )
+        except asyncio.TimeoutError as exc:
+            outcome = ExecutionOutcome(
+                job_id=request.job_id,
+                request_id=request.request_id,
+                status="timeout",
+                error=ExecutionError(message=str(exc) or "Job execution timed out."),
+            )
+        except Exception as exc:
+            outcome = ExecutionOutcome(
+                job_id=request.job_id,
+                request_id=request.request_id,
+                status="error",
+                error=ExecutionError(message=str(exc)),
+            )
+        await _write_outcome(writer, outcome, write_lock)
+    finally:
+        async with inflight_lock:
+            in_flight.pop(request.request_id, None)
+            job_index.pop(request.job_id, None)
 
 
 async def _execute_with_deadline(
@@ -172,14 +174,7 @@ async def _handle_connection(
                 request = ExecutionRequest.model_validate(payload)
 
                 if not ready_event.is_set():
-                    outcome = ExecutionOutcome(
-                        job_id=request.job_id,
-                        request_id=request.request_id,
-                        status="error",
-                        error=ExecutionError(message="Executor not ready"),
-                    )
-                    await _write_outcome(writer, outcome, write_lock)
-                    continue
+                    await ready_event.wait()
 
                 if request.protocol_version != "1":
                     outcome = ExecutionOutcome(

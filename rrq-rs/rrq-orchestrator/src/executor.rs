@@ -2,20 +2,20 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rrq_protocol::{
-    encode_frame, CancelRequest, ExecutionOutcome, ExecutionRequest, ExecutorMessage,
-    FRAME_HEADER_LEN, PROTOCOL_VERSION,
+    CancelRequest, ExecutionOutcome, ExecutionRequest, ExecutorMessage, FRAME_HEADER_LEN,
+    PROTOCOL_VERSION, encode_frame,
 };
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, timeout};
 use uuid::Uuid;
@@ -92,25 +92,40 @@ struct SocketProcess {
     socket_path: PathBuf,
     stdout_task: Option<JoinHandle<()>>,
     stderr_task: Option<JoinHandle<()>>,
+    permits: Arc<Semaphore>,
 }
 
 pub struct SocketExecutorPool {
     cmd: Vec<String>,
     pool_size: usize,
+    max_in_flight: usize,
     env: Option<HashMap<String, String>>,
     cwd: Option<String>,
     socket_dir: PathBuf,
     owned_socket_dir: Option<PathBuf>,
     processes: Mutex<Vec<Arc<Mutex<SocketProcess>>>>,
     cursor: AtomicUsize,
+    availability: Arc<Notify>,
     response_timeout: Option<Duration>,
     connect_timeout: Duration,
+}
+
+struct ProcessPermit {
+    _permit: OwnedSemaphorePermit,
+    notify: Arc<Notify>,
+}
+
+impl Drop for ProcessPermit {
+    fn drop(&mut self) {
+        self.notify.notify_one();
+    }
 }
 
 impl SocketExecutorPool {
     pub async fn new(
         cmd: Vec<String>,
         pool_size: usize,
+        max_in_flight: usize,
         env: Option<HashMap<String, String>>,
         cwd: Option<String>,
         socket_dir: Option<String>,
@@ -118,6 +133,9 @@ impl SocketExecutorPool {
     ) -> Result<Self> {
         if pool_size == 0 {
             return Err(anyhow::anyhow!("pool_size must be positive"));
+        }
+        if max_in_flight == 0 {
+            return Err(anyhow::anyhow!("max_in_flight must be positive"));
         }
         if cmd.is_empty() {
             return Err(anyhow::anyhow!("cmd must not be empty"));
@@ -128,12 +146,14 @@ impl SocketExecutorPool {
         let pool = Self {
             cmd,
             pool_size,
+            max_in_flight,
             env,
             cwd,
             socket_dir,
             owned_socket_dir,
             processes: Mutex::new(Vec::new()),
             cursor: AtomicUsize::new(0),
+            availability: Arc::new(Notify::new()),
             response_timeout,
             connect_timeout: DEFAULT_SOCKET_CONNECT_TIMEOUT,
         };
@@ -220,6 +240,7 @@ impl SocketExecutorPool {
             socket_path,
             stdout_task,
             stderr_task,
+            permits: Arc::new(Semaphore::new(self.max_in_flight)),
         })
     }
 
@@ -275,17 +296,38 @@ set socket_dir to a shorter absolute path (e.g. /tmp/rrq).",
         }
     }
 
-    async fn next_process(&self) -> Result<Arc<Mutex<SocketProcess>>> {
+    async fn acquire_process(&self) -> Result<(Arc<Mutex<SocketProcess>>, ProcessPermit)> {
         self.ensure_started().await?;
-        let processes = self.processes.lock().await;
-        if processes.is_empty() {
-            return Err(anyhow::anyhow!("executor pool has no processes"));
+        loop {
+            let notified = self.availability.notified();
+            let processes = {
+                let guard = self.processes.lock().await;
+                if guard.is_empty() {
+                    return Err(anyhow::anyhow!("executor pool has no processes"));
+                }
+                guard.clone()
+            };
+            let start = self.cursor.fetch_add(1, Ordering::Relaxed);
+            for offset in 0..processes.len() {
+                let idx = (start + offset) % processes.len();
+                let proc = processes[idx].clone();
+                self.ensure_process(&proc).await?;
+                let permits = {
+                    let guard = proc.lock().await;
+                    guard.permits.clone()
+                };
+                if let Ok(permit) = permits.try_acquire_owned() {
+                    return Ok((
+                        proc,
+                        ProcessPermit {
+                            _permit: permit,
+                            notify: self.availability.clone(),
+                        },
+                    ));
+                }
+            }
+            notified.await;
         }
-        let idx = self.cursor.fetch_add(1, Ordering::Relaxed) % processes.len();
-        let proc = processes[idx].clone();
-        drop(processes);
-        self.ensure_process(&proc).await?;
-        Ok(proc)
     }
 
     async fn ensure_process(&self, proc: &Arc<Mutex<SocketProcess>>) -> Result<()> {
@@ -307,6 +349,7 @@ set socket_dir to a shorter absolute path (e.g. /tmp/rrq).",
         let mut guard = proc.lock().await;
         let _ = self.terminate(&mut guard).await;
         *guard = self.spawn_process().await?;
+        self.availability.notify_waiters();
         Ok(())
     }
 
@@ -346,14 +389,23 @@ impl SocketExecutor {
     pub async fn new(
         cmd: Vec<String>,
         pool_size: usize,
+        max_in_flight: usize,
         env: Option<HashMap<String, String>>,
         cwd: Option<String>,
         socket_dir: Option<String>,
         response_timeout_seconds: Option<f64>,
     ) -> Result<Self> {
         let response_timeout = response_timeout_seconds.map(Duration::from_secs_f64);
-        let pool =
-            SocketExecutorPool::new(cmd, pool_size, env, cwd, socket_dir, response_timeout).await?;
+        let pool = SocketExecutorPool::new(
+            cmd,
+            pool_size,
+            max_in_flight,
+            env,
+            cwd,
+            socket_dir,
+            response_timeout,
+        )
+        .await?;
         Ok(Self {
             pool: Arc::new(pool),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
@@ -440,7 +492,7 @@ impl SocketExecutor {
 #[async_trait]
 impl Executor for SocketExecutor {
     async fn execute(&self, request: ExecutionRequest) -> Result<ExecutionOutcome> {
-        let proc = self.pool.next_process().await?;
+        let (proc, _permit) = self.pool.acquire_process().await?;
         let result = self.execute_with_process(&proc, &request).await;
         {
             let mut in_flight = self.in_flight.lock().await;
@@ -563,12 +615,16 @@ pub fn resolve_executor_max_in_flight(
 pub async fn build_executors_from_settings(
     settings: &crate::settings::RRQSettings,
     pool_sizes: Option<&HashMap<String, usize>>,
+    max_in_flight: Option<&HashMap<String, usize>>,
 ) -> Result<HashMap<String, Arc<dyn Executor>>> {
     let pool_sizes = match pool_sizes {
         Some(map) => map.clone(),
         None => resolve_executor_pool_sizes(settings, false, None)?,
     };
-    let _ = resolve_executor_max_in_flight(settings, false)?;
+    let max_in_flight = match max_in_flight {
+        Some(map) => map.clone(),
+        None => resolve_executor_max_in_flight(settings, false)?,
+    };
     let mut executors: HashMap<String, Arc<dyn Executor>> = HashMap::new();
     for (name, config) in &settings.executors {
         if config.cmd.is_none() {
@@ -581,10 +637,15 @@ pub async fn build_executors_from_settings(
             .get(name)
             .copied()
             .ok_or_else(|| anyhow::anyhow!("missing pool size for executor '{}'", name))?;
+        let max_in_flight = max_in_flight
+            .get(name)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("missing max_in_flight for executor '{}'", name))?;
         let cmd = config.cmd.clone().unwrap_or_default();
         let executor = SocketExecutor::new(
             cmd,
             pool_size,
+            max_in_flight,
             config.env.clone(),
             config.cwd.clone(),
             config.socket_dir.clone(),
@@ -632,6 +693,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::process::Command;
 
     #[tokio::test]
     async fn socket_framing_round_trip() {
@@ -666,5 +728,51 @@ mod tests {
             }
             _ => panic!("unexpected message variant"),
         }
+    }
+
+    fn build_test_pool(max_in_flight: usize) -> SocketExecutorPool {
+        let child = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
+        let socket_path = std::env::temp_dir().join(format!("rrq-test-{}.sock", Uuid::new_v4()));
+        let process = SocketProcess {
+            child,
+            socket_path,
+            stdout_task: None,
+            stderr_task: None,
+            permits: Arc::new(Semaphore::new(max_in_flight)),
+        };
+        SocketExecutorPool {
+            cmd: vec!["sleep".to_string(), "60".to_string()],
+            pool_size: 1,
+            max_in_flight,
+            env: None,
+            cwd: None,
+            socket_dir: std::env::temp_dir(),
+            owned_socket_dir: None,
+            processes: Mutex::new(vec![Arc::new(Mutex::new(process))]),
+            cursor: AtomicUsize::new(0),
+            availability: Arc::new(Notify::new()),
+            response_timeout: None,
+            connect_timeout: DEFAULT_SOCKET_CONNECT_TIMEOUT,
+        }
+    }
+
+    #[tokio::test]
+    async fn pool_enforces_per_process_max_in_flight() {
+        let pool = Arc::new(build_test_pool(1));
+        let (_proc, permit) = pool.acquire_process().await.unwrap();
+        let pool_clone = pool.clone();
+        let waiter = tokio::spawn(async move { pool_clone.acquire_process().await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished());
+        drop(permit);
+        let result = timeout(Duration::from_millis(200), waiter)
+            .await
+            .expect("acquire should complete after release");
+        let (_proc2, permit2) = result.expect("join failed").expect("acquire failed");
+        drop(permit2);
+        pool.close().await.unwrap();
     }
 }
