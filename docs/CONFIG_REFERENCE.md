@@ -36,7 +36,6 @@ understand (for example, `cron_jobs` and `watch`).
 | `default_result_ttl_seconds` | int | `86400` | `RRQ_DEFAULT_RESULT_TTL_SECONDS` | TTL for successful job results. |
 | `default_poll_delay_seconds` | float | `0.1` | `RRQ_DEFAULT_POLL_DELAY_SECONDS` | Worker sleep when queues are empty. |
 | `default_unique_job_lock_ttl_seconds` | int | `21600` | `RRQ_DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS` | TTL for unique job locks. |
-| `worker_concurrency` | int | `10` | `RRQ_WORKER_CONCURRENCY` | Overridden at runtime to sum of executor pool sizes. |
 | `default_executor_name` | string | `"python"` | `RRQ_DEFAULT_EXECUTOR_NAME` | Must match a configured executor. |
 | `executors` | table | `{}` | — | Map of executor configs. See below. |
 | `executor_routes` | table | `{}` | — | Map of `queue_name = "executor"`. |
@@ -63,6 +62,7 @@ Executor configuration for Unix socket runtimes (Python, Rust, or other).
 | `type` | string | `"socket"` | Only `socket` is supported. |
 | `cmd` | array of strings | required | Command to start the executor. |
 | `pool_size` | int | CPU count | Forced to `1` in watch mode. |
+| `max_in_flight` | int | `1` | Max concurrent requests per executor process. |
 | `env` | table | — | Extra environment variables for the executor process. |
 | `cwd` | string | — | Working directory for the executor process. |
 | `socket_dir` | string | temp dir | Directory where executor sockets are created. |
@@ -121,7 +121,7 @@ unique = true
 ## [rrq.watch]
 
 Defaults for `rrq worker watch`. CLI flags override these values. Watch mode
-also forces executor pool sizes to `1` and sets
+also forces executor pool sizes and `max_in_flight` to `1` and sets
 `worker_shutdown_grace_period_seconds` to `0`.
 
 | Key | Type | Default | Notes |

@@ -25,6 +25,7 @@ class ExecutorConfig(BaseModel):
     type: Literal["socket"] = "socket"
     cmd: list[str] | None = None
     pool_size: int | None = None
+    max_in_flight: int | None = None
     env: dict[str, str] | None = None
     cwd: str | None = None
     socket_dir: str | None = None
@@ -77,8 +78,8 @@ class RRQSettings(BaseModel):
     worker_concurrency: int = Field(
         default=10,
         description=(
-            "Effective number of concurrent jobs a single worker process can handle. "
-            "This value is derived from executor pool sizes at runtime."
+            "Internal concurrency limit used by the worker runtime; "
+            "computed from executor pool sizes and max_in_flight."
         ),
     )
     default_executor_name: str = Field(

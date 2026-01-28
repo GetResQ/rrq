@@ -66,6 +66,7 @@ fn normalize_toml_payload(mut payload: Value) -> Result<Value> {
         if let Some(routing) = map.remove("routing") {
             map.insert("executor_routes".to_string(), routing);
         }
+        map.remove("worker_concurrency");
         return Ok(Value::Object(map));
     }
 
@@ -108,7 +109,6 @@ fn env_overrides() -> Result<Value> {
         "default_unique_job_lock_ttl_seconds",
         "RRQ_DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS",
     )?;
-    set_env_int(&mut payload, "worker_concurrency", "RRQ_WORKER_CONCURRENCY")?;
     set_env_string(
         &mut payload,
         "default_executor_name",

@@ -134,7 +134,8 @@ asyncio.run(main())
 `rrq.toml` is the source of truth for the orchestrator and executors. Key areas:
 
 - `[rrq]` basic settings (Redis, retries, timeouts, poll delay)
-- `[rrq.executors.<name>]` socket executor commands and pool sizes
+- `[rrq.executors.<name>]` socket executor commands, pool sizes, and
+  `max_in_flight`
 - `[rrq.routing]` queue → executor mapping
 - `[[rrq.cron_jobs]]` periodic scheduling
 - `[rrq.watch]` watch mode defaults (path/patterns)
@@ -180,9 +181,9 @@ Fields:
 watches a path recursively and normalizes change paths before matching include
 globs (default `*.py`, `*.toml`) and ignore globs. A matching change triggers a
 graceful worker shutdown, closes executors, and starts a fresh worker. Watch
-mode is intended for local development; executor pool sizes are forced to 1 to
-keep restarts lightweight. It also respects `.gitignore` and `.git/info/exclude`
-by default; disable with `--no-gitignore`.
+mode is intended for local development; executor pool sizes and
+`max_in_flight` are forced to 1 to keep restarts lightweight. It also respects
+`.gitignore` and `.git/info/exclude` by default; disable with `--no-gitignore`.
 
 You can also configure watch defaults in `rrq.toml`:
 
@@ -206,13 +207,6 @@ Runtime-only Python tests (producer + executor + store):
 
 ```
 uv run pytest
-```
-
-Rust conformance tests (parity vs golden snapshots):
-
-```
-cd rrq-rs
-cargo test -p rrq --test engine_conformance
 ```
 
 End-to-end integration (Python-only, Rust-only, mixed):

@@ -7,6 +7,7 @@ import asyncio
 import importlib
 import inspect
 import os
+from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
@@ -52,7 +53,7 @@ async def _execute_and_respond(
     inflight_lock: asyncio.Lock,
 ) -> None:
     try:
-        outcome = await executor.execute(request)
+        outcome = await _execute_with_deadline(executor, request)
     except HandlerNotFound as exc:
         outcome = ExecutionOutcome(
             job_id=request.job_id,
@@ -70,6 +71,13 @@ async def _execute_and_respond(
             status="error",
             error=ExecutionError(message="Job cancelled", type="cancelled"),
         )
+    except asyncio.TimeoutError as exc:
+        outcome = ExecutionOutcome(
+            job_id=request.job_id,
+            request_id=request.request_id,
+            status="timeout",
+            error=ExecutionError(message=str(exc) or "Job execution timed out."),
+        )
     except Exception as exc:
         outcome = ExecutionOutcome(
             job_id=request.job_id,
@@ -81,6 +89,22 @@ async def _execute_and_respond(
     async with inflight_lock:
         in_flight.pop(request.request_id, None)
         job_index.pop(request.job_id, None)
+
+
+async def _execute_with_deadline(
+    executor: PythonExecutor,
+    request: ExecutionRequest,
+) -> ExecutionOutcome:
+    deadline = request.context.deadline
+    if deadline is None:
+        return await executor.execute(request)
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    remaining = (deadline - now).total_seconds()
+    if remaining <= 0:
+        raise asyncio.TimeoutError("Job deadline exceeded")
+    return await asyncio.wait_for(executor.execute(request), timeout=remaining)
 
 
 def load_executor_settings(
@@ -197,8 +221,6 @@ async def _handle_connection(
                         task = in_flight.get(request_id)
                     if task is not None:
                         task.cancel()
-                if cancel_request.hard_kill:
-                    asyncio.create_task(_hard_kill())
                 continue
 
             raise ValueError(f"Unexpected message type: {message_type}")
@@ -206,11 +228,6 @@ async def _handle_connection(
         writer.close()
         with suppress(Exception):
             await writer.wait_closed()
-
-
-async def _hard_kill() -> None:
-    await asyncio.sleep(0.05)
-    os._exit(1)
 
 
 async def run_python_executor(

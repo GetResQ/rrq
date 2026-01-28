@@ -64,9 +64,11 @@ to create a runtime automatically.
 [rrq.executors.rust]
 cmd = ["./target/release/myapp-executor"]
 pool_size = 2
+max_in_flight = 1
 ```
 
 The orchestrator sets `RRQ_EXECUTOR_SOCKET` when launching the executor.
+Use `max_in_flight` to allow multiple concurrent requests per executor process.
 
 ## Tracing (optional)
 

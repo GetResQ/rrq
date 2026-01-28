@@ -67,4 +67,5 @@ environment = { CARGO_TERM_COLOR = "always" }
 [dependency-groups]
 dev = [
     "cibuildwheel>=3.3.1",
+    "hatchling>=1.28.0",
 ]

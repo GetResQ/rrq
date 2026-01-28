@@ -9,7 +9,9 @@ use tokio::sync::mpsc;
 use tokio::time::Duration;
 
 use rrq::config::{load_toml_settings, resolve_config_source};
-use rrq::executor::{build_executors_from_settings, resolve_executor_pool_sizes};
+use rrq::executor::{
+    build_executors_from_settings, resolve_executor_max_in_flight, resolve_executor_pool_sizes,
+};
 use rrq::worker::RRQWorker;
 
 pub(crate) async fn run_worker(
@@ -26,7 +28,13 @@ pub(crate) async fn run_worker(
     }
     let settings = load_toml_settings(config.as_deref())?;
     let pool_sizes = resolve_executor_pool_sizes(&settings, watch_mode, None)?;
-    let effective_concurrency = std::cmp::max(1, pool_sizes.values().sum());
+    let max_in_flight = resolve_executor_max_in_flight(&settings, watch_mode)?;
+    let mut effective_concurrency = 0usize;
+    for (name, pool_size) in &pool_sizes {
+        let in_flight = max_in_flight.get(name).copied().unwrap_or(1);
+        effective_concurrency += pool_size.saturating_mul(in_flight);
+    }
+    let effective_concurrency = std::cmp::max(1, effective_concurrency);
     let mut settings = settings;
     settings.worker_concurrency = effective_concurrency;
     let executors = build_executors_from_settings(&settings, Some(&pool_sizes)).await?;
@@ -241,7 +249,13 @@ pub(crate) async fn run_worker_watch(
             None => load_toml_settings(config.as_deref())?,
         };
         let pool_sizes = resolve_executor_pool_sizes(&settings, true, None)?;
-        let effective_concurrency = std::cmp::max(1, pool_sizes.values().sum());
+        let max_in_flight = resolve_executor_max_in_flight(&settings, true)?;
+        let mut effective_concurrency = 0usize;
+        for (name, pool_size) in &pool_sizes {
+            let in_flight = max_in_flight.get(name).copied().unwrap_or(1);
+            effective_concurrency += pool_size.saturating_mul(in_flight);
+        }
+        let effective_concurrency = std::cmp::max(1, effective_concurrency);
         let mut settings = settings;
         settings.worker_concurrency = effective_concurrency;
         settings.worker_shutdown_grace_period_seconds = 0.0;

@@ -1,11 +1,11 @@
 use crate::registry::Registry;
 use crate::telemetry::{NoopTelemetry, Telemetry};
 use crate::types::{ExecutionError, ExecutionOutcome};
-use rrq_protocol::{encode_frame, CancelRequest, ExecutorMessage, PROTOCOL_VERSION};
+use chrono::{DateTime, Utc};
+use rrq_protocol::{encode_frame, CancelRequest, ExecutorMessage, OutcomeStatus, PROTOCOL_VERSION};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Mutex};
@@ -147,7 +147,8 @@ async fn handle_connection<T: Telemetry + ?Sized>(
                 let response_tx_for_task = response_tx.clone();
 
                 let handle = tokio::spawn(async move {
-                    let outcome = registry.execute_with(payload, telemetry.as_ref()).await;
+                    let outcome =
+                        execute_with_deadline(payload, registry, telemetry.as_ref()).await;
                     let _ = response_tx_for_task.send(outcome).await;
                     let mut in_flight = in_flight_for_task.lock().await;
                     in_flight.remove(&request_id_for_task);
@@ -235,19 +236,57 @@ async fn handle_cancel(
     };
     if let Some(task) = task {
         task.handle.abort();
-        let outcome =
-            ExecutionOutcome::error(payload.job_id.clone(), request_id.clone(), "Job cancelled");
+        let outcome = ExecutionOutcome {
+            job_id: Some(payload.job_id.clone()),
+            request_id: Some(request_id.clone()),
+            status: OutcomeStatus::Error,
+            result: None,
+            error: Some(ExecutionError {
+                message: "Job cancelled".to_string(),
+                error_type: Some("cancelled".to_string()),
+                code: None,
+                details: None,
+            }),
+            retry_after_seconds: None,
+        };
         let _ = task.response_tx.send(outcome).await;
         let mut job_index = job_index.lock().await;
         job_index.remove(&task.job_id);
     }
+}
 
-    if payload.hard_kill {
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            std::process::exit(1);
-        });
+async fn execute_with_deadline<T: Telemetry + ?Sized>(
+    request: rrq_protocol::ExecutionRequest,
+    registry: Registry,
+    telemetry: &T,
+) -> ExecutionOutcome {
+    let job_id = request.job_id.clone();
+    let request_id = request.request_id.clone();
+    let deadline = request.context.deadline;
+    if let Some(deadline) = deadline {
+        let now: DateTime<Utc> = Utc::now();
+        if deadline <= now {
+            return ExecutionOutcome::timeout(
+                job_id.clone(),
+                request_id.clone(),
+                "Job deadline exceeded",
+            );
+        }
+        if let Ok(remaining) = (deadline - now).to_std() {
+            match tokio::time::timeout(remaining, registry.execute_with(request, telemetry)).await {
+                Ok(outcome) => return outcome,
+                Err(_) => {
+                    return ExecutionOutcome::timeout(
+                        job_id.clone(),
+                        request_id.clone(),
+                        "Job execution timed out",
+                    )
+                }
+            }
+        }
+        return ExecutionOutcome::timeout(job_id, request_id, "Job deadline exceeded");
     }
+    registry.execute_with(request, telemetry).await
 }
 
 async fn read_message<R: AsyncRead + Unpin>(

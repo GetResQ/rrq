@@ -25,7 +25,7 @@ Options:
 - `--no-gitignore` Disable `.gitignore` and `.git/info/exclude` filtering
 
 Notes:
-- Watch mode forces executor pool sizes to 1.
+- Watch mode forces executor pool sizes and `max_in_flight` to 1.
 - A change that matches `--pattern` and does not match `--ignore-pattern`
   triggers a worker restart.
 - Executors can write to stdout/stderr; the orchestrator will capture and emit

@@ -35,8 +35,10 @@ Message types:
 
 Executors should read requests and write responses **sequentially** on a single
 connection. The orchestrator correlates responses by `request_id` and expects
-exactly one response per request. Protocol logging is not supported; executors
-should emit logs to stdout/stderr as needed.
+exactly one response per request. The orchestrator may open **multiple
+concurrent connections** to the same executor process (often one connection per
+request). Protocol logging is not supported; executors should emit logs to
+stdout/stderr as needed.
 
 ## ExecutionRequest (payload)
 ```json
@@ -138,8 +140,11 @@ override per policy.
 - **Retries** are controlled by the orchestrator. Executors return `retry` to
   request a retry.
 - **DLQ** decisions are controlled by the orchestrator.
-- **Cancellation** (v1) applies only to **pending** jobs. Once execution starts,
-  the outcome is always applied.
+- **Cancellation** (v1) applies to **in-flight** jobs when a `request_id` is
+  provided. Executors should attempt to cancel the associated task and return
+  an outcome (typically `error` with a `cancelled` type/message).
+- `hard_kill` is reserved for orchestrator-level process management and may be
+  ignored by executor runtimes.
 
 ## Executor Selection
 RRQ may embed executor selection in the job function name using:
