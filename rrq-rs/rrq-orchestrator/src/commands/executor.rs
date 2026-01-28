@@ -23,3 +23,62 @@ pub(crate) async fn executor_python(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::fs;
+    use uuid::Uuid;
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: String) -> Self {
+            let prev = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = self.prev.take() {
+                unsafe {
+                    std::env::set_var(self.key, prev);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn executor_python_runs_command() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("rrq-exec-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).await?;
+        let script_path = dir.join("rrq-executor");
+        let script = "#!/bin/sh\nexit 0\n";
+        fs::write(&script_path, script).await?;
+        let mut perms = fs::metadata(&script_path).await?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).await?;
+
+        let original = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.to_string_lossy(), original);
+        let _guard = EnvGuard::set("PATH", new_path);
+
+        executor_python(Some("settings.toml".to_string()), Some("sock".to_string())).await?;
+
+        let _ = fs::remove_file(&script_path).await;
+        let _ = fs::remove_dir_all(&dir).await;
+        Ok(())
+    }
+}

@@ -149,3 +149,109 @@ impl RRQClient {
         Ok(job)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::UNIQUE_JOB_LOCK_PREFIX;
+    use crate::test_support::RedisTestContext;
+    use chrono::Duration as ChronoDuration;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn enqueue_with_defer_by_and_unique_lock() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let options = EnqueueOptions {
+            unique_key: Some("unique-key".to_string()),
+            defer_by: Some(ChronoDuration::seconds(5)),
+            job_timeout_seconds: Some(5),
+            result_ttl_seconds: Some(10),
+            ..Default::default()
+        };
+        let job = client
+            .enqueue("task", vec![json!(1)], serde_json::Map::new(), options)
+            .await
+            .unwrap();
+        let scheduled = job.next_scheduled_run_time.unwrap();
+        let delta = scheduled
+            .signed_duration_since(job.enqueue_time)
+            .num_seconds();
+        assert!(delta >= 4);
+        assert_eq!(job.job_unique_key.as_deref(), Some("unique-key"));
+        let ttl = ctx.store.get_lock_ttl("unique-key").await.unwrap();
+        assert!(ttl > 0);
+    }
+
+    #[tokio::test]
+    async fn enqueue_respects_defer_until() {
+        let ctx = RedisTestContext::new().await.unwrap();
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let defer_until = Utc::now() + ChronoDuration::seconds(8);
+        let options = EnqueueOptions {
+            defer_until: Some(defer_until),
+            ..Default::default()
+        };
+        let job = client
+            .enqueue("task", Vec::new(), serde_json::Map::new(), options)
+            .await
+            .unwrap();
+        let scheduled = job.next_scheduled_run_time.unwrap();
+        assert!(scheduled >= defer_until);
+    }
+
+    #[tokio::test]
+    async fn enqueue_respects_existing_unique_lock() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let acquired = ctx
+            .store
+            .acquire_unique_job_lock("held", "other", 30)
+            .await
+            .unwrap();
+        assert!(acquired);
+        let options = EnqueueOptions {
+            unique_key: Some("held".to_string()),
+            ..Default::default()
+        };
+        let job = client
+            .enqueue("task", Vec::new(), serde_json::Map::new(), options)
+            .await
+            .unwrap();
+        let scheduled = job.next_scheduled_run_time.unwrap();
+        let delta = scheduled
+            .signed_duration_since(job.enqueue_time)
+            .num_seconds();
+        assert!(delta >= 25);
+    }
+
+    #[tokio::test]
+    async fn enqueue_handles_lock_without_ttl() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let lock_key = format!("{UNIQUE_JOB_LOCK_PREFIX}no-ttl");
+        let redis = redis::Client::open(ctx.settings.redis_dsn.as_str()).unwrap();
+        let mut conn = redis.get_multiplexed_async_connection().await.unwrap();
+        let _: () = redis::cmd("SET")
+            .arg(&lock_key)
+            .arg("locked")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let options = EnqueueOptions {
+            unique_key: Some("no-ttl".to_string()),
+            ..Default::default()
+        };
+        let job = client
+            .enqueue("task", Vec::new(), serde_json::Map::new(), options)
+            .await
+            .unwrap();
+        let scheduled = job.next_scheduled_run_time.unwrap();
+        let delta = scheduled
+            .signed_duration_since(job.enqueue_time)
+            .num_seconds();
+        assert!(delta <= 1);
+        let ttl = ctx.store.get_lock_ttl("no-ttl").await.unwrap();
+        assert_eq!(ttl, 0);
+    }
+}

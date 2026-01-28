@@ -273,11 +273,8 @@ fn init_tracing() {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    init_tracing();
-    let cli = Cli::parse();
-    match cli.command {
+async fn dispatch_command(command: Commands) -> Result<()> {
+    match command {
         Commands::Worker { command } => match command {
             WorkerCommand::Run {
                 config,
@@ -461,4 +458,337 @@ async fn main() -> Result<()> {
         },
     }
     Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    init_tracing();
+    let cli = Cli::parse();
+    dispatch_command(cli.command).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::test_support::RedisTestContext;
+    use chrono::Utc;
+    use rrq::EnqueueOptions;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use tokio::fs as tokio_fs;
+    use uuid::Uuid;
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: String) -> Self {
+            let prev = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = self.prev.take() {
+                unsafe {
+                    std::env::set_var(self.key, prev);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    async fn write_executor_script(dir: &Path) -> Result<PathBuf> {
+        let script_path = dir.join("rrq-dummy-executor.py");
+        let script = r#"#!/usr/bin/env python3
+import os
+import socket
+import time
+
+sock_path = os.environ.get("RRQ_EXECUTOR_SOCKET")
+if not sock_path:
+    raise SystemExit(1)
+try:
+    os.unlink(sock_path)
+except FileNotFoundError:
+    pass
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.bind(sock_path)
+sock.listen(1)
+try:
+    conn, _ = sock.accept()
+    conn.close()
+except Exception:
+    pass
+while True:
+    time.sleep(1)
+"#;
+        tokio_fs::write(&script_path, script).await?;
+        let mut perms = tokio_fs::metadata(&script_path).await?.permissions();
+        perms.set_mode(0o755);
+        tokio_fs::set_permissions(&script_path, perms).await?;
+        Ok(script_path)
+    }
+
+    async fn write_worker_config(
+        settings: &rrq::RRQSettings,
+        script_path: &Path,
+    ) -> Result<PathBuf> {
+        let path = std::env::temp_dir().join(format!("rrq-main-{}.toml", Uuid::new_v4()));
+        let payload = format!(
+            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_executor_name = \"python\"\n\n[rrq.executors.python]\ncmd = [\"python3\", \"{}\"]\npool_size = 1\nmax_in_flight = 1\n",
+            settings.redis_dsn,
+            settings.default_queue_name,
+            settings.default_dlq_name,
+            script_path.to_string_lossy()
+        );
+        tokio_fs::write(&path, payload).await?;
+        Ok(path)
+    }
+
+    async fn write_rrq_executor_script(dir: &Path) -> Result<PathBuf> {
+        let script_path = dir.join("rrq-executor");
+        tokio_fs::write(&script_path, "#!/bin/sh\nexit 0\n").await?;
+        let mut perms = tokio_fs::metadata(&script_path).await?.permissions();
+        perms.set_mode(0o755);
+        tokio_fs::set_permissions(&script_path, perms).await?;
+        Ok(script_path)
+    }
+
+    #[tokio::test]
+    async fn dispatch_command_covers_branches() -> Result<()> {
+        let mut ctx = RedisTestContext::new().await?;
+        let temp_dir = std::env::temp_dir().join(format!("rrq-main-{}", Uuid::new_v4()));
+        tokio_fs::create_dir_all(&temp_dir).await?;
+        let script_path = write_executor_script(&temp_dir).await?;
+        let config_path = write_worker_config(&ctx.settings, &script_path).await?;
+        let rrq_executor = write_rrq_executor_script(&temp_dir).await?;
+        let path_guard = EnvGuard::set(
+            "PATH",
+            format!(
+                "{}:{}",
+                temp_dir.to_string_lossy(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+
+        let config = Some(config_path.to_string_lossy().to_string());
+
+        let mut client = rrq::RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let job = client
+            .enqueue(
+                "demo_job",
+                vec![],
+                serde_json::Map::new(),
+                EnqueueOptions::default(),
+            )
+            .await?;
+        ctx.store
+            .move_job_to_dlq(&job.id, &ctx.settings.default_dlq_name, "boom", Utc::now())
+            .await?;
+
+        dispatch_command(Commands::Queue {
+            command: QueueCommand::List {
+                config: config.clone(),
+                show_empty: true,
+            },
+        })
+        .await?;
+        dispatch_command(Commands::Queue {
+            command: QueueCommand::Stats {
+                config: config.clone(),
+                queue: Vec::new(),
+                max_scan: 1,
+            },
+        })
+        .await?;
+        dispatch_command(Commands::Queue {
+            command: QueueCommand::Inspect {
+                queue_name: ctx.settings.default_queue_name.clone(),
+                config: config.clone(),
+                limit: 5,
+                offset: 0,
+            },
+        })
+        .await?;
+
+        dispatch_command(Commands::Job {
+            command: JobCommand::Show {
+                job_id: job.id.clone(),
+                config: config.clone(),
+                raw: true,
+            },
+        })
+        .await?;
+        dispatch_command(Commands::Job {
+            command: JobCommand::List {
+                config: config.clone(),
+                status: Some("pending".to_string()),
+                queue: None,
+                function: None,
+                limit: 5,
+            },
+        })
+        .await?;
+        dispatch_command(Commands::Job {
+            command: JobCommand::Replay {
+                job_id: job.id.clone(),
+                config: config.clone(),
+                queue: None,
+            },
+        })
+        .await?;
+        let cancel_job = client
+            .enqueue(
+                "cancel_me",
+                vec![],
+                serde_json::Map::new(),
+                EnqueueOptions::default(),
+            )
+            .await?;
+        dispatch_command(Commands::Job {
+            command: JobCommand::Cancel {
+                job_id: cancel_job.id,
+                config: config.clone(),
+            },
+        })
+        .await?;
+        dispatch_command(Commands::Job {
+            command: JobCommand::Trace {
+                job_id: job.id.clone(),
+                config: config.clone(),
+            },
+        })
+        .await?;
+
+        dispatch_command(Commands::Dlq {
+            command: DlqCommand::List {
+                config: config.clone(),
+                queue: None,
+                function: None,
+                limit: 10,
+                offset: 0,
+                dlq_name: None,
+                raw: false,
+                batch_size: 10,
+            },
+        })
+        .await?;
+        dispatch_command(Commands::Dlq {
+            command: DlqCommand::Stats {
+                config: config.clone(),
+                dlq_name: None,
+            },
+        })
+        .await?;
+        dispatch_command(Commands::Dlq {
+            command: DlqCommand::Inspect {
+                job_id: job.id.clone(),
+                config: config.clone(),
+                raw: true,
+            },
+        })
+        .await?;
+        dispatch_command(Commands::Dlq {
+            command: DlqCommand::Requeue {
+                config: config.clone(),
+                dlq_name: None,
+                target_queue: None,
+                queue: None,
+                function: None,
+                job_id: Some(job.id.clone()),
+                limit: Some(1),
+                all: false,
+                dry_run: true,
+            },
+        })
+        .await?;
+
+        dispatch_command(Commands::Check {
+            config: config.clone(),
+        })
+        .await?;
+
+        dispatch_command(Commands::Debug {
+            command: DebugCommand::GenerateJobs {
+                config: config.clone(),
+                count: 1,
+                queue: Vec::new(),
+                status: Vec::new(),
+                age_hours: 1,
+                batch_size: 1,
+            },
+        })
+        .await?;
+        dispatch_command(Commands::Debug {
+            command: DebugCommand::GenerateWorkers {
+                config: config.clone(),
+                count: 1,
+                duration: 0,
+            },
+        })
+        .await?;
+        dispatch_command(Commands::Debug {
+            command: DebugCommand::Submit {
+                function_name: "debug_fn".to_string(),
+                config: config.clone(),
+                args: None,
+                kwargs: None,
+                queue: None,
+                delay: None,
+            },
+        })
+        .await?;
+        dispatch_command(Commands::Debug {
+            command: DebugCommand::Clear {
+                config: config.clone(),
+                confirm: true,
+                pattern: "rrq:job:*".to_string(),
+            },
+        })
+        .await?;
+        dispatch_command(Commands::Debug {
+            command: DebugCommand::StressTest {
+                config: config.clone(),
+                jobs_per_second: 1,
+                duration: 0,
+                queues: Vec::new(),
+            },
+        })
+        .await?;
+
+        dispatch_command(Commands::Executor {
+            command: ExecutorCommand::Python {
+                settings: None,
+                socket: None,
+            },
+        })
+        .await?;
+
+        dispatch_command(Commands::Worker {
+            command: WorkerCommand::Run {
+                config: config.clone(),
+                queue: Vec::new(),
+                burst: true,
+            },
+        })
+        .await?;
+
+        drop(path_guard);
+        let _ = tokio_fs::remove_file(&rrq_executor).await;
+        let _ = tokio_fs::remove_file(&config_path).await;
+        let _ = tokio_fs::remove_file(&script_path).await;
+        let _ = tokio_fs::remove_dir_all(&temp_dir).await;
+        Ok(())
+    }
 }

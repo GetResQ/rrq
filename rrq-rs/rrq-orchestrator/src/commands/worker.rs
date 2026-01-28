@@ -57,21 +57,27 @@ async fn run_worker_loop(mut worker: RRQWorker) -> Result<()> {
         let _ = worker.run().await;
         worker
     });
+    let mut completed = None;
     tokio::select! {
         _ = wait_for_shutdown_signal() => {
             shutdown.store(true, Ordering::SeqCst);
         }
         result = &mut handle => {
-            if let Err(err) = result {
+            if let Err(err) = &result {
                 eprintln!("worker crashed: {err}");
             }
+            completed = Some(result);
         }
     }
-    let worker = match tokio::time::timeout(shutdown_timeout, &mut handle).await {
-        Ok(result) => result?,
-        Err(_) => {
-            handle.abort();
-            return Ok(());
+    let worker = if let Some(result) = completed {
+        result?
+    } else {
+        match tokio::time::timeout(shutdown_timeout, &mut handle).await {
+            Ok(result) => result?,
+            Err(_) => {
+                handle.abort();
+                return Ok(());
+            }
         }
     };
     worker.close_executors().await;
@@ -86,6 +92,10 @@ fn build_globset(patterns: &[String]) -> Result<GlobSet> {
         builder.add(glob);
     }
     Ok(builder.build()?)
+}
+
+fn watch_restart_limit() -> Option<usize> {
+    if cfg!(test) { Some(1) } else { None }
 }
 
 fn load_gitignore(root: &Path) -> Result<Option<Gitignore>> {
@@ -235,6 +245,8 @@ pub(crate) async fn run_worker_watch(
         load_gitignore(&watch_root)?
     };
     let mut cached_settings = Some(initial_settings);
+    let mut restarts = 0usize;
+    let restart_limit = watch_restart_limit();
 
     loop {
         let mut restart = false;
@@ -341,6 +353,12 @@ pub(crate) async fn run_worker_watch(
         if !restart {
             break;
         }
+        restarts += 1;
+        if let Some(limit) = restart_limit
+            && restarts >= limit
+        {
+            break;
+        }
         while tokio::time::timeout(Duration::from_millis(200), rx.recv())
             .await
             .ok()
@@ -375,5 +393,222 @@ async fn wait_for_shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::test_support::RedisTestContext;
+    use notify::EventKind;
+    use notify::event::{AccessKind, DataChange, ModifyKind};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::fs as tokio_fs;
+    use uuid::Uuid;
+
+    fn make_event(kind: EventKind, path: &Path) -> Event {
+        Event {
+            kind,
+            paths: vec![path.to_path_buf()],
+            attrs: Default::default(),
+        }
+    }
+
+    #[test]
+    fn should_restart_ignores_access_and_metadata() {
+        let base = PathBuf::from("/tmp");
+        let include = build_globset(&[]).unwrap();
+        let ignore = build_globset(&[]).unwrap();
+        let access_event = make_event(EventKind::Access(AccessKind::Read), &base.join("a.py"));
+        assert!(!should_restart_for_event(
+            &access_event,
+            &base,
+            &include,
+            &ignore,
+            None
+        ));
+        let metadata_event = make_event(
+            EventKind::Modify(ModifyKind::Metadata(notify::event::MetadataKind::Any)),
+            &base.join("a.py"),
+        );
+        assert!(!should_restart_for_event(
+            &metadata_event,
+            &base,
+            &include,
+            &ignore,
+            None
+        ));
+    }
+
+    #[test]
+    fn should_restart_respects_include_and_ignore() {
+        let base = std::env::temp_dir().join(format!("rrq-watch-{}", Uuid::new_v4()));
+        fs::create_dir_all(&base).unwrap();
+        let include = build_globset(&["*.py".to_string()]).unwrap();
+        let ignore = build_globset(&["ignored.py".to_string()]).unwrap();
+        let event = make_event(
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            &base.join("main.py"),
+        );
+        assert!(should_restart_for_event(
+            &event, &base, &include, &ignore, None
+        ));
+        let ignored_event = make_event(
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            &base.join("ignored.py"),
+        );
+        assert!(!should_restart_for_event(
+            &ignored_event,
+            &base,
+            &include,
+            &ignore,
+            None
+        ));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn should_restart_respects_gitignore() {
+        let base = std::env::temp_dir().join(format!("rrq-watch-{}", Uuid::new_v4()));
+        fs::create_dir_all(&base).unwrap();
+        fs::write(base.join(".gitignore"), "ignored.py\n").unwrap();
+        let include = build_globset(&[]).unwrap();
+        let ignore = build_globset(&[]).unwrap();
+        let gitignore = load_gitignore(&base).unwrap();
+        let event = make_event(
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            &base.join("ignored.py"),
+        );
+        assert!(!should_restart_for_event(
+            &event,
+            &base,
+            &include,
+            &ignore,
+            gitignore.as_ref()
+        ));
+        let event = make_event(
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            &base.join("ok.py"),
+        );
+        assert!(should_restart_for_event(
+            &event,
+            &base,
+            &include,
+            &ignore,
+            gitignore.as_ref()
+        ));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    async fn write_executor_script(dir: &Path) -> Result<PathBuf> {
+        let script_path = dir.join("rrq-dummy-executor.py");
+        let script = r#"#!/usr/bin/env python3
+import os
+import socket
+import time
+
+sock_path = os.environ.get("RRQ_EXECUTOR_SOCKET")
+if not sock_path:
+    raise SystemExit(1)
+try:
+    os.unlink(sock_path)
+except FileNotFoundError:
+    pass
+
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.bind(sock_path)
+sock.listen(1)
+try:
+    conn, _ = sock.accept()
+    conn.close()
+except Exception:
+    pass
+while True:
+    time.sleep(1)
+"#;
+        tokio_fs::write(&script_path, script).await?;
+        let mut perms = tokio_fs::metadata(&script_path).await?.permissions();
+        perms.set_mode(0o755);
+        tokio_fs::set_permissions(&script_path, perms).await?;
+        Ok(script_path)
+    }
+
+    async fn write_worker_config(
+        settings: &rrq::RRQSettings,
+        script_path: &Path,
+    ) -> Result<PathBuf> {
+        let path = std::env::temp_dir().join(format!("rrq-worker-{}.toml", Uuid::new_v4()));
+        let payload = format!(
+            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_executor_name = \"python\"\n\n[rrq.executors.python]\ncmd = [\"python3\", \"{}\"]\npool_size = 1\nmax_in_flight = 1\n",
+            settings.redis_dsn,
+            settings.default_queue_name,
+            settings.default_dlq_name,
+            script_path.to_string_lossy()
+        );
+        tokio_fs::write(&path, payload).await?;
+        Ok(path)
+    }
+
+    #[tokio::test]
+    async fn run_worker_burst_exits() -> Result<()> {
+        let ctx = RedisTestContext::new().await?;
+        let temp_dir = std::env::temp_dir().join(format!("rrq-worker-{}", Uuid::new_v4()));
+        tokio_fs::create_dir_all(&temp_dir).await?;
+        let script_path = write_executor_script(&temp_dir).await?;
+        let config_path = write_worker_config(&ctx.settings, &script_path).await?;
+
+        run_worker(
+            Some(config_path.to_string_lossy().to_string()),
+            Vec::new(),
+            true,
+            false,
+        )
+        .await?;
+
+        let _ = tokio_fs::remove_file(&config_path).await;
+        let _ = tokio_fs::remove_file(&script_path).await;
+        let _ = tokio_fs::remove_dir_all(&temp_dir).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_worker_watch_restarts_on_change() -> Result<()> {
+        let ctx = RedisTestContext::new().await?;
+        let temp_dir = std::env::temp_dir().join(format!("rrq-watch-worker-{}", Uuid::new_v4()));
+        tokio_fs::create_dir_all(&temp_dir).await?;
+        let watch_root = temp_dir.join("watch");
+        tokio_fs::create_dir_all(&watch_root).await?;
+        let script_path = write_executor_script(&temp_dir).await?;
+        let config_path = write_worker_config(&ctx.settings, &script_path).await?;
+
+        let handle = tokio::spawn(run_worker_watch(
+            Some(config_path.to_string_lossy().to_string()),
+            Vec::new(),
+            Some(watch_root.to_string_lossy().to_string()),
+            vec!["*.txt".to_string()],
+            Vec::new(),
+            true,
+        ));
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let trigger = watch_root.join("trigger.txt");
+        for idx in 0..5 {
+            tokio_fs::write(&trigger, format!("ping-{idx}")).await?;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if handle.is_finished() {
+                break;
+            }
+        }
+
+        let result = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        assert!(result.is_ok());
+        let join = result.unwrap();
+        assert!(join.is_ok());
+
+        let _ = tokio_fs::remove_file(&config_path).await;
+        let _ = tokio_fs::remove_file(&script_path).await;
+        let _ = tokio_fs::remove_dir_all(&temp_dir).await;
+        Ok(())
     }
 }

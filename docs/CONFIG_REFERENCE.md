@@ -102,7 +102,7 @@ Schedule periodic jobs while a worker is running.
 ```toml
 [[rrq.cron_jobs]]
 function_name = "process_message"
-schedule = "* * * * *"
+schedule = "0 * * * * *"
 args = ["cron payload"]
 kwargs = { source = "cron" }
 queue_name = "default"
@@ -112,7 +112,7 @@ unique = true
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `function_name` | string | required | Handler name to enqueue. |
-| `schedule` | string | required | Standard 5-field cron expression (UTC). |
+| `schedule` | string | required | Cron expression with seconds (6 fields, UTC). |
 | `args` | array | `[]` | Positional args. |
 | `kwargs` | table | `{}` | Keyword args. |
 | `queue_name` | string | — | Override target queue. |

@@ -152,7 +152,7 @@ running. Schedules are evaluated in UTC.
 ```toml
 [[rrq.cron_jobs]]
 function_name = "process_message"
-schedule = "* * * * *"
+schedule = "0 * * * * *"
 args = ["cron payload"]
 kwargs = { source = "cron" }
 queue_name = "default"
@@ -161,7 +161,7 @@ unique = true
 
 Fields:
 - `function_name` (required): Handler name to enqueue.
-- `schedule` (required): Cron expression (standard 5-field format).
+- `schedule` (required): Cron expression with seconds (6-field format).
 - `args` / `kwargs`: Optional arguments passed to the handler.
 - `queue_name`: Optional override for the target queue.
 - `unique`: Optional; uses a per-function unique lock to prevent duplicates.

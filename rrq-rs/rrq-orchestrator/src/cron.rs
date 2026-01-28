@@ -46,3 +46,65 @@ impl CronJob {
         Ok(now >= self.next_run_time.unwrap_or(now))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cron_job_schedules_next_minute() {
+        let now = DateTime::parse_from_rfc3339("2024-01-01T00:00:30Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut job = CronJob {
+            function_name: "task".to_string(),
+            schedule: "0 * * * * *".to_string(),
+            args: vec![],
+            kwargs: serde_json::Map::new(),
+            queue_name: None,
+            unique: false,
+            next_run_time: None,
+        };
+        job.schedule_next(now).unwrap();
+        let next = job.next_run_time.unwrap();
+        assert!(next > now);
+        assert_eq!(next.second(), 0);
+    }
+
+    #[test]
+    fn cron_job_due_sets_next_run_time() {
+        let now = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut job = CronJob {
+            function_name: "task".to_string(),
+            schedule: "0 * * * * *".to_string(),
+            args: vec![],
+            kwargs: serde_json::Map::new(),
+            queue_name: None,
+            unique: false,
+            next_run_time: None,
+        };
+        let due = job.due(now).unwrap();
+        assert!(!due);
+        assert!(job.next_run_time.is_some());
+    }
+
+    #[test]
+    fn cron_job_rejects_invalid_schedule() {
+        let now = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut job = CronJob {
+            function_name: "task".to_string(),
+            schedule: "nope".to_string(),
+            args: vec![],
+            kwargs: serde_json::Map::new(),
+            queue_name: None,
+            unique: false,
+            next_run_time: None,
+        };
+        let err = job.schedule_next(now).unwrap_err();
+        assert!(err.to_string().contains("invalid cron schedule"));
+    }
+}

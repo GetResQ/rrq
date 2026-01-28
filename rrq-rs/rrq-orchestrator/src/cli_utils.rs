@@ -83,3 +83,50 @@ pub fn to_utc_rfc3339(epoch_seconds: f64) -> String {
     dt.map(|dt| dt.to_rfc3339())
         .unwrap_or_else(|| epoch_seconds.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_timestamp_handles_numeric_and_rfc3339() {
+        assert_eq!(parse_timestamp(""), None);
+        assert_eq!(parse_timestamp("0"), Some(0.0));
+        let parsed = parse_timestamp("2024-01-01T00:00:00Z");
+        assert!(parsed.is_some());
+    }
+
+    #[test]
+    fn format_timestamp_handles_missing() {
+        assert_eq!(format_timestamp(None), "N/A");
+        let formatted = format_timestamp(Some("0"));
+        assert!(!formatted.is_empty());
+        assert_ne!(formatted, "N/A");
+    }
+
+    #[test]
+    fn format_duration_formats_ranges() {
+        assert_eq!(format_duration(None), "N/A");
+        assert_eq!(format_duration(Some(0.0000004)), "0μs");
+        assert_eq!(format_duration(Some(0.0004)), "400μs");
+        assert_eq!(format_duration(Some(0.5)), "500.0ms");
+        assert_eq!(format_duration(Some(2.5)), "2.5s");
+        assert_eq!(format_duration(Some(90.0)), "1m 30s");
+    }
+
+    #[test]
+    fn truncate_and_status() {
+        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate("longer_than", 6), "lon...");
+        assert_eq!(format_status(Some("pending")), "PENDING");
+        assert_eq!(format_status(None), "UNKNOWN");
+    }
+
+    #[test]
+    fn parse_json_and_rfc3339() {
+        assert_eq!(parse_json(None), None);
+        assert_eq!(parse_json(Some("null")), None);
+        assert!(parse_json(Some("{\"a\":1}")).is_some());
+        assert_eq!(to_utc_rfc3339(0.0), "1970-01-01T00:00:00+00:00");
+    }
+}

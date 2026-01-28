@@ -33,20 +33,63 @@ jobs:
       - name: Sync dependencies
         run: uv sync --extra dev
 
+      - name: Ruff format check
+        run: uv run ruff format --check
+
+      - name: Ruff lint
+        run: uv run ruff check
+
+      - name: Type check
+        run: uv run ty check
+
       - name: Run tests
         run: uv run pytest --disable-warnings -q --maxfail=1
 
-  rust-audit:
+  rust:
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      RRQ_TEST_REDIS_DSN: redis://localhost:6379/15
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
 
-      - name: Run cargo audit
-        run: cd reference/rust && cargo audit
+      - name: Rust format check
+        run: cargo fmt --all -- --check
+        working-directory: rrq-rs
+
+      - name: Rust clippy
+        run: cargo clippy --all-targets --all-features
+        working-directory: rrq-rs
+
+      - name: Rust audit
+        run: cargo audit
+        working-directory: rrq-rs
+
+      - name: Rust coverage
+        run: cargo llvm-cov --workspace --fail-under-lines 80
+        working-directory: rrq-rs

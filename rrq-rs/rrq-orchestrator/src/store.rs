@@ -770,3 +770,223 @@ impl JobStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::RedisTestContext;
+    use chrono::Utc;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn build_job(queue_name: &str, dlq_name: &str) -> Job {
+        Job {
+            id: Job::new_id(),
+            function_name: "do_work".to_string(),
+            job_args: vec![],
+            job_kwargs: serde_json::Map::new(),
+            enqueue_time: Utc::now(),
+            start_time: None,
+            status: JobStatus::Pending,
+            current_retries: 0,
+            next_scheduled_run_time: None,
+            max_retries: 3,
+            job_timeout_seconds: Some(30),
+            result_ttl_seconds: Some(60),
+            job_unique_key: None,
+            completion_time: None,
+            result: None,
+            last_error: None,
+            queue_name: Some(queue_name.to_string()),
+            dlq_name: Some(dlq_name.to_string()),
+            worker_id: None,
+            trace_context: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn job_store_queue_and_lock_flow() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+        let job = build_job(&queue_name, &dlq_name);
+
+        ctx.store.save_job_definition(&job).await.unwrap();
+        let loaded = ctx
+            .store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.function_name, job.function_name);
+
+        let score = Utc::now().timestamp_millis() as f64;
+        ctx.store
+            .add_job_to_queue(&queue_name, &job.id, score)
+            .await
+            .unwrap();
+        assert!(ctx.store.queue_exists(&queue_name).await.unwrap());
+        assert_eq!(ctx.store.queue_size(&queue_name).await.unwrap(), 1);
+        assert!(ctx.store.is_job_queued(&queue_name, &job.id).await.unwrap());
+
+        let ready = ctx.store.get_ready_job_ids(&queue_name, 10).await.unwrap();
+        assert!(ready.contains(&job.id));
+
+        let (locked, removed) = ctx
+            .store
+            .atomic_lock_and_remove_job(&job.id, &queue_name, "worker-1", 1000)
+            .await
+            .unwrap();
+        assert!(locked);
+        assert_eq!(removed, 1);
+        assert_eq!(
+            ctx.store.get_job_lock_owner(&job.id).await.unwrap(),
+            Some("worker-1".to_string())
+        );
+
+        let start_time = Utc::now();
+        ctx.store
+            .mark_job_started(&job.id, "worker-1", start_time)
+            .await
+            .unwrap();
+        let active = ctx.store.get_active_job_ids("worker-1").await.unwrap();
+        assert!(active.contains(&job.id));
+
+        ctx.store
+            .remove_active_job("worker-1", &job.id)
+            .await
+            .unwrap();
+        ctx.store
+            .mark_job_pending(&job.id, Some("reset"))
+            .await
+            .unwrap();
+        ctx.store.release_job_lock(&job.id).await.unwrap();
+        assert_eq!(ctx.store.get_job_lock_owner(&job.id).await.unwrap(), None);
+
+        let mut fields = HashMap::new();
+        fields.insert("last_error".to_string(), "boom".to_string());
+        ctx.store.update_job_fields(&job.id, &fields).await.unwrap();
+        ctx.store
+            .update_job_status(&job.id, JobStatus::Active)
+            .await
+            .unwrap();
+        let updated = ctx
+            .store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, JobStatus::Active);
+        assert_eq!(updated.last_error.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn job_store_retry_and_dlq_flow() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+        let job = build_job(&queue_name, &dlq_name);
+
+        ctx.store.save_job_definition(&job).await.unwrap();
+        let retry_score = (Utc::now().timestamp_millis() - 1000) as f64;
+        let retry_count = ctx
+            .store
+            .atomic_retry_job(
+                &job.id,
+                &queue_name,
+                retry_score,
+                "retry",
+                JobStatus::Retrying,
+            )
+            .await
+            .unwrap();
+        assert_eq!(retry_count, 1);
+        let loaded = ctx
+            .store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, JobStatus::Retrying);
+        assert_eq!(loaded.last_error.as_deref(), Some("retry"));
+
+        let new_retry = ctx.store.increment_job_retries(&job.id).await.unwrap();
+        assert_eq!(new_retry, 2);
+
+        ctx.store
+            .move_job_to_dlq(&job.id, &dlq_name, "failed", Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(ctx.store.dlq_len(&dlq_name).await.unwrap(), 1);
+        let ids = ctx.store.get_dlq_job_ids(&dlq_name).await.unwrap();
+        assert!(ids.contains(&job.id));
+        assert_eq!(
+            ctx.store.dlq_remove_job(&dlq_name, &job.id).await.unwrap(),
+            1
+        );
+        assert_eq!(ctx.store.dlq_len(&dlq_name).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn job_store_unique_locks_and_health() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+        let job = build_job(&queue_name, &dlq_name);
+
+        ctx.store.save_job_definition(&job).await.unwrap();
+        let unique_key = format!("unique-{}", job.id);
+        let acquired = ctx
+            .store
+            .acquire_unique_job_lock(&unique_key, &job.id, 5)
+            .await
+            .unwrap();
+        assert!(acquired);
+        assert!(ctx.store.get_lock_ttl(&unique_key).await.unwrap() > 0);
+        ctx.store
+            .release_unique_job_lock(&unique_key)
+            .await
+            .unwrap();
+        assert_eq!(ctx.store.get_lock_ttl(&unique_key).await.unwrap(), 0);
+
+        let mut health = serde_json::Map::new();
+        health.insert("worker_id".to_string(), json!("worker-1"));
+        health.insert("status".to_string(), json!("running"));
+        ctx.store
+            .set_worker_health("worker-1", &health, 60)
+            .await
+            .unwrap();
+        let (payload, ttl) = ctx.store.get_worker_health("worker-1").await.unwrap();
+        assert!(payload.is_some());
+        assert!(ttl.unwrap_or(0) > 0);
+
+        let (_, health_keys) = ctx.store.scan_worker_health_keys(0, 10).await.unwrap();
+        assert!(
+            health_keys
+                .iter()
+                .any(|key| key.contains("rrq:health:worker:"))
+        );
+
+        let score = Utc::now().timestamp_millis() as f64;
+        ctx.store
+            .add_job_to_queue(&queue_name, &job.id, score)
+            .await
+            .unwrap();
+        let (_, queue_keys) = ctx.store.scan_queue_keys(0, 10).await.unwrap();
+        assert!(queue_keys.iter().any(|key| key.contains(&queue_name)));
+
+        let (_, job_keys) = ctx.store.scan_job_keys(0, 10).await.unwrap();
+        assert!(job_keys.iter().any(|key| key.contains(&job.id)));
+
+        ctx.store
+            .track_active_job("worker-1", &job.id, Utc::now())
+            .await
+            .unwrap();
+        let (_, active_keys) = ctx.store.scan_active_job_keys(0, 10).await.unwrap();
+        assert!(
+            active_keys
+                .iter()
+                .any(|key| key.contains(crate::constants::ACTIVE_JOBS_PREFIX))
+        );
+    }
+}

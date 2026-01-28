@@ -248,3 +248,71 @@ async fn count_dlq_for_queue(
     }
     Ok(count)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::test_support::RedisTestContext;
+    use chrono::Utc;
+    use rrq::{Job, JobStatus};
+
+    fn build_job(queue_name: &str, dlq_name: &str, status: JobStatus) -> Job {
+        Job {
+            id: Job::new_id(),
+            function_name: "do_work".to_string(),
+            job_args: vec![],
+            job_kwargs: serde_json::Map::new(),
+            enqueue_time: Utc::now(),
+            start_time: None,
+            status,
+            current_retries: 0,
+            next_scheduled_run_time: None,
+            max_retries: 3,
+            job_timeout_seconds: Some(30),
+            result_ttl_seconds: Some(60),
+            job_unique_key: None,
+            completion_time: None,
+            result: None,
+            last_error: None,
+            queue_name: Some(queue_name.to_string()),
+            dlq_name: Some(dlq_name.to_string()),
+            worker_id: None,
+            trace_context: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn queue_commands_cover_branches() -> Result<()> {
+        let mut ctx = RedisTestContext::new().await?;
+        let config = ctx.write_config().await?;
+        let config_path = Some(config.path().to_string_lossy().to_string());
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+
+        queue_list(config_path.clone(), false).await?;
+
+        let pending = build_job(&queue_name, &dlq_name, JobStatus::Pending);
+        ctx.store.save_job_definition(&pending).await?;
+        ctx.store
+            .add_job_to_queue(
+                &queue_name,
+                &pending.id,
+                Utc::now().timestamp_millis() as f64,
+            )
+            .await?;
+
+        let active = build_job(&queue_name, &dlq_name, JobStatus::Active);
+        ctx.store.save_job_definition(&active).await?;
+        let completed = build_job(&queue_name, &dlq_name, JobStatus::Completed);
+        ctx.store.save_job_definition(&completed).await?;
+        let failed = build_job(&queue_name, &dlq_name, JobStatus::Failed);
+        ctx.store.save_job_definition(&failed).await?;
+
+        queue_list(config_path.clone(), true).await?;
+        queue_stats(config_path.clone(), Vec::new(), 1).await?;
+
+        queue_inspect("missing".to_string(), config_path.clone(), 10, 0).await?;
+        queue_inspect(queue_name, config_path, 10, 0).await?;
+        Ok(())
+    }
+}

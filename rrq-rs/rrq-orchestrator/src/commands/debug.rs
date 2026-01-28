@@ -11,6 +11,14 @@ use rrq::config::load_toml_settings;
 use rrq::store::JobStore;
 use rrq::{EnqueueOptions, Job, JobStatus, RRQClient};
 
+fn worker_tick_sleep() -> Duration {
+    if cfg!(test) {
+        Duration::from_millis(10)
+    } else {
+        Duration::from_secs(5)
+    }
+}
+
 pub(crate) async fn debug_generate_jobs(
     config: Option<String>,
     count: usize,
@@ -233,7 +241,7 @@ pub(crate) async fn debug_generate_workers(
             );
             store.set_worker_health(worker_id, &data, 60).await?;
         }
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(worker_tick_sleep()).await;
         let remaining = duration.saturating_sub(start.elapsed().as_secs());
         print!("\rSimulating workers... {remaining}s remaining");
     }
@@ -374,4 +382,68 @@ pub(crate) async fn debug_stress_test(
     }
     println!("\nStress test complete: {total_jobs} jobs submitted");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::test_support::RedisTestContext;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn debug_commands_cover_branches() -> Result<()> {
+        let mut ctx = RedisTestContext::new().await?;
+        let config = ctx.write_config().await?;
+        let config_path = Some(config.path().to_string_lossy().to_string());
+
+        debug_generate_jobs(
+            config_path.clone(),
+            3,
+            vec![ctx.settings.default_queue_name.clone()],
+            vec!["pending".to_string()],
+            1,
+            2,
+        )
+        .await?;
+        let queue_size = ctx
+            .store
+            .queue_size(&ctx.settings.default_queue_name)
+            .await?;
+        assert!(queue_size >= 1);
+
+        debug_generate_workers(config_path.clone(), 1, 1).await?;
+
+        debug_submit(
+            "debug_fn".to_string(),
+            config_path.clone(),
+            Some("[1,2]".to_string()),
+            Some("{\"flag\":true}".to_string()),
+            Some(ctx.settings.default_queue_name.clone()),
+            None,
+        )
+        .await?;
+
+        debug_stress_test(
+            config_path.clone(),
+            1,
+            1,
+            vec![ctx.settings.default_queue_name.clone()],
+        )
+        .await?;
+
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let job = client
+            .enqueue(
+                "cleanup",
+                vec![json!(1)],
+                serde_json::Map::new(),
+                EnqueueOptions::default(),
+            )
+            .await?;
+        debug_clear(config_path.clone(), true, "rrq:job:*".to_string()).await?;
+        let job_found = ctx.store.get_job_definition(&job.id).await?;
+        assert!(job_found.is_none());
+
+        Ok(())
+    }
 }

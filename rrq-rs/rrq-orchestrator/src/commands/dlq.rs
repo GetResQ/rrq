@@ -327,3 +327,130 @@ pub(crate) async fn dlq_requeue(options: DlqRequeueOptions) -> Result<()> {
     println!("Requeued {requeued} job(s) to {target_queue}");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::test_support::RedisTestContext;
+    use chrono::Utc;
+    use rrq::{Job, JobStatus};
+    use serde_json::json;
+
+    fn build_job(queue_name: &str, dlq_name: &str, function_name: &str) -> Job {
+        Job {
+            id: Job::new_id(),
+            function_name: function_name.to_string(),
+            job_args: vec![json!("arg")],
+            job_kwargs: serde_json::Map::new(),
+            enqueue_time: Utc::now(),
+            start_time: None,
+            status: JobStatus::Failed,
+            current_retries: 1,
+            next_scheduled_run_time: None,
+            max_retries: 3,
+            job_timeout_seconds: Some(30),
+            result_ttl_seconds: Some(60),
+            job_unique_key: None,
+            completion_time: Some(Utc::now()),
+            result: None,
+            last_error: Some("boom".to_string()),
+            queue_name: Some(queue_name.to_string()),
+            dlq_name: Some(dlq_name.to_string()),
+            worker_id: Some("worker-1".to_string()),
+            trace_context: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn dlq_commands_cover_branches() -> Result<()> {
+        let mut ctx = RedisTestContext::new().await?;
+        let config = ctx.write_config().await?;
+        let config_path = Some(config.path().to_string_lossy().to_string());
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+
+        dlq_inspect("missing".to_string(), config_path.clone(), false).await?;
+
+        let job1 = build_job(&queue_name, &dlq_name, "one");
+        ctx.store.save_job_definition(&job1).await?;
+        ctx.store
+            .move_job_to_dlq(&job1.id, &dlq_name, "boom", Utc::now())
+            .await?;
+        let job2 = build_job(&queue_name, &dlq_name, "two");
+        ctx.store.save_job_definition(&job2).await?;
+        ctx.store
+            .move_job_to_dlq(&job2.id, &dlq_name, "boom2", Utc::now())
+            .await?;
+
+        dlq_list(DlqListOptions {
+            config: config_path.clone(),
+            queue: None,
+            function: None,
+            limit: 10,
+            offset: 0,
+            dlq_name: Some(dlq_name.clone()),
+            raw: false,
+            batch_size: 1,
+        })
+        .await?;
+        dlq_list(DlqListOptions {
+            config: config_path.clone(),
+            queue: None,
+            function: None,
+            limit: 10,
+            offset: 0,
+            dlq_name: Some(dlq_name.clone()),
+            raw: true,
+            batch_size: 2,
+        })
+        .await?;
+
+        dlq_stats(config_path.clone(), Some(dlq_name.clone())).await?;
+        dlq_inspect(job1.id.clone(), config_path.clone(), true).await?;
+
+        dlq_requeue(DlqRequeueOptions {
+            config: config_path.clone(),
+            dlq_name: Some(dlq_name.clone()),
+            target_queue: None,
+            queue: None,
+            function: None,
+            job_id: None,
+            limit: None,
+            all: false,
+            dry_run: false,
+        })
+        .await?;
+
+        dlq_requeue(DlqRequeueOptions {
+            config: config_path.clone(),
+            dlq_name: Some(dlq_name.clone()),
+            target_queue: None,
+            queue: None,
+            function: None,
+            job_id: Some(job1.id.clone()),
+            limit: None,
+            all: false,
+            dry_run: true,
+        })
+        .await?;
+
+        dlq_requeue(DlqRequeueOptions {
+            config: config_path.clone(),
+            dlq_name: Some(dlq_name.clone()),
+            target_queue: None,
+            queue: Some(queue_name.clone()),
+            function: None,
+            job_id: Some(job1.id.clone()),
+            limit: Some(1),
+            all: false,
+            dry_run: false,
+        })
+        .await?;
+
+        let remaining = ctx.store.dlq_len(&dlq_name).await?;
+        assert!(remaining <= 1);
+        let queue_size = ctx.store.queue_size(&queue_name).await?;
+        assert!(queue_size >= 1);
+        Ok(())
+    }
+}

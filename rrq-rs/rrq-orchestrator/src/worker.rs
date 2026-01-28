@@ -1007,3 +1007,425 @@ async fn sleep_with_shutdown(shutdown: &Arc<AtomicBool>, duration: Duration) {
         remaining = remaining.saturating_sub(next);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::RedisTestContext;
+    use serde_json::json;
+    use tokio::sync::Mutex as TokioMutex;
+    use uuid::Uuid;
+
+    #[derive(Clone)]
+    enum TestOutcome {
+        Success(Value),
+        Retry,
+    }
+
+    #[derive(Clone)]
+    struct StaticExecutor {
+        outcome: TestOutcome,
+        delay: Duration,
+        last_request_id: Arc<TokioMutex<Option<String>>>,
+        cancelled: Arc<TokioMutex<Vec<String>>>,
+    }
+
+    impl StaticExecutor {
+        fn new(outcome: TestOutcome, delay: Duration) -> Self {
+            Self {
+                outcome,
+                delay,
+                last_request_id: Arc::new(TokioMutex::new(None)),
+                cancelled: Arc::new(TokioMutex::new(Vec::new())),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Executor for StaticExecutor {
+        async fn execute(&self, request: ExecutionRequest) -> Result<ExecutionOutcome> {
+            {
+                let mut guard = self.last_request_id.lock().await;
+                *guard = Some(request.request_id.clone());
+            }
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            let outcome = match &self.outcome {
+                TestOutcome::Success(value) => ExecutionOutcome::success(
+                    request.job_id.clone(),
+                    request.request_id.clone(),
+                    value.clone(),
+                ),
+                TestOutcome::Retry => ExecutionOutcome::retry(
+                    request.job_id.clone(),
+                    request.request_id.clone(),
+                    "retry",
+                    Some(30.0),
+                ),
+            };
+            Ok(outcome)
+        }
+
+        async fn cancel(&self, job_id: &str, request_id: Option<&str>) -> Result<()> {
+            let mut cancelled = self.cancelled.lock().await;
+            cancelled.push(request_id.unwrap_or(job_id).to_string());
+            Ok(())
+        }
+    }
+
+    fn build_job(queue_name: &str, dlq_name: &str, unique_key: Option<String>) -> Job {
+        Job {
+            id: Job::new_id(),
+            function_name: "task".to_string(),
+            job_args: vec![],
+            job_kwargs: serde_json::Map::new(),
+            enqueue_time: Utc::now(),
+            start_time: None,
+            status: JobStatus::Pending,
+            current_retries: 0,
+            next_scheduled_run_time: None,
+            max_retries: 3,
+            job_timeout_seconds: Some(1),
+            result_ttl_seconds: Some(30),
+            job_unique_key: unique_key,
+            completion_time: None,
+            result: None,
+            last_error: None,
+            queue_name: Some(queue_name.to_string()),
+            dlq_name: Some(dlq_name.to_string()),
+            worker_id: None,
+            trace_context: None,
+        }
+    }
+
+    #[test]
+    fn split_executor_name_variants() {
+        let (exec, handler) = split_executor_name("exec#handler");
+        assert_eq!(exec, Some("exec".to_string()));
+        assert_eq!(handler, "handler");
+
+        let (exec, handler) = split_executor_name("#handler");
+        assert_eq!(exec, None);
+        assert_eq!(handler, "handler");
+
+        let (exec, handler) = split_executor_name("exec#");
+        assert_eq!(exec, Some("exec".to_string()));
+        assert!(handler.is_empty());
+
+        let (exec, handler) = split_executor_name("plain");
+        assert_eq!(exec, None);
+        assert_eq!(handler, "plain");
+    }
+
+    #[tokio::test]
+    async fn handle_execution_outcome_success_releases_lock() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+        let job = build_job(&queue_name, &dlq_name, Some("unique-1".to_string()));
+        ctx.store.save_job_definition(&job).await.unwrap();
+        let acquired = ctx
+            .store
+            .acquire_unique_job_lock("unique-1", &job.id, 10)
+            .await
+            .unwrap();
+        assert!(acquired);
+
+        let outcome = ExecutionOutcome::success(&job.id, "req-1", json!({"ok": true}));
+        handle_execution_outcome(&job, &queue_name, &ctx.settings, &mut ctx.store, outcome)
+            .await
+            .unwrap();
+
+        let loaded = ctx
+            .store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, JobStatus::Completed);
+        assert_eq!(loaded.result, Some(json!({"ok": true})));
+        let ttl = ctx.store.get_lock_ttl("unique-1").await.unwrap();
+        assert_eq!(ttl, 0);
+    }
+
+    #[tokio::test]
+    async fn handle_execution_outcome_retry_after_sets_schedule() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+        let job = build_job(&queue_name, &dlq_name, None);
+        ctx.store.save_job_definition(&job).await.unwrap();
+
+        let outcome = ExecutionOutcome::retry(&job.id, "req-1", "retry", Some(0.01));
+        handle_execution_outcome(&job, &queue_name, &ctx.settings, &mut ctx.store, outcome)
+            .await
+            .unwrap();
+
+        let loaded = ctx
+            .store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, JobStatus::Retrying);
+        assert!(loaded.current_retries >= 1);
+        assert!(loaded.next_scheduled_run_time.is_some());
+        assert!(ctx.store.is_job_queued(&queue_name, &job.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn handle_execution_outcome_timeout_moves_to_dlq() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+        let job = build_job(&queue_name, &dlq_name, Some("unique-timeout".to_string()));
+        ctx.store.save_job_definition(&job).await.unwrap();
+        let acquired = ctx
+            .store
+            .acquire_unique_job_lock("unique-timeout", &job.id, 10)
+            .await
+            .unwrap();
+        assert!(acquired);
+
+        let outcome = ExecutionOutcome::timeout(&job.id, "req-1", "timeout");
+        handle_execution_outcome(&job, &queue_name, &ctx.settings, &mut ctx.store, outcome)
+            .await
+            .unwrap();
+
+        let loaded = ctx
+            .store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, JobStatus::Failed);
+        assert!(ctx.store.dlq_len(&dlq_name).await.unwrap() >= 1);
+        let ttl = ctx.store.get_lock_ttl("unique-timeout").await.unwrap();
+        assert_eq!(ttl, 0);
+    }
+
+    #[tokio::test]
+    async fn handle_execution_outcome_handler_not_found_moves_to_dlq() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+        let job = build_job(&queue_name, &dlq_name, None);
+        ctx.store.save_job_definition(&job).await.unwrap();
+
+        let outcome = ExecutionOutcome::handler_not_found(&job.id, "req-1", "missing");
+        handle_execution_outcome(&job, &queue_name, &ctx.settings, &mut ctx.store, outcome)
+            .await
+            .unwrap();
+
+        let loaded = ctx
+            .store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, JobStatus::Failed);
+        assert!(ctx.store.dlq_len(&dlq_name).await.unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn handle_execution_outcome_error_exceeds_retries() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+        let mut job = build_job(&queue_name, &dlq_name, None);
+        job.max_retries = 1;
+        job.current_retries = 0;
+        ctx.store.save_job_definition(&job).await.unwrap();
+
+        let outcome = ExecutionOutcome::error(&job.id, "req-1", "failed");
+        handle_execution_outcome(&job, &queue_name, &ctx.settings, &mut ctx.store, outcome)
+            .await
+            .unwrap();
+
+        let loaded = ctx
+            .store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, JobStatus::Failed);
+        assert!(ctx.store.dlq_len(&dlq_name).await.unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn recover_orphaned_jobs_requeues_and_marks_pending() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+        let mut job = build_job(&queue_name, &dlq_name, None);
+        job.status = JobStatus::Active;
+        job.next_scheduled_run_time = Some(Utc::now());
+        ctx.store.save_job_definition(&job).await.unwrap();
+        let worker_id = format!("worker-{}", Uuid::new_v4());
+        ctx.store
+            .track_active_job(&worker_id, &job.id, Utc::now())
+            .await
+            .unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        recover_orphaned_jobs(&mut ctx.store, &ctx.settings, &shutdown)
+            .await
+            .unwrap();
+
+        let loaded = ctx
+            .store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, JobStatus::Pending);
+        assert!(ctx.store.is_job_queued(&queue_name, &job.id).await.unwrap());
+        let active = ctx.store.get_active_job_ids(&worker_id).await.unwrap();
+        assert!(!active.contains(&job.id));
+    }
+    #[tokio::test]
+    async fn calculate_backoff_respects_max_delay() {
+        let settings = RRQSettings {
+            base_retry_delay_seconds: 2.0,
+            max_retry_delay_seconds: 5.0,
+            ..Default::default()
+        };
+        assert_eq!(calculate_backoff_seconds(&settings, 1), 2.0);
+        assert_eq!(calculate_backoff_seconds(&settings, 2), 4.0);
+        assert_eq!(calculate_backoff_seconds(&settings, 3), 5.0);
+    }
+
+    #[tokio::test]
+    async fn worker_processes_success_job() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        ctx.settings.default_executor_name = "test".to_string();
+        let executor = Arc::new(StaticExecutor::new(
+            TestOutcome::Success(json!({"ok": true})),
+            Duration::from_millis(0),
+        ));
+        let mut executors: HashMap<String, Arc<dyn Executor>> = HashMap::new();
+        executors.insert("test".to_string(), executor);
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let job = client
+            .enqueue(
+                "success",
+                Vec::new(),
+                serde_json::Map::new(),
+                EnqueueOptions::default(),
+            )
+            .await
+            .unwrap();
+        let mut worker = RRQWorker::new(
+            ctx.settings.clone(),
+            None,
+            Some("worker-1".to_string()),
+            executors,
+            true,
+        )
+        .await
+        .unwrap();
+        timeout(Duration::from_secs(5), worker.run())
+            .await
+            .unwrap()
+            .unwrap();
+        let loaded = ctx
+            .store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, JobStatus::Completed);
+        assert_eq!(loaded.result, Some(json!({"ok": true})));
+    }
+
+    #[tokio::test]
+    async fn worker_processes_retry_job() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        ctx.settings.default_executor_name = "test".to_string();
+        let executor = Arc::new(StaticExecutor::new(
+            TestOutcome::Retry,
+            Duration::from_millis(0),
+        ));
+        let mut executors: HashMap<String, Arc<dyn Executor>> = HashMap::new();
+        executors.insert("test".to_string(), executor);
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let job = client
+            .enqueue(
+                "retry",
+                Vec::new(),
+                serde_json::Map::new(),
+                EnqueueOptions::default(),
+            )
+            .await
+            .unwrap();
+        let mut worker = RRQWorker::new(
+            ctx.settings.clone(),
+            None,
+            Some("worker-1".to_string()),
+            executors,
+            true,
+        )
+        .await
+        .unwrap();
+        timeout(Duration::from_secs(5), worker.run())
+            .await
+            .unwrap()
+            .unwrap();
+        let loaded = ctx
+            .store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, JobStatus::Retrying);
+        assert_eq!(loaded.current_retries, 1);
+        assert!(loaded.next_scheduled_run_time.is_some());
+    }
+
+    #[tokio::test]
+    async fn worker_timeout_triggers_cancel() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        ctx.settings.default_executor_name = "test".to_string();
+        let executor = Arc::new(StaticExecutor::new(
+            TestOutcome::Success(json!({"ok": true})),
+            Duration::from_millis(50),
+        ));
+        let last_request_id = executor.last_request_id.clone();
+        let cancelled = executor.cancelled.clone();
+        let mut executors: HashMap<String, Arc<dyn Executor>> = HashMap::new();
+        executors.insert("test".to_string(), executor);
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let options = EnqueueOptions {
+            job_timeout_seconds: Some(0),
+            ..Default::default()
+        };
+        let job = client
+            .enqueue("timeout", Vec::new(), serde_json::Map::new(), options)
+            .await
+            .unwrap();
+        let mut worker = RRQWorker::new(
+            ctx.settings.clone(),
+            None,
+            Some("worker-1".to_string()),
+            executors,
+            true,
+        )
+        .await
+        .unwrap();
+        timeout(Duration::from_secs(5), worker.run())
+            .await
+            .unwrap()
+            .unwrap();
+        let request_id = last_request_id.lock().await.clone().unwrap();
+        let cancelled = cancelled.lock().await;
+        assert!(cancelled.contains(&request_id));
+        let loaded = ctx
+            .store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, JobStatus::Failed);
+    }
+}
