@@ -573,7 +573,7 @@ hiredis = [
 
 [[package]]
 name = "rrq"
-version = "0.9.0"
+version = "0.9.1"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },

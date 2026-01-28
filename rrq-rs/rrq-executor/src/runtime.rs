@@ -115,7 +115,8 @@ async fn handle_connection<T: Telemetry + ?Sized>(
             }
         }
     });
-    let mut connection_requests: Vec<String> = Vec::new();
+    let connection_requests: Arc<Mutex<std::collections::HashSet<String>>> =
+        Arc::new(Mutex::new(std::collections::HashSet::new()));
 
     loop {
         let message = match read_message(&mut reader).await? {
@@ -136,12 +137,16 @@ async fn handle_connection<T: Telemetry + ?Sized>(
 
                 let request_id = payload.request_id.clone();
                 let job_id = payload.job_id.clone();
-                connection_requests.push(request_id.clone());
+                {
+                    let mut active = connection_requests.lock().await;
+                    active.insert(request_id.clone());
+                }
                 let response_tx = response_tx.clone();
                 let registry = registry.clone();
                 let telemetry = telemetry.clone_box();
                 let in_flight_for_task = in_flight.clone();
                 let job_index_for_task = job_index.clone();
+                let active_for_task = connection_requests.clone();
                 let request_id_for_task = request_id.clone();
                 let job_id_for_task = job_id.clone();
                 let response_tx_for_task = response_tx.clone();
@@ -154,6 +159,8 @@ async fn handle_connection<T: Telemetry + ?Sized>(
                     in_flight.remove(&request_id_for_task);
                     let mut job_index = job_index_for_task.lock().await;
                     job_index.remove(&job_id_for_task);
+                    let mut active = active_for_task.lock().await;
+                    active.remove(&request_id_for_task);
                 });
 
                 {
@@ -194,10 +201,19 @@ async fn handle_connection<T: Telemetry + ?Sized>(
         }
     }
 
-    for request_id in connection_requests {
-        let mut in_flight = in_flight.lock().await;
-        if let Some(task) = in_flight.remove(&request_id) {
+    let request_ids = {
+        let mut active = connection_requests.lock().await;
+        active.drain().collect::<Vec<_>>()
+    };
+    for request_id in request_ids {
+        let task = {
+            let mut in_flight = in_flight.lock().await;
+            in_flight.remove(&request_id)
+        };
+        if let Some(task) = task {
             task.handle.abort();
+            let mut job_index = job_index.lock().await;
+            job_index.remove(&task.job_id);
         }
     }
     writer_task.abort();
@@ -597,6 +613,67 @@ mod tests {
         }
         drop(client);
         let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn connection_teardown_clears_tracking_maps() {
+        let mut registry = Registry::new();
+        registry.register("sleep", |request| async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            ExecutionOutcome::success(
+                request.job_id.clone(),
+                request.request_id.clone(),
+                json!({"ok": true}),
+            )
+        });
+        let (client, server) = UnixStream::pair().unwrap();
+        let in_flight = Arc::new(Mutex::new(HashMap::new()));
+        let job_index = Arc::new(Mutex::new(HashMap::new()));
+        let in_flight_for_server = in_flight.clone();
+        let job_index_for_server = job_index.clone();
+        let server_task = tokio::spawn(async move {
+            handle_connection(
+                server,
+                &registry,
+                &NoopTelemetry,
+                in_flight_for_server,
+                job_index_for_server,
+            )
+            .await
+            .unwrap();
+        });
+        let mut client = client;
+        let request = build_request("sleep");
+        let message = ExecutorMessage::Request {
+            payload: request.clone(),
+        };
+        write_message(&mut client, &message).await.unwrap();
+
+        let mut inserted = false;
+        for _ in 0..20 {
+            let has_in_flight = {
+                let guard = in_flight.lock().await;
+                guard.contains_key(&request.request_id)
+            };
+            let has_job_index = {
+                let guard = job_index.lock().await;
+                guard.contains_key(&request.job_id)
+            };
+            if has_in_flight && has_job_index {
+                inserted = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(inserted, "request never entered tracking maps");
+
+        drop(client);
+        let _ = server_task.await;
+
+        let in_flight = in_flight.lock().await;
+        let job_index = job_index.lock().await;
+        assert!(in_flight.is_empty());
+        assert!(job_index.is_empty());
     }
 
     #[tokio::test]
