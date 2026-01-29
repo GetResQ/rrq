@@ -1327,6 +1327,7 @@ dependencies = [
  "redis",
  "rrq-producer",
  "rrq-protocol",
+ "rustls",
  "serde",
  "serde_json",
  "tokio",
@@ -1360,6 +1361,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "redis",
+ "rustls",
  "serde_json",
  "tokio",
  "uuid",
@@ -1381,6 +1383,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c665f33d38cea657d9614f766881e4d510e0eda4239891eea56b4cadcf01801b"
 dependencies = [
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",

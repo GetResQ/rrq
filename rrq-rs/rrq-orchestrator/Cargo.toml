@@ -27,6 +27,7 @@ ignore = "0.4.23"
 num_cpus = "1.17.0"
 notify = "8.2.0"
 redis = { version = "1.0.2", features = ["tokio-comp", "tokio-rustls-comp", "connection-manager"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 tokio = { version = "1.49.0", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
