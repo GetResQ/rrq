@@ -92,6 +92,12 @@ fn connect_timeout_from_settings(timeout_ms: i64) -> Duration {
     Duration::from_millis(ms as u64)
 }
 
+fn ensure_tcp_socket_available(addr: SocketAddr) -> Result<()> {
+    std::net::TcpListener::bind(addr)
+        .map_err(|err| anyhow::anyhow!("executor tcp_socket port in use ({addr}): {err}"))?;
+    Ok(())
+}
+
 fn socket_path_max_len() -> Option<usize> {
     if cfg!(target_os = "macos") {
         Some(104)
@@ -321,6 +327,7 @@ impl SocketExecutorPool {
         }
         let socket = if self.tcp_socket.is_some() {
             let addr = self.next_tcp_socket()?;
+            ensure_tcp_socket_available(addr)?;
             ExecutorSocketTarget::Tcp(addr)
         } else {
             let socket_path = self.next_socket_path()?;
@@ -423,7 +430,15 @@ set socket_dir to a shorter absolute path (e.g. /tmp/rrq).",
                 ));
             }
             match connect_stream(socket).await {
-                Ok(_) => return Ok(()),
+                Ok(_) => {
+                    if let Ok(Some(status)) = child.try_wait() {
+                        last_error = Some(anyhow::anyhow!(
+                            "executor exited before socket ready ({status})"
+                        ));
+                        continue;
+                    }
+                    return Ok(());
+                }
                 Err(err) => {
                     let retryable = matches!(
                         err.kind(),
@@ -1125,6 +1140,29 @@ mod tests {
             Err(err) => assert!(err.to_string().contains("range too small")),
             Ok(_) => panic!("expected tcp socket range error"),
         }
+    }
+
+    #[tokio::test]
+    async fn tcp_socket_pool_rejects_port_in_use() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let err = SocketExecutorPool::new(
+            vec!["true".to_string()],
+            1,
+            1,
+            None,
+            None,
+            None,
+            Some(format!("127.0.0.1:{port}")),
+            None,
+            Duration::from_millis(DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS as u64),
+        )
+        .await;
+        match err {
+            Err(err) => assert!(err.to_string().contains("port in use")),
+            Ok(_) => panic!("expected tcp socket port-in-use error"),
+        }
+        drop(listener);
     }
 
     #[test]
