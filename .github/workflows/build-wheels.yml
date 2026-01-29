@@ -79,8 +79,6 @@ jobs:
       matrix:
         include:
           - os: macos-14
-            arch: x86_64
-          - os: macos-14
             arch: arm64
     env:
       CIBW_ARCHS_MACOS: ${{ matrix.arch }}
