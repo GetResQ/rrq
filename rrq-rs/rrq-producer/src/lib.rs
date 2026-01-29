@@ -3,11 +3,23 @@ use chrono::{DateTime, Utc};
 use redis::AsyncCommands;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+use std::sync::Once;
 use uuid::Uuid;
 
 const JOB_KEY_PREFIX: &str = "rrq:job:";
 const QUEUE_KEY_PREFIX: &str = "rrq:queue:";
 const DEFAULT_QUEUE_NAME: &str = "rrq:queue:default";
+
+static CRYPTO_PROVIDER_INIT: Once = Once::new();
+
+/// Ensures the rustls crypto provider is installed for TLS connections (rediss://).
+/// This is idempotent and safe to call multiple times.
+fn ensure_crypto_provider() {
+    CRYPTO_PROVIDER_INIT.call_once(|| {
+        // Ignore errors - if already installed by the application, that's fine
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct EnqueueOptions {
@@ -27,6 +39,9 @@ pub struct Producer {
 
 impl Producer {
     pub async fn new(redis_dsn: impl AsRef<str>) -> Result<Self> {
+        // Ensure TLS crypto provider is available for rediss:// connections
+        ensure_crypto_provider();
+
         let client = redis::Client::open(redis_dsn.as_ref())
             .with_context(|| "failed to create Redis client")?;
         let conn = client
@@ -171,5 +186,30 @@ mod tests {
         let queue_key = format_queue_key("default");
         let score: Option<f64> = conn.zscore(queue_key, &job_id).await.unwrap();
         assert!(score.is_some());
+    }
+
+    #[test]
+    fn ensure_crypto_provider_is_idempotent() {
+        // Should not panic when called multiple times
+        ensure_crypto_provider();
+        ensure_crypto_provider();
+        ensure_crypto_provider();
+    }
+
+    #[tokio::test]
+    async fn producer_connects_with_tls_when_configured() {
+        // Skip if no TLS Redis DSN is configured
+        let Ok(dsn) = std::env::var("RRQ_TEST_REDIS_TLS_DSN") else {
+            eprintln!("Skipping TLS test: RRQ_TEST_REDIS_TLS_DSN not set");
+            return;
+        };
+
+        // This should succeed if TLS is properly configured
+        let result = Producer::new(&dsn).await;
+        assert!(
+            result.is_ok(),
+            "Failed to connect to Redis with TLS: {:?}",
+            result.err()
+        );
     }
 }
