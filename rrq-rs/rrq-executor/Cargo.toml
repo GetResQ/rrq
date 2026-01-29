@@ -1,6 +1,6 @@
 [package]
 name = "rrq-executor"
-version = "0.9.7"
+version = "0.9.8"
 edition = "2024"
 license = "Apache-2.0"
 description = "RRQ socket executor runtime for Rust."
@@ -13,7 +13,7 @@ categories = ["asynchronous"]
 
 [dependencies]
 async-trait = "0.1.89"
-rrq-protocol = { version = "0.9.7", path = "../rrq-protocol" }
+rrq-protocol = { version = "0.9.8", path = "../rrq-protocol" }
 chrono = "0.4.43"
 serde_json = "1.0.149"
 tokio = { version = "1.49.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

@@ -1,6 +1,6 @@
 [package]
 name = "rrq-protocol"
-version = "0.9.7"
+version = "0.9.8"
 edition = "2024"
 license = "Apache-2.0"
 description = "Shared RRQ executor protocol types."

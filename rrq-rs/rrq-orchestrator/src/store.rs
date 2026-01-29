@@ -13,6 +13,51 @@ use crate::constants::{
 use crate::job::{Job, JobStatus};
 use crate::settings::RRQSettings;
 
+fn summarize_redis_dsn(dsn: &str) -> String {
+    let (scheme, rest) = dsn.split_once("://").unwrap_or(("", dsn));
+    let without_auth = rest.rsplit('@').next().unwrap_or(rest);
+    let host = without_auth
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(without_auth);
+
+    if scheme.is_empty() {
+        host.to_string()
+    } else if host.is_empty() {
+        format!("{scheme}://")
+    } else {
+        format!("{scheme}://{host}")
+    }
+}
+
+fn is_tls_handshake_error(err: &redis::RedisError) -> bool {
+    let message = err.to_string().to_ascii_lowercase();
+    message.contains("tls handshake") || message.contains("handshake eof")
+}
+
+fn redis_connect_context(dsn: &str, err: &redis::RedisError) -> String {
+    let summary = summarize_redis_dsn(dsn);
+    let mut context = if summary.is_empty() {
+        "failed to connect to Redis".to_string()
+    } else {
+        format!("failed to connect to Redis ({summary})")
+    };
+
+    if is_tls_handshake_error(err) {
+        if dsn.starts_with("rediss://") || dsn.starts_with("valkeys://") {
+            context.push_str(
+                "; TLS handshake failed - verify the endpoint supports TLS and the port/certs are correct",
+            );
+        } else {
+            context.push_str(
+                "; TLS handshake failed - if Redis requires TLS, use rediss:// for the DSN",
+            );
+        }
+    }
+
+    context
+}
+
 #[derive(Clone)]
 pub struct JobStore {
     settings: RRQSettings,
@@ -28,7 +73,10 @@ impl JobStore {
         let conn = client
             .get_multiplexed_async_connection()
             .await
-            .with_context(|| "failed to connect to Redis")?;
+            .map_err(|err| {
+                let context = redis_connect_context(&settings.redis_dsn, &err);
+                anyhow::Error::new(err).context(context)
+            })?;
         Ok(Self::with_connection(settings, conn))
     }
 
