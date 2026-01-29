@@ -110,6 +110,11 @@ def _env_overrides() -> dict[str, Any]:
         _parse_float,
     )
     set_value(
+        "executor_connect_timeout_ms",
+        "RRQ_EXECUTOR_CONNECT_TIMEOUT_MS",
+        _parse_int,
+    )
+    set_value(
         "default_lock_timeout_extension_seconds",
         "RRQ_DEFAULT_LOCK_TIMEOUT_EXTENSION_SECONDS",
         _parse_int,

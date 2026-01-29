@@ -16,6 +16,12 @@ cd rrq-rs/rrq-executor
 RRQ_EXECUTOR_SOCKET=/tmp/rrq-executor.sock cargo run --example socket_executor
 ```
 
+You can also bind a localhost TCP socket:
+
+```bash
+RRQ_EXECUTOR_TCP_SOCKET=127.0.0.1:9000 cargo run --example socket_executor
+```
+
 ## Build your own executor binary
 
 This crate is designed for per-project executors. You implement business logic
@@ -58,6 +64,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 If you do not need tracing, you can also call `rrq_executor::run_socket(&registry, socket_path)`
 to create a runtime automatically.
 
+To listen on a localhost TCP socket instead, use `ENV_EXECUTOR_TCP_SOCKET`:
+
+```rust
+use rrq_executor::{parse_tcp_socket, ExecutionOutcome, ExecutorRuntime, Registry, ENV_EXECUTOR_TCP_SOCKET};
+
+let addr = parse_tcp_socket(&std::env::var(ENV_EXECUTOR_TCP_SOCKET)?)?;
+runtime.run_tcp(&registry, addr)?;
+```
+
 3) Point `rrq.toml` at your binary:
 
 ```toml
@@ -67,7 +82,8 @@ pool_size = 2
 max_in_flight = 1
 ```
 
-The orchestrator sets `RRQ_EXECUTOR_SOCKET` when launching the executor.
+The orchestrator sets `RRQ_EXECUTOR_SOCKET` (or `RRQ_EXECUTOR_TCP_SOCKET` when
+configured) when launching the executor.
 Use `max_in_flight` to allow multiple concurrent requests per executor process.
 
 ## Tracing (optional)

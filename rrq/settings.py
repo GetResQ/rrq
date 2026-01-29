@@ -3,9 +3,10 @@
 Settings are loaded from TOML files via rrq.config and validated with Pydantic.
 """
 
+from ipaddress import ip_address
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .constants import (
     DEFAULT_DLQ_NAME,
@@ -16,11 +17,12 @@ from .constants import (
     DEFAULT_QUEUE_NAME,
     DEFAULT_RESULT_TTL_SECONDS,
     DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
+    DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS,
 )
 
 
 class ExecutorConfig(BaseModel):
-    """Configuration for external executors (Unix socket)."""
+    """Configuration for external executors (Unix or TCP socket)."""
 
     type: Literal["socket"] = "socket"
     cmd: list[str] | None = None
@@ -29,7 +31,49 @@ class ExecutorConfig(BaseModel):
     env: dict[str, str] | None = None
     cwd: str | None = None
     socket_dir: str | None = None
+    tcp_socket: str | None = None
     response_timeout_seconds: float | None = None
+
+    @model_validator(mode="after")
+    def validate_socket_options(self) -> "ExecutorConfig":
+        if self.socket_dir and self.tcp_socket:
+            raise ValueError("tcp_socket cannot be used with socket_dir")
+        if self.tcp_socket:
+            self._validate_tcp_socket(self.tcp_socket)
+        return self
+
+    @staticmethod
+    def _validate_tcp_socket(value: str) -> None:
+        raw = value.strip()
+        if not raw:
+            raise ValueError("tcp_socket cannot be empty")
+
+        if raw.startswith("["):
+            host_part, sep, port_part = raw.partition("]:")
+            if not sep:
+                raise ValueError("tcp_socket must be in [host]:port format")
+            host = host_part.lstrip("[")
+        else:
+            host, sep, port_part = raw.rpartition(":")
+            if not sep:
+                raise ValueError("tcp_socket must be in host:port format")
+            if not host:
+                raise ValueError("tcp_socket host cannot be empty")
+
+        if host != "localhost":
+            try:
+                ip = ip_address(host)
+            except ValueError as exc:
+                raise ValueError(f"Invalid tcp_socket host: {host}") from exc
+            if not ip.is_loopback:
+                raise ValueError("tcp_socket host must be localhost")
+
+        try:
+            port = int(port_part)
+        except ValueError as exc:
+            raise ValueError(f"Invalid tcp_socket port: {port_part}") from exc
+        if port <= 0 or port > 65535:
+            raise ValueError(f"tcp_socket port out of range: {port}")
 
 
 class RRQSettings(BaseModel):
@@ -70,6 +114,12 @@ class RRQSettings(BaseModel):
     default_poll_delay_seconds: float = Field(
         default=DEFAULT_POLL_DELAY_SECONDS,
         description="Default delay (in seconds) for worker polling when queues are empty.",
+    )
+    executor_connect_timeout_ms: int = Field(
+        default=DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS,
+        description=(
+            "Timeout (in milliseconds) for executor sockets to become ready after spawn."
+        ),
     )
     default_unique_job_lock_ttl_seconds: int = Field(
         default=DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,

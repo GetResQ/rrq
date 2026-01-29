@@ -35,6 +35,7 @@ understand (for example, `cron_jobs` and `watch`).
 | `default_lock_timeout_extension_seconds` | int | `60` | `RRQ_DEFAULT_LOCK_TIMEOUT_EXTENSION_SECONDS` | Extra time added to job timeout for lock TTL. |
 | `default_result_ttl_seconds` | int | `86400` | `RRQ_DEFAULT_RESULT_TTL_SECONDS` | TTL for successful job results. |
 | `default_poll_delay_seconds` | float | `0.1` | `RRQ_DEFAULT_POLL_DELAY_SECONDS` | Worker sleep when queues are empty. |
+| `executor_connect_timeout_ms` | int | `15000` | `RRQ_EXECUTOR_CONNECT_TIMEOUT_MS` | Time (ms) to wait for executor sockets to come online. |
 | `default_unique_job_lock_ttl_seconds` | int | `21600` | `RRQ_DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS` | TTL for unique job locks. |
 | `default_executor_name` | string | `"python"` | `RRQ_DEFAULT_EXECUTOR_NAME` | Must match a configured executor. |
 | `executors` | table | `{}` | — | Map of executor configs. See below. |
@@ -55,7 +56,8 @@ Notes:
 
 ## [rrq.executors.<name>]
 
-Executor configuration for Unix socket runtimes (Python, Rust, or other).
+Executor configuration for Unix or localhost TCP socket runtimes (Python, Rust,
+or other).
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -66,11 +68,16 @@ Executor configuration for Unix socket runtimes (Python, Rust, or other).
 | `env` | table | — | Extra environment variables for the executor process. |
 | `cwd` | string | — | Working directory for the executor process. |
 | `socket_dir` | string | temp dir | Directory where executor sockets are created. |
+| `tcp_socket` | string | — | Localhost TCP socket in `host:port` or `[host]:port` form. |
 | `response_timeout_seconds` | float | — | Max wait for an executor response. |
 
 Notes:
 - `cmd` must be present for socket executors; RRQ will start one process per
-  pool slot and pass `RRQ_EXECUTOR_SOCKET` for each process.
+  pool slot and pass `RRQ_EXECUTOR_SOCKET` (or `RRQ_EXECUTOR_TCP_SOCKET` when
+  `tcp_socket` is configured) for each process.
+- `tcp_socket` is mutually exclusive with `socket_dir` and must point to a
+  localhost address. When `pool_size > 1`, RRQ assigns one port per executor
+  process starting at the configured port (for example, `9000`, `9001`, ...).
 - `response_timeout_seconds` is separate from job timeouts. If it is hit, the
   executor process is discarded and the job is treated as failed.
 - Relative `socket_dir` values are resolved against `cwd` if provided; otherwise
