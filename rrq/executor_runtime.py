@@ -376,7 +376,9 @@ def main() -> None:
     )
     args = parser.parse_args()
     asyncio.run(
-        run_python_executor(args.settings_object_path, args.socket_path, args.tcp_socket)
+        run_python_executor(
+            args.settings_object_path, args.socket_path, args.tcp_socket
+        )
     )
 
 
