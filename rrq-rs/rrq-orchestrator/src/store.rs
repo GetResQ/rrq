@@ -62,7 +62,7 @@ fn redis_connect_context(dsn: &str, err: &redis::RedisError) -> String {
 pub struct JobStore {
     settings: RRQSettings,
     conn: redis::aio::MultiplexedConnection,
-    lock_and_remove_script: Script,
+    lock_and_start_script: Script,
     retry_script: Script,
 }
 
@@ -81,9 +81,9 @@ impl JobStore {
     }
 
     pub fn with_connection(settings: RRQSettings, conn: redis::aio::MultiplexedConnection) -> Self {
-        let lock_and_remove_script = Script::new(
-            "-- KEYS: [1] = lock_key, [2] = queue_key\n\
-             -- ARGV: [1] = worker_id, [2] = lock_timeout_ms, [3] = job_id\n\
+        let lock_and_start_script = Script::new(
+            "-- KEYS: [1] = lock_key, [2] = queue_key, [3] = job_key, [4] = active_key\n\
+             -- ARGV: [1] = worker_id, [2] = lock_timeout_ms, [3] = job_id, [4] = start_time, [5] = active_score\n\
              local lock_result = redis.call('SET', KEYS[1], ARGV[1], 'NX', 'PX', ARGV[2])\n\
              if lock_result then\n\
                  local removed_count = redis.call('ZREM', KEYS[2], ARGV[3])\n\
@@ -91,6 +91,8 @@ impl JobStore {
                      redis.call('DEL', KEYS[1])\n\
                      return {0, 0}\n\
                  end\n\
+                 redis.call('HSET', KEYS[3], 'status', 'ACTIVE', 'start_time', ARGV[4], 'worker_id', ARGV[1])\n\
+                 redis.call('ZADD', KEYS[4], ARGV[5], ARGV[3])\n\
                  return {1, removed_count}\n\
              else\n\
                  return {0, 0}\n\
@@ -108,7 +110,7 @@ impl JobStore {
         Self {
             settings,
             conn,
-            lock_and_remove_script,
+            lock_and_start_script,
             retry_script,
         }
     }
@@ -483,22 +485,31 @@ impl JobStore {
         Ok(removed)
     }
 
-    pub async fn atomic_lock_and_remove_job(
+    pub async fn atomic_lock_and_start_job(
         &mut self,
         job_id: &str,
         queue_name: &str,
         worker_id: &str,
         lock_timeout_ms: i64,
+        start_time: DateTime<Utc>,
     ) -> Result<(bool, i64)> {
         let lock_key = format!("{LOCK_KEY_PREFIX}{job_id}");
         let queue_key = self.format_queue_key(queue_name);
+        let job_key = format!("{JOB_KEY_PREFIX}{job_id}");
+        let active_key = Self::active_jobs_key(worker_id);
+        let start_time_str = start_time.to_rfc3339();
+        let active_score = start_time.timestamp() as f64;
         let result: (i64, i64) = self
-            .lock_and_remove_script
+            .lock_and_start_script
             .key(lock_key)
             .key(queue_key)
+            .key(job_key)
+            .key(active_key)
             .arg(worker_id)
             .arg(lock_timeout_ms)
             .arg(job_id)
+            .arg(start_time_str)
+            .arg(active_score)
             .invoke_async(&mut self.conn)
             .await?;
         Ok((result.0 != 0, result.1))
@@ -880,9 +891,10 @@ mod tests {
         let ready = ctx.store.get_ready_job_ids(&queue_name, 10).await.unwrap();
         assert!(ready.contains(&job.id));
 
+        let start_time = Utc::now();
         let (locked, removed) = ctx
             .store
-            .atomic_lock_and_remove_job(&job.id, &queue_name, "worker-1", 1000)
+            .atomic_lock_and_start_job(&job.id, &queue_name, "worker-1", 1000, start_time)
             .await
             .unwrap();
         assert!(locked);
@@ -891,12 +903,18 @@ mod tests {
             ctx.store.get_job_lock_owner(&job.id).await.unwrap(),
             Some("worker-1".to_string())
         );
-
-        let start_time = Utc::now();
-        ctx.store
-            .mark_job_started(&job.id, "worker-1", start_time)
+        let started = ctx
+            .store
+            .get_job_definition(&job.id)
             .await
+            .unwrap()
             .unwrap();
+        assert_eq!(started.status, JobStatus::Active);
+        assert_eq!(started.worker_id.as_deref(), Some("worker-1"));
+        assert_eq!(
+            started.start_time.unwrap().timestamp(),
+            start_time.timestamp()
+        );
         let active = ctx.store.get_active_job_ids("worker-1").await.unwrap();
         assert!(active.contains(&job.id));
 

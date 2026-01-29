@@ -283,7 +283,10 @@ impl SocketExecutorPool {
             #[cfg(test)]
             spawn_override: None,
         };
-        pool.ensure_started().await?;
+        if let Err(err) = pool.ensure_started().await {
+            let _ = pool.close().await;
+            return Err(err);
+        }
         Ok(pool)
     }
 

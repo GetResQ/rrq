@@ -253,41 +253,27 @@ impl RRQWorker {
                 let job_timeout = job
                     .job_timeout_seconds
                     .unwrap_or(self.settings.default_job_timeout_seconds);
-                let lock_timeout_ms =
-                    (job_timeout + self.settings.default_lock_timeout_extension_seconds) * 1000;
+                let lock_timeout_ms = job_timeout
+                    .checked_add(self.settings.default_lock_timeout_extension_seconds)
+                    .and_then(|sum| sum.checked_mul(1000))
+                    .ok_or_else(|| anyhow::anyhow!("lock_timeout_ms overflow"))?;
+                if lock_timeout_ms <= 0 {
+                    return Err(anyhow::anyhow!("lock_timeout_ms must be positive"));
+                }
 
+                let start_time = Utc::now();
                 let (locked, removed) = self
                     .job_store
-                    .atomic_lock_and_remove_job(
+                    .atomic_lock_and_start_job(
                         &job.id,
                         queue_name,
                         &self.worker_id,
                         lock_timeout_ms,
+                        start_time,
                     )
                     .await?;
                 if !locked || removed == 0 {
                     continue;
-                }
-
-                let start_time = Utc::now();
-                if let Err(err) = self
-                    .job_store
-                    .mark_job_started(&job.id, &self.worker_id, start_time)
-                    .await
-                {
-                    let _ = self.job_store.release_job_lock(&job.id).await;
-                    let _ = self
-                        .job_store
-                        .mark_job_pending(
-                            &job.id,
-                            Some("Job acquisition failed to start; re-queued for recovery."),
-                        )
-                        .await;
-                    let _ = self
-                        .job_store
-                        .add_job_to_queue(queue_name, &job.id, Utc::now().timestamp_millis() as f64)
-                        .await;
-                    return Err(err);
                 }
 
                 let permit = self.semaphore.clone().acquire_owned().await?;

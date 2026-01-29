@@ -481,21 +481,34 @@ mod tests {
     use rrq::EnqueueOptions;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
     use tokio::fs as tokio_fs;
     use uuid::Uuid;
 
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn env_lock() -> &'static Mutex<()> {
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
         key: &'static str,
         prev: Option<String>,
     }
 
     impl EnvGuard {
         fn set(key: &'static str, value: String) -> Self {
+            let lock = env_lock().lock().unwrap();
             let prev = std::env::var(key).ok();
             unsafe {
                 std::env::set_var(key, value);
             }
-            Self { key, prev }
+            Self {
+                _lock: lock,
+                key,
+                prev,
+            }
         }
     }
 
