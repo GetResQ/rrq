@@ -1414,6 +1414,7 @@ name = "rrq-producer"
 version = "0.9.8"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "redis",
  "serde_json",
