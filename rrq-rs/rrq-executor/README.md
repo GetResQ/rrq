@@ -1,58 +1,157 @@
 # rrq-executor
 
-Reference Rust socket executor for RRQ.
+[![Crates.io](https://img.shields.io/crates/v/rrq-executor.svg)](https://crates.io/crates/rrq-executor)
+[![Documentation](https://docs.rs/rrq-executor/badge.svg)](https://docs.rs/rrq-executor)
+[![License](https://img.shields.io/crates/l/rrq-executor.svg)](LICENSE)
 
-## Git dependency
+A Rust runtime for building [RRQ](https://crates.io/crates/rrq) job executors. This crate handles the socket protocol, connection management, and job dispatching—you just implement your handlers.
 
-```toml
-[dependencies]
-rrq-executor = { git = "https://github.com/getresq/rrq", package = "rrq-executor", rev = "<sha>" }
-```
+## Features
 
-## Example
+- **Unix socket & TCP support** for orchestrator communication
+- **Concurrent job execution** with configurable parallelism
+- **Graceful cancellation** of in-flight jobs
+- **OpenTelemetry integration** for distributed tracing (optional)
+- **Handler registry** for routing jobs to functions
+- **Async/await native** with Tokio runtime
 
-```bash
-cd rrq-rs/rrq-executor
-RRQ_EXECUTOR_SOCKET=/tmp/rrq-executor.sock cargo run --example socket_executor
-```
-
-You can also bind a localhost TCP socket:
-
-```bash
-RRQ_EXECUTOR_TCP_SOCKET=127.0.0.1:9000 cargo run --example socket_executor
-```
-
-## Build your own executor binary
-
-This crate is designed for per-project executors. You implement business logic
-handlers and let rrq-executor run the socket protocol loop.
-
-1) Add the dependency:
+## Installation
 
 ```toml
 [dependencies]
-rrq-executor = { git = "https://github.com/getresq/rrq", package = "rrq-executor", rev = "<sha>" }
+rrq-executor = "0.9"
 ```
 
-2) Create a small `main.rs`:
+With OpenTelemetry tracing:
+
+```toml
+[dependencies]
+rrq-executor = { version = "0.9", features = ["otel"] }
+```
+
+## Quick Start
+
+Create a simple executor with one handler:
 
 ```rust
-use rrq_executor::{ExecutionOutcome, ExecutorRuntime, Registry, ENV_EXECUTOR_SOCKET};
+use rrq_executor::{run_socket, ExecutionOutcome, Registry};
 use serde_json::json;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = ExecutorRuntime::new()?;
-
+    // Create handler registry
     let mut registry = Registry::new();
-    registry.register("echo", |request| async move {
+
+    // Register a handler
+    registry.register("greet", |request| async move {
+        let name = request.args.get(0)
+            .and_then(|v| v.as_str())
+            .unwrap_or("World");
+
         ExecutionOutcome::success(
             request.job_id.clone(),
             request.request_id.clone(),
-            json!({
-                "job_id": request.job_id,
-                "args": request.args,
-                "kwargs": request.kwargs,
-            }),
+            json!({ "message": format!("Hello, {}!", name) }),
+        )
+    });
+
+    // Run the executor (reads socket path from RRQ_EXECUTOR_SOCKET env var)
+    let socket_path = std::env::var("RRQ_EXECUTOR_SOCKET")?;
+    run_socket(&registry, socket_path)
+}
+```
+
+## Handler Functions
+
+Handlers receive an `ExecutionRequest` and return an `ExecutionOutcome`:
+
+```rust
+use rrq_executor::{ExecutionOutcome, Registry};
+use rrq_protocol::ExecutionRequest;
+
+let mut registry = Registry::new();
+
+// Async handler with full request access
+registry.register("process_order", |request: ExecutionRequest| async move {
+    // Access job metadata
+    println!("Job ID: {}", request.job_id);
+    println!("Attempt: {}", request.context.attempt);
+    println!("Queue: {}", request.context.queue_name);
+
+    // Access arguments
+    let order_id = request.args.get(0)
+        .and_then(|v| v.as_str())
+        .ok_or("missing order_id")?;
+
+    // Access keyword arguments
+    let priority = request.kwargs.get("priority")
+        .and_then(|v| v.as_str())
+        .unwrap_or("normal");
+
+    // Do work...
+
+    ExecutionOutcome::success(
+        request.job_id.clone(),
+        request.request_id.clone(),
+        serde_json::json!({ "processed": order_id }),
+    )
+});
+```
+
+## Outcome Types
+
+Return different outcomes based on execution result:
+
+```rust
+use rrq_executor::ExecutionOutcome;
+
+// Success - job completed
+ExecutionOutcome::success(job_id, request_id, json!({"result": "ok"}))
+
+// Failure - job failed, may be retried based on retry policy
+ExecutionOutcome::failure(job_id, request_id, "Something went wrong".to_string())
+
+// Retry after delay - explicitly request retry after N seconds
+ExecutionOutcome::retry_after(job_id, request_id, "Rate limited".to_string(), 60)
+
+// Timeout - job exceeded deadline
+ExecutionOutcome::timeout(job_id, request_id)
+
+// Cancelled - job was cancelled
+ExecutionOutcome::cancelled(job_id, request_id)
+```
+
+## TCP Socket Support
+
+Use TCP instead of Unix sockets (useful on Windows or for network isolation):
+
+```rust
+use rrq_executor::{run_tcp, parse_tcp_socket, Registry};
+
+let mut registry = Registry::new();
+// ... register handlers ...
+
+let addr = std::env::var("RRQ_EXECUTOR_TCP_SOCKET")?;
+let socket_addr = parse_tcp_socket(&addr)?;
+run_tcp(&registry, socket_addr)
+```
+
+## Custom Runtime
+
+For more control, create your own `ExecutorRuntime`:
+
+```rust
+use rrq_executor::{ExecutorRuntime, Registry, ENV_EXECUTOR_SOCKET};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create runtime (initializes Tokio)
+    let runtime = ExecutorRuntime::new()?;
+
+    let mut registry = Registry::new();
+    registry.register("echo", |req| async move {
+        ExecutionOutcome::success(
+            req.job_id.clone(),
+            req.request_id.clone(),
+            serde_json::json!(req.args),
         )
     });
 
@@ -61,60 +160,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-If you do not need tracing, you can also call `rrq_executor::run_socket(&registry, socket_path)`
-to create a runtime automatically.
+## OpenTelemetry Tracing
 
-To listen on a localhost TCP socket instead, use `ENV_EXECUTOR_TCP_SOCKET`:
-
-```rust
-use rrq_executor::{parse_tcp_socket, ExecutionOutcome, ExecutorRuntime, Registry, ENV_EXECUTOR_TCP_SOCKET};
-
-let addr = parse_tcp_socket(&std::env::var(ENV_EXECUTOR_TCP_SOCKET)?)?;
-runtime.run_tcp(&registry, addr)?;
-```
-
-3) Point `rrq.toml` at your binary:
-
-```toml
-[rrq.executors.rust]
-cmd = ["./target/release/myapp-executor"]
-pool_size = 2
-max_in_flight = 1
-```
-
-The orchestrator sets `RRQ_EXECUTOR_SOCKET` (or `RRQ_EXECUTOR_TCP_SOCKET` when
-configured) when launching the executor.
-Use `max_in_flight` to allow multiple concurrent requests per executor process.
-
-## Tracing (optional)
-
-If you want OpenTelemetry spans, enable the `otel` feature and initialize
-tracing after the Tokio runtime is available:
-
-```toml
-[dependencies]
-rrq-executor = { git = "https://github.com/getresq/rrq", package = "rrq-executor", rev = "<sha>", features = ["otel"] }
-```
+Enable the `otel` feature for distributed tracing:
 
 ```rust
-use rrq_executor::{ExecutionOutcome, ExecutorRuntime, Registry, ENV_EXECUTOR_SOCKET};
+use rrq_executor::{ExecutorRuntime, Registry, ENV_EXECUTOR_SOCKET};
 use rrq_executor::telemetry::otel::{init_tracing, OtelTelemetry};
-use serde_json::json;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = ExecutorRuntime::new()?;
+
+    // Initialize OpenTelemetry (requires runtime context)
     {
         let _guard = runtime.enter();
-        init_tracing("myapp-executor")?;
+        init_tracing("my-executor")?;
     }
 
     let telemetry = OtelTelemetry;
     let mut registry = Registry::new();
-    registry.register("echo", |request| async move {
+
+    registry.register("traced_handler", |request| async move {
+        // This handler will be traced with parent context from job
         ExecutionOutcome::success(
             request.job_id.clone(),
             request.request_id.clone(),
-            json!({ "job_id": request.job_id }),
+            serde_json::json!({"traced": true}),
         )
     });
 
@@ -123,12 +194,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-To run the reference example with tracing enabled:
+Configure via standard OpenTelemetry environment variables:
+- `OTEL_EXPORTER_OTLP_ENDPOINT` - OTLP collector endpoint
+- `OTEL_SERVICE_NAME` - Service name for traces
+
+## Configuration in rrq.toml
+
+Point the RRQ orchestrator to your executor:
+
+```toml
+[rrq.executors.rust]
+type = "socket"
+cmd = ["./target/release/my-executor"]
+pool_size = 4
+max_in_flight = 10
+```
+
+With TCP socket:
+
+```toml
+[rrq.executors.rust]
+type = "socket"
+cmd = ["./target/release/my-executor"]
+tcp_socket = "127.0.0.1:9000"
+pool_size = 4
+max_in_flight = 10
+```
+
+## Environment Variables
+
+Set by the orchestrator when spawning executors:
+
+| Variable | Description |
+|----------|-------------|
+| `RRQ_EXECUTOR_SOCKET` | Unix socket path for communication |
+| `RRQ_EXECUTOR_TCP_SOCKET` | TCP socket address (alternative to Unix) |
+
+## Example Project Structure
 
 ```
-RRQ_EXECUTOR_SOCKET=/tmp/rrq-executor.sock cargo run --example socket_executor --features otel
+my-executor/
+├── Cargo.toml
+└── src/
+    └── main.rs
 ```
 
-This will emit executor spans using the trace context passed from RRQ. Configure
-your OTLP endpoint via standard OpenTelemetry environment variables (for
-example `OTEL_EXPORTER_OTLP_ENDPOINT`).
+```toml
+# Cargo.toml
+[package]
+name = "my-executor"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "my-executor"
+
+[dependencies]
+rrq-executor = "0.9"
+serde_json = "1.0"
+```
+
+## Related Crates
+
+| Crate | Description |
+|-------|-------------|
+| [`rrq`](https://crates.io/crates/rrq) | Job queue orchestrator |
+| [`rrq-producer`](https://crates.io/crates/rrq-producer) | Client for enqueuing jobs |
+| [`rrq-protocol`](https://crates.io/crates/rrq-protocol) | Protocol definitions |
+
+## License
+
+Apache-2.0
