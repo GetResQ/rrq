@@ -265,6 +265,8 @@ enum ExecutorCommand {
         settings: Option<String>,
         #[arg(long)]
         socket: Option<String>,
+        #[arg(long)]
+        tcp_socket: Option<String>,
     },
 }
 
@@ -452,8 +454,12 @@ async fn dispatch_command(command: Commands) -> Result<()> {
             }
         },
         Commands::Executor { command } => match command {
-            ExecutorCommand::Python { settings, socket } => {
-                executor_python(settings, socket).await?;
+            ExecutorCommand::Python {
+                settings,
+                socket,
+                tcp_socket,
+            } => {
+                executor_python(settings, socket, tcp_socket).await?;
             }
         },
     }
@@ -771,6 +777,7 @@ while True:
             command: ExecutorCommand::Python {
                 settings: None,
                 socket: None,
+                tcp_socket: None,
             },
         })
         .await?;

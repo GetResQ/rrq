@@ -2,7 +2,8 @@
 
 This protocol defines the contract between the RRQ orchestrator (Rust `rrq`
 worker) and executor runtimes (Python, Rust, or any other language). The v1
-transport is a Unix domain socket with length-delimited JSON frames.
+transport is a Unix domain socket (or a localhost TCP socket) with
+length-delimited JSON frames.
 
 ## Design Goals
 - **Centralized scheduling** in the Rust orchestrator (timeouts, retries, DLQ).
@@ -15,8 +16,12 @@ transport is a Unix domain socket with length-delimited JSON frames.
 - Field names are **snake_case**.
 
 ## Transport (v1)
-- The orchestrator sets `RRQ_EXECUTOR_SOCKET` to a filesystem path.
-- The executor **binds** a Unix socket at that path and accepts connections.
+- The orchestrator sets `RRQ_EXECUTOR_SOCKET` to a filesystem path **or**
+  `RRQ_EXECUTOR_TCP_SOCKET` to a `host:port` value.
+- The executor **binds** a Unix socket at that path, or binds a TCP socket on
+  the provided **localhost-only** address and accepts connections.
+- When using TCP executors with a pool, RRQ assigns a distinct port per
+  executor process.
 - Each connection is a stream of **length-delimited frames**:
   - 4-byte **big-endian** unsigned length prefix
   - followed by a UTF-8 JSON payload of that length

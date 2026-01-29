@@ -101,6 +101,11 @@ fn env_overrides() -> Result<Value> {
     )?;
     set_env_int(
         &mut payload,
+        "executor_connect_timeout_ms",
+        "RRQ_EXECUTOR_CONNECT_TIMEOUT_MS",
+    )?;
+    set_env_int(
+        &mut payload,
         "default_lock_timeout_extension_seconds",
         "RRQ_DEFAULT_LOCK_TIMEOUT_EXTENSION_SECONDS",
     )?;

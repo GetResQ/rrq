@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::constants::{
-    DEFAULT_DLQ_NAME, DEFAULT_JOB_TIMEOUT_SECONDS, DEFAULT_LOCK_TIMEOUT_EXTENSION_SECONDS,
-    DEFAULT_MAX_RETRIES, DEFAULT_POLL_DELAY_SECONDS, DEFAULT_QUEUE_NAME,
-    DEFAULT_RESULT_TTL_SECONDS, DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
+    DEFAULT_DLQ_NAME, DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS, DEFAULT_JOB_TIMEOUT_SECONDS,
+    DEFAULT_LOCK_TIMEOUT_EXTENSION_SECONDS, DEFAULT_MAX_RETRIES, DEFAULT_POLL_DELAY_SECONDS,
+    DEFAULT_QUEUE_NAME, DEFAULT_RESULT_TTL_SECONDS, DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
 };
 use crate::cron::CronJob;
 
@@ -26,6 +26,7 @@ pub struct ExecutorConfig {
     pub env: Option<HashMap<String, String>>,
     pub cwd: Option<String>,
     pub socket_dir: Option<String>,
+    pub tcp_socket: Option<String>,
     pub response_timeout_seconds: Option<f64>,
 }
 
@@ -53,6 +54,7 @@ pub struct RRQSettings {
     pub default_lock_timeout_extension_seconds: i64,
     pub default_result_ttl_seconds: i64,
     pub default_poll_delay_seconds: f64,
+    pub executor_connect_timeout_ms: i64,
     pub default_unique_job_lock_ttl_seconds: i64,
     pub worker_concurrency: usize,
     pub default_executor_name: String,
@@ -78,6 +80,7 @@ impl Default for RRQSettings {
             default_lock_timeout_extension_seconds: DEFAULT_LOCK_TIMEOUT_EXTENSION_SECONDS,
             default_result_ttl_seconds: DEFAULT_RESULT_TTL_SECONDS,
             default_poll_delay_seconds: DEFAULT_POLL_DELAY_SECONDS,
+            executor_connect_timeout_ms: DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS,
             default_unique_job_lock_ttl_seconds: DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
             worker_concurrency: 10,
             default_executor_name: "python".to_string(),

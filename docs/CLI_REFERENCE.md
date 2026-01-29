@@ -43,10 +43,14 @@ Options:
 - `--settings` PythonExecutorSettings object path (optional; falls back to
   `RRQ_EXECUTOR_SETTINGS`)
 - `--socket` Unix socket path (optional; falls back to `RRQ_EXECUTOR_SOCKET`)
+- `--tcp-socket` Localhost TCP socket in `host:port` form (optional; falls back
+  to `RRQ_EXECUTOR_TCP_SOCKET`)
 
 Notes:
 - The orchestrator sets `RRQ_EXECUTOR_SOCKET` automatically when it launches
-  executors. For manual runs, pass `--socket` or set the env var.
+  executors. For manual runs, pass `--socket`/`--tcp-socket` or set the env var.
+- `--socket` and `--tcp-socket` are mutually exclusive; TCP sockets must bind
+  to localhost.
 
 ## Health
 

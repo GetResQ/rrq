@@ -1,4 +1,4 @@
-"""Python Unix socket executor runtime for RRQ."""
+"""Python socket executor runtime for RRQ."""
 
 from __future__ import annotations
 
@@ -7,15 +7,16 @@ import asyncio
 import importlib
 import inspect
 import os
-from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from datetime import datetime, timezone
+from ipaddress import ip_address
 from pathlib import Path
+
+from pydantic import BaseModel, Field
 
 from .client import RRQClient
 from .exc import HandlerNotFound
-from pydantic import BaseModel, Field
-
 from .executor import ExecutionError, ExecutionOutcome, ExecutionRequest, PythonExecutor
 from .executor_settings import PythonExecutorSettings
 from .protocol import read_message, write_message
@@ -25,6 +26,8 @@ from .store import JobStore
 
 ENV_EXECUTOR_SETTINGS = "RRQ_EXECUTOR_SETTINGS"
 ENV_EXECUTOR_SOCKET = "RRQ_EXECUTOR_SOCKET"
+ENV_EXECUTOR_TCP_SOCKET = "RRQ_EXECUTOR_TCP_SOCKET"
+_LOCALHOST_ALIASES = {"localhost", "127.0.0.1", "::1"}
 
 
 class CancelRequest(BaseModel):
@@ -134,14 +137,67 @@ def load_executor_settings(
     return settings_object
 
 
-def resolve_socket_path(socket_path: str | None) -> str:
+def _parse_tcp_socket(tcp_socket: str) -> tuple[str, int]:
+    tcp_socket = tcp_socket.strip()
+    if not tcp_socket:
+        raise ValueError("TCP socket value cannot be empty")
+
+    if tcp_socket.startswith("["):
+        host_part, sep, port_part = tcp_socket.partition("]:")
+        if not sep:
+            raise ValueError("TCP socket must be in [host]:port format")
+        host = host_part.lstrip("[")
+    else:
+        host, sep, port_part = tcp_socket.rpartition(":")
+        if not sep:
+            raise ValueError("TCP socket must be in host:port format")
+        if not host:
+            raise ValueError("TCP socket host cannot be empty")
+
+    if host not in _LOCALHOST_ALIASES:
+        try:
+            ip = ip_address(host)
+        except ValueError as exc:
+            raise ValueError(f"Invalid TCP socket host: {host}") from exc
+        if not ip.is_loopback:
+            raise ValueError(f"TCP socket host must be localhost; got {host}")
+        host = str(ip)
+
+    try:
+        port = int(port_part)
+    except ValueError as exc:
+        raise ValueError(f"Invalid TCP socket port: {port_part}") from exc
+    if port <= 0 or port > 65535:
+        raise ValueError(f"TCP socket port out of range: {port}")
+
+    if host == "localhost":
+        host = "127.0.0.1"
+    return host, port
+
+
+def resolve_executor_socket(
+    socket_path: str | None,
+    tcp_socket: str | None,
+) -> tuple[str, str | tuple[str, int]]:
+    if socket_path and tcp_socket:
+        raise ValueError("Provide only one of --socket or --tcp-socket")
+
+    if tcp_socket is None:
+        tcp_socket = os.getenv(ENV_EXECUTOR_TCP_SOCKET)
     if socket_path is None:
         socket_path = os.getenv(ENV_EXECUTOR_SOCKET)
-    if socket_path is None:
-        raise ValueError(
-            f"Executor socket path not provided. Use --socket or {ENV_EXECUTOR_SOCKET}."
-        )
-    return socket_path
+
+    if tcp_socket and socket_path:
+        raise ValueError("Provide only one of --socket or --tcp-socket")
+
+    if tcp_socket:
+        return "tcp", _parse_tcp_socket(tcp_socket)
+    if socket_path:
+        return "unix", socket_path
+    raise ValueError(
+        "Executor socket not provided. Use --socket/--tcp-socket or set "
+        f"{ENV_EXECUTOR_SOCKET}/{ENV_EXECUTOR_TCP_SOCKET}."
+    )
 
 
 async def _call_hook(
@@ -228,9 +284,10 @@ async def _handle_connection(
 async def run_python_executor(
     settings_object_path: str | None,
     socket_path: str | None = None,
+    tcp_socket: str | None = None,
 ) -> None:
     executor_settings = load_executor_settings(settings_object_path)
-    socket_path = resolve_socket_path(socket_path)
+    transport, target = resolve_executor_socket(socket_path, tcp_socket)
     settings = executor_settings.rrq_settings
     job_registry = executor_settings.job_registry
     if not isinstance(job_registry, JobRegistry):
@@ -254,16 +311,26 @@ async def run_python_executor(
     server: asyncio.AbstractServer | None = None
 
     try:
-        path = Path(socket_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            path.unlink()
-        server = await asyncio.start_unix_server(
-            lambda r, w: _handle_connection(
-                r, w, executor, ready_event, in_flight, job_index, inflight_lock
-            ),
-            path=str(path),
-        )
+        if transport == "unix":
+            path = Path(str(target))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists():
+                path.unlink()
+            server = await asyncio.start_unix_server(
+                lambda r, w: _handle_connection(
+                    r, w, executor, ready_event, in_flight, job_index, inflight_lock
+                ),
+                path=str(path),
+            )
+        else:
+            host, port = target
+            server = await asyncio.start_server(
+                lambda r, w: _handle_connection(
+                    r, w, executor, ready_event, in_flight, job_index, inflight_lock
+                ),
+                host=host,
+                port=port,
+            )
         await _call_hook(executor_settings.on_startup)
         startup_completed = True
         ready_event.set()
@@ -283,7 +350,7 @@ async def run_python_executor(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="RRQ Python executor runtime (Unix socket)"
+        description="RRQ Python executor runtime (Unix or TCP socket)"
     )
     parser.add_argument(
         "--settings",
@@ -299,8 +366,18 @@ def main() -> None:
         dest="socket_path",
         help=f"Unix socket path. Defaults to {ENV_EXECUTOR_SOCKET} if unset.",
     )
+    parser.add_argument(
+        "--tcp-socket",
+        dest="tcp_socket",
+        help=(
+            "TCP socket in host:port form (localhost only). Defaults to "
+            f"{ENV_EXECUTOR_TCP_SOCKET} if unset."
+        ),
+    )
     args = parser.parse_args()
-    asyncio.run(run_python_executor(args.settings_object_path, args.socket_path))
+    asyncio.run(
+        run_python_executor(args.settings_object_path, args.socket_path, args.tcp_socket)
+    )
 
 
 __all__ = ["run_python_executor", "load_executor_settings", "main"]

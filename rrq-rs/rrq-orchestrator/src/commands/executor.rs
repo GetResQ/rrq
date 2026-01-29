@@ -6,6 +6,7 @@ use tokio::process::Command;
 pub(crate) async fn executor_python(
     settings: Option<String>,
     socket: Option<String>,
+    tcp_socket: Option<String>,
 ) -> Result<()> {
     let mut cmd = Command::new("rrq-executor");
     if let Some(settings) = settings {
@@ -13,6 +14,9 @@ pub(crate) async fn executor_python(
     }
     if let Some(socket) = socket {
         cmd.arg("--socket").arg(socket);
+    }
+    if let Some(tcp_socket) = tcp_socket {
+        cmd.arg("--tcp-socket").arg(tcp_socket);
     }
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -75,7 +79,12 @@ mod tests {
         let new_path = format!("{}:{}", dir.to_string_lossy(), original);
         let _guard = EnvGuard::set("PATH", new_path);
 
-        executor_python(Some("settings.toml".to_string()), Some("sock".to_string())).await?;
+        executor_python(
+            Some("settings.toml".to_string()),
+            None,
+            Some("127.0.0.1:1234".to_string()),
+        )
+        .await?;
 
         let _ = fs::remove_file(&script_path).await;
         let _ = fs::remove_dir_all(&dir).await;

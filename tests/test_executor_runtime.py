@@ -12,6 +12,8 @@ from rrq.executor_runtime import (
     _execute_and_respond,
     _execute_with_deadline,
     _handle_connection,
+    _parse_tcp_socket,
+    resolve_executor_socket,
 )
 from rrq.protocol import read_message, write_message
 from rrq.registry import JobRegistry
@@ -202,3 +204,19 @@ async def test_execute_and_respond_cleans_inflight_on_write_error(
     await dummy_task
     assert request.request_id not in in_flight
     assert request.job_id not in job_index
+
+
+def test_parse_tcp_socket_allows_localhost() -> None:
+    host, port = _parse_tcp_socket("localhost:1234")
+    assert host == "127.0.0.1"
+    assert port == 1234
+
+
+def test_parse_tcp_socket_rejects_non_localhost() -> None:
+    with pytest.raises(ValueError):
+        _parse_tcp_socket("example.com:1234")
+
+
+def test_resolve_executor_socket_conflict() -> None:
+    with pytest.raises(ValueError):
+        resolve_executor_socket("/tmp/rrq.sock", "127.0.0.1:1234")
