@@ -225,4 +225,71 @@ describe("ExecutorRuntime integration", () => {
       await new Promise<void>((resolve) => server.close(resolve));
     }
   });
+
+  it("returns busy when in-flight limit is exceeded", async () => {
+    const registry = new Registry();
+    registry.register("handler", async (_request, signal) => {
+      await new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          const err = new Error("Job cancelled");
+          err.name = "AbortError";
+          reject(err);
+        });
+      });
+      return { ok: true };
+    });
+    const runtime = new ExecutorRuntime(registry);
+    const { server, port } = await withServer(registry, (socket) =>
+      (runtime as any).handleConnection(socket),
+    );
+
+    const client = net.connect(port, "127.0.0.1");
+    try {
+      const jobId = "job-busy";
+      const maxInFlight = 64;
+      for (let i = 0; i < maxInFlight; i += 1) {
+        client.write(
+          encodeMessage({
+            type: "request",
+            payload: buildRequest({ request_id: `req-${i}`, job_id: jobId }),
+          }),
+        );
+      }
+      client.write(
+        encodeMessage({
+          type: "request",
+          payload: buildRequest({ request_id: "req-busy", job_id: jobId }),
+        }),
+      );
+
+      const [busyResponse] = await waitForMessages(client, 1);
+      expect(busyResponse.type).toBe("response");
+      expect(busyResponse.payload.request_id).toBe("req-busy");
+      expect(busyResponse.payload.status).toBe("error");
+      expect(busyResponse.payload.error?.message).toMatch(/Executor busy/);
+
+      client.write(
+        encodeMessage({
+          type: "cancel",
+          payload: {
+            protocol_version: "1",
+            job_id: jobId,
+            request_id: null,
+            hard_kill: false,
+          },
+        }),
+      );
+
+      const responses = await waitForMessages(client, maxInFlight);
+      for (const message of responses) {
+        expect(message.type).toBe("response");
+        expect(message.payload.status).toBe("error");
+        expect(message.payload.error?.type).toBe("cancelled");
+      }
+    } finally {
+      client.end();
+      await new Promise((resolve) => client.once("close", resolve));
+      await new Promise<void>((resolve) => server.close(resolve));
+    }
+  });
 });

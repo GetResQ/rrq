@@ -20,6 +20,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
@@ -46,8 +49,12 @@ jobs:
         run: uv run ty check
         working-directory: rrq-py
 
+      - name: Build Rust producer library
+        run: cargo build -p rrq-producer --release
+        working-directory: rrq-rs
+
       - name: Run tests
-        run: uv run pytest --disable-warnings -q --maxfail=1
+        run: RRQ_PRODUCER_LIB_PATH=../rrq-rs/target/release/librrq_producer.so uv run pytest --disable-warnings -q --maxfail=1
         working-directory: rrq-py
 
   rust:
@@ -101,9 +108,22 @@ jobs:
 
   typescript:
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v1
@@ -113,6 +133,10 @@ jobs:
       - name: Install dependencies
         run: bun install
         working-directory: rrq-ts
+
+      - name: Build Rust producer library
+        run: cargo build -p rrq-producer --release
+        working-directory: rrq-rs
 
       - name: TypeScript lint
         run: bun run lint
@@ -131,5 +155,5 @@ jobs:
         working-directory: rrq-ts
 
       - name: TypeScript tests
-        run: bun test
+        run: RRQ_PRODUCER_LIB_PATH=../rrq-rs/target/release/librrq_producer.so bun test
         working-directory: rrq-ts

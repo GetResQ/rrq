@@ -149,6 +149,96 @@ async def test_handle_connection_waits_for_ready_event() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_connection_returns_busy_when_inflight_limit_reached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("rrq.executor_runtime.MAX_IN_FLIGHT_PER_CONNECTION", 1)
+    registry = JobRegistry()
+    blocker = asyncio.Event()
+
+    async def handler(ctx, *args, **kwargs):  # type: ignore[no-untyped-def]
+        await blocker.wait()
+        return {"ok": True}
+
+    registry.register("block", handler)
+    executor = PythonExecutor(
+        job_registry=registry,
+        settings=RRQSettings(),
+        client=cast(RRQClient, object()),
+        worker_id=None,
+    )
+    ready_event = asyncio.Event()
+    ready_event.set()
+    tracker = _InflightTracker()
+    await tracker.start()
+    server = await asyncio.start_server(
+        lambda r, w: _handle_connection(r, w, executor, ready_event, tracker),
+        host="127.0.0.1",
+        port=0,
+    )
+    writer: asyncio.StreamWriter | None = None
+    try:
+        sockets = server.sockets or []
+        assert sockets
+        host, port = sockets[0].getsockname()[:2]
+        reader, writer = await asyncio.open_connection(host, port)
+        job_id = "job-busy"
+        req1 = ExecutionRequest(
+            request_id="req-1",
+            job_id=job_id,
+            function_name="block",
+            args=[],
+            kwargs={},
+            context=ExecutionContext(
+                job_id=job_id,
+                attempt=1,
+                enqueue_time=datetime.now(timezone.utc),
+                queue_name="default",
+            ),
+        )
+        req2 = ExecutionRequest(
+            request_id="req-2",
+            job_id=job_id,
+            function_name="block",
+            args=[],
+            kwargs={},
+            context=ExecutionContext(
+                job_id=job_id,
+                attempt=1,
+                enqueue_time=datetime.now(timezone.utc),
+                queue_name="default",
+            ),
+        )
+
+        await write_message(writer, "request", req1.model_dump(mode="json"))
+
+        async def wait_for_inflight() -> None:
+            while True:
+                if len(tracker._in_flight) == 1:  # type: ignore[attr-defined]
+                    return
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_for_inflight(), timeout=1)
+        await write_message(writer, "request", req2.model_dump(mode="json"))
+
+        message = await asyncio.wait_for(read_message(reader), timeout=1)
+        assert message is not None
+        message_type, payload = message
+        assert message_type == "response"
+        assert payload["request_id"] == req2.request_id
+        assert payload["status"] == "error"
+        assert payload["error"]["message"].startswith("Executor busy")
+    finally:
+        blocker.set()
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
+        server.close()
+        await server.wait_closed()
+        await tracker.close()
+
+
+@pytest.mark.asyncio
 async def test_cancel_by_job_id_cancels_all_requests() -> None:
     registry = JobRegistry()
     blocker = asyncio.Event()

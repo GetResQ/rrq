@@ -921,6 +921,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn producer_rate_limit_returns_none_when_limited() {
+        let _guard = redis_lock().lock().await;
+        let dsn = std::env::var("RRQ_TEST_REDIS_DSN")
+            .unwrap_or_else(|_| "redis://localhost:6379/15".to_string());
+        let client = redis::Client::open(dsn.as_str()).unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let _: () = redis::cmd("FLUSHDB").query_async(&mut conn).await.unwrap();
+
+        let producer = Producer::new(&dsn).await.unwrap();
+        let first = producer
+            .enqueue_with_rate_limit(
+                "work",
+                vec![],
+                serde_json::Map::new(),
+                "rate-key",
+                Duration::from_secs(5),
+                EnqueueOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert!(first.is_some());
+
+        let second = producer
+            .enqueue_with_rate_limit(
+                "work",
+                vec![],
+                serde_json::Map::new(),
+                "rate-key",
+                Duration::from_secs(5),
+                EnqueueOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert!(second.is_none());
+    }
+
+    #[tokio::test]
+    async fn producer_debounce_reuses_pending_job() {
+        let _guard = redis_lock().lock().await;
+        let dsn = std::env::var("RRQ_TEST_REDIS_DSN")
+            .unwrap_or_else(|_| "redis://localhost:6379/15".to_string());
+        let client = redis::Client::open(dsn.as_str()).unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let _: () = redis::cmd("FLUSHDB").query_async(&mut conn).await.unwrap();
+
+        let producer = Producer::new(&dsn).await.unwrap();
+        let first = producer
+            .enqueue_with_debounce(
+                "work",
+                vec![],
+                serde_json::Map::new(),
+                "debounce-key",
+                Duration::from_secs(5),
+                EnqueueOptions::default(),
+            )
+            .await
+            .unwrap();
+        let second = producer
+            .enqueue_with_debounce(
+                "work",
+                vec![],
+                serde_json::Map::new(),
+                "debounce-key",
+                Duration::from_secs(5),
+                EnqueueOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+
+        let queue_key = format_queue_key("default");
+        let count: i64 = conn.zcard(queue_key).await.unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
     async fn producer_idempotency_key_replaces_stale_entry() {
         let _guard = redis_lock().lock().await;
         let dsn = std::env::var("RRQ_TEST_REDIS_DSN")

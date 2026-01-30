@@ -124,6 +124,26 @@ async def test_enqueue_job_with_defer_until(
 
 
 @pytest.mark.asyncio
+async def test_enqueue_unique_key_defer_extends_idempotency_ttl(
+    rrq_client: RRQClient, job_store_for_client_tests: JobStore
+):
+    unique_key = "defer-unique-ttl"
+    defer_seconds = 5
+
+    job = await rrq_client.enqueue(
+        "defer_unique_ttl_func",
+        _unique_key=unique_key,
+        _defer_by=timedelta(seconds=defer_seconds),
+    )
+    assert job is not None
+
+    ttl = await job_store_for_client_tests.redis.ttl(
+        f"{IDEMPOTENCY_KEY_PREFIX}{unique_key}"
+    )
+    assert ttl >= defer_seconds - 1
+
+
+@pytest.mark.asyncio
 async def test_enqueue_job_to_specific_queue(
     rrq_client: RRQClient, job_store_for_client_tests: JobStore
 ):
@@ -213,6 +233,29 @@ async def test_enqueue_with_unique_key(
     job2 = await rrq_client.enqueue(func_name, "different_arg", _unique_key=unique_key)
     assert job2 is not None
     assert job2.id == job1.id
+
+
+@pytest.mark.asyncio
+async def test_enqueue_with_rate_limit_returns_none_when_limited(
+    rrq_client: RRQClient, job_store_for_client_tests: JobStore
+) -> None:
+    func_name = "rate_limited_func"
+    rate_key = "user-123"
+
+    job1 = await rrq_client.enqueue_with_rate_limit(
+        func_name, rate_limit_key=rate_key, rate_limit_seconds=5
+    )
+    assert job1 is not None
+
+    job2 = await rrq_client.enqueue_with_rate_limit(
+        func_name, rate_limit_key=rate_key, rate_limit_seconds=5
+    )
+    assert job2 is None
+
+    queued_job_ids = await job_store_for_client_tests.get_queued_job_ids(
+        DEFAULT_QUEUE_NAME
+    )
+    assert job1.id in queued_job_ids
 
 
 class DummyStore:

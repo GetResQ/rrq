@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -98,28 +99,40 @@ class RRQClient:
             queue_name=queue_name_to_use,
         ) as trace_context:
             defer_until = None
+            defer_until_dt = None
             if _defer_until is not None:
                 dt = _defer_until
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
                 else:
                     dt = dt.astimezone(timezone.utc)
+                defer_until_dt = dt
                 defer_until = dt.isoformat()
 
             defer_by_seconds = None
             if _defer_by is not None:
                 defer_by_seconds = max(0.0, _defer_by.total_seconds())
 
+            unique_ttl_seconds = None
+            if _unique_key is not None:
+                unique_ttl_seconds = self.settings.default_unique_job_lock_ttl_seconds
+                deferral_seconds = 0.0
+                if defer_until_dt is not None:
+                    deferral_seconds = max(
+                        0.0,
+                        (defer_until_dt - datetime.now(timezone.utc)).total_seconds(),
+                    )
+                elif defer_by_seconds is not None:
+                    deferral_seconds = max(0.0, defer_by_seconds)
+                if deferral_seconds > unique_ttl_seconds:
+                    unique_ttl_seconds = int(math.ceil(deferral_seconds))
+
             mode = "unique" if _unique_key else "enqueue"
             options: dict[str, Any] = {
                 "queue_name": _queue_name,
                 "job_id": _job_id,
                 "unique_key": _unique_key,
-                "unique_ttl_seconds": (
-                    self.settings.default_unique_job_lock_ttl_seconds
-                    if _unique_key is not None
-                    else None
-                ),
+                "unique_ttl_seconds": unique_ttl_seconds,
                 "max_retries": _max_retries,
                 "job_timeout_seconds": _job_timeout_seconds,
                 "result_ttl_seconds": _result_ttl_seconds,
