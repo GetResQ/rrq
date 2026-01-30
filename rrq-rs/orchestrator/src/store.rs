@@ -64,6 +64,7 @@ pub struct JobStore {
     conn: redis::aio::MultiplexedConnection,
     lock_and_start_script: Script,
     retry_script: Script,
+    enqueue_script: Script,
 }
 
 impl JobStore {
@@ -106,12 +107,23 @@ impl JobStore {
              redis.call('ZADD', KEYS[2], ARGV[2], ARGV[1])\n\
              return new_retry_count",
         );
+        let enqueue_script = Script::new(
+            "-- KEYS: [1] = job_key, [2] = queue_key\n\
+             -- ARGV: field/value pairs..., score, job_id\n\
+             if redis.call('EXISTS', KEYS[1]) == 1 then\n\
+                 return 0\n\
+             end\n\
+             redis.call('HSET', KEYS[1], unpack(ARGV, 1, #ARGV - 2))\n\
+             redis.call('ZADD', KEYS[2], ARGV[#ARGV - 1], ARGV[#ARGV])\n\
+             return 1",
+        );
 
         Self {
             settings,
             conn,
             lock_and_start_script,
             retry_script,
+            enqueue_script,
         }
     }
 
@@ -156,8 +168,7 @@ impl JobStore {
         serde_json::from_str(raw).ok()
     }
 
-    pub async fn save_job_definition(&mut self, job: &Job) -> Result<()> {
-        let job_key = format!("{JOB_KEY_PREFIX}{}", job.id);
+    fn build_job_mapping(job: &Job) -> Result<Vec<(String, String)>> {
         let job_args_json = serde_json::to_string(&job.job_args)?;
         let job_kwargs_json = serde_json::to_string(&job.job_kwargs)?;
         let result_json = serde_json::to_string(&job.result)?;
@@ -212,6 +223,13 @@ impl JobStore {
             mapping.push(("trace_context".to_string(), trace_json));
         }
 
+        Ok(mapping)
+    }
+
+    pub async fn save_job_definition(&mut self, job: &Job) -> Result<()> {
+        let job_key = format!("{JOB_KEY_PREFIX}{}", job.id);
+        let mapping = Self::build_job_mapping(job)?;
+
         let mapping_ref: Vec<(&str, &str)> = mapping
             .iter()
             .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -224,13 +242,73 @@ impl JobStore {
         Ok(())
     }
 
+    pub async fn atomic_enqueue_job(
+        &mut self,
+        job: &Job,
+        queue_name: &str,
+        score_ms: f64,
+    ) -> Result<bool> {
+        let job_key = format!("{JOB_KEY_PREFIX}{}", job.id);
+        let queue_key = self.format_queue_key(queue_name);
+        let mapping = Self::build_job_mapping(job)?;
+        let mut args: Vec<String> = Vec::with_capacity(mapping.len() * 2 + 2);
+        for (key, value) in mapping {
+            args.push(key);
+            args.push(value);
+        }
+        args.push(score_ms.to_string());
+        args.push(job.id.clone());
+        let script = self.enqueue_script.clone();
+        let mut invocation = script.key(job_key);
+        invocation.key(queue_key);
+        for arg in &args {
+            invocation.arg(arg);
+        }
+        let created: i64 = invocation.invoke_async(&mut self.conn).await?;
+        Ok(created == 1)
+    }
+
     pub async fn get_job_definition(&mut self, job_id: &str) -> Result<Option<Job>> {
         let job_key = format!("{JOB_KEY_PREFIX}{job_id}");
         let raw: HashMap<String, String> = self.conn.hgetall(job_key).await?;
         if raw.is_empty() {
             return Ok(None);
         }
+        Ok(Some(Self::parse_job_map(
+            raw,
+            job_id,
+            self.settings.default_max_retries,
+        )?))
+    }
 
+    pub async fn get_job_definitions(&mut self, job_ids: &[String]) -> Result<Vec<Option<Job>>> {
+        let maps = self.get_job_data_maps(job_ids).await?;
+        let mut jobs = Vec::with_capacity(maps.len());
+        for (index, map) in maps.into_iter().enumerate() {
+            let job = match map {
+                Some(map) => {
+                    let fallback_id = job_ids
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".to_string());
+                    Some(Self::parse_job_map(
+                        map,
+                        &fallback_id,
+                        self.settings.default_max_retries,
+                    )?)
+                }
+                None => None,
+            };
+            jobs.push(job);
+        }
+        Ok(jobs)
+    }
+
+    fn parse_job_map(
+        raw: HashMap<String, String>,
+        fallback_id: &str,
+        default_max_retries: i64,
+    ) -> Result<Job> {
         let job_args = raw
             .get("job_args")
             .and_then(|value| serde_json::from_str(value).ok())
@@ -262,10 +340,13 @@ impl JobStore {
         let max_retries = raw
             .get("max_retries")
             .and_then(|value| value.parse::<i64>().ok())
-            .unwrap_or(self.settings.default_max_retries);
+            .unwrap_or(default_max_retries);
 
-        let job = Job {
-            id: raw.get("id").cloned().unwrap_or_else(|| job_id.to_string()),
+        Ok(Job {
+            id: raw
+                .get("id")
+                .cloned()
+                .unwrap_or_else(|| fallback_id.to_string()),
             function_name: raw.get("function_name").cloned().unwrap_or_default(),
             job_args,
             job_kwargs,
@@ -295,9 +376,7 @@ impl JobStore {
             dlq_name: raw.get("dlq_name").cloned(),
             worker_id: raw.get("worker_id").cloned(),
             trace_context,
-        };
-
-        Ok(Some(job))
+        })
     }
 
     pub async fn add_job_to_queue(

@@ -283,10 +283,6 @@ alpha = "beta"
             settings.executor_routes.get("alpha"),
             Some(&"beta".to_string())
         );
-        assert_eq!(
-            settings.worker_concurrency,
-            RRQSettings::default().worker_concurrency
-        );
         assert_eq!(settings.worker_health_check_ttl_buffer_seconds, 12.5);
         let _ = fs::remove_file(&tmp_path);
     }

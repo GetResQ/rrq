@@ -37,6 +37,7 @@ pub struct RRQWorker {
     executors: HashMap<String, Arc<dyn Executor>>,
     default_executor_name: String,
     executor_routes: HashMap<String, String>,
+    worker_concurrency: usize,
     semaphore: Arc<Semaphore>,
     running_jobs: Arc<Mutex<HashMap<String, RunningJobInfo>>>,
     running_aborts: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
@@ -44,6 +45,7 @@ pub struct RRQWorker {
     cron_jobs: Arc<Mutex<Vec<CronJob>>>,
     burst: bool,
     shutdown: Arc<AtomicBool>,
+    queue_cursor: usize,
 }
 
 impl RRQWorker {
@@ -53,6 +55,7 @@ impl RRQWorker {
         worker_id: Option<String>,
         executors: HashMap<String, Arc<dyn Executor>>,
         burst: bool,
+        worker_concurrency: usize,
     ) -> Result<Self> {
         if executors.is_empty() {
             return Err(anyhow::anyhow!("RRQWorker requires at least one executor"));
@@ -64,7 +67,11 @@ impl RRQWorker {
                 default_executor_name
             ));
         }
-        let worker_concurrency = settings.worker_concurrency;
+        let worker_concurrency = if worker_concurrency == 0 {
+            return Err(anyhow::anyhow!("worker_concurrency must be positive"));
+        } else {
+            worker_concurrency
+        };
         let executor_routes = settings.executor_routes.clone();
         let job_store = JobStore::new(settings.clone()).await?;
         let client = RRQClient::new(settings.clone(), job_store.clone());
@@ -92,6 +99,7 @@ impl RRQWorker {
             executors,
             default_executor_name,
             executor_routes,
+            worker_concurrency,
             semaphore: Arc::new(Semaphore::new(worker_concurrency)),
             running_jobs: Arc::new(Mutex::new(HashMap::new())),
             running_aborts: Arc::new(Mutex::new(HashMap::new())),
@@ -99,6 +107,7 @@ impl RRQWorker {
             cron_jobs: Arc::new(Mutex::new(Vec::new())),
             burst,
             shutdown: Arc::new(AtomicBool::new(false)),
+            queue_cursor: 0,
         })
     }
 
@@ -153,24 +162,18 @@ impl RRQWorker {
         }
 
         let heartbeat_handle = {
-            let shutdown = self.shutdown.clone();
-            let job_store = self.job_store.clone();
-            let worker_id = self.worker_id.clone();
-            let queues = self.queues.clone();
-            let status = self.status.clone();
-            let running_jobs = self.running_jobs.clone();
-            let settings = self.settings.clone();
+            let context = HeartbeatContext {
+                shutdown: self.shutdown.clone(),
+                job_store: self.job_store.clone(),
+                worker_id: self.worker_id.clone(),
+                queues: self.queues.clone(),
+                status: self.status.clone(),
+                running_jobs: self.running_jobs.clone(),
+                worker_concurrency: self.worker_concurrency,
+                settings: self.settings.clone(),
+            };
             tokio::spawn(async move {
-                heartbeat_loop(
-                    shutdown,
-                    job_store,
-                    worker_id,
-                    queues,
-                    status,
-                    running_jobs,
-                    settings,
-                )
-                .await;
+                heartbeat_loop(context).await;
             })
         };
 
@@ -186,10 +189,9 @@ impl RRQWorker {
 
         while !self.shutdown.load(Ordering::SeqCst) {
             let running = self
-                .settings
                 .worker_concurrency
                 .saturating_sub(self.semaphore.available_permits());
-            let fetch_count = self.settings.worker_concurrency.saturating_sub(running);
+            let fetch_count = self.worker_concurrency.saturating_sub(running);
             if fetch_count == 0 {
                 self.set_status("idle (concurrency limit)").await;
                 let delay =
@@ -222,106 +224,124 @@ impl RRQWorker {
 
     async fn poll_for_jobs(&mut self, count: usize) -> Result<usize> {
         let mut fetched = 0;
-        for queue_name in &self.queues {
-            if fetched >= count || self.shutdown.load(Ordering::SeqCst) {
-                break;
-            }
-            let ready = self
-                .job_store
-                .get_ready_job_ids(queue_name, count - fetched)
-                .await?;
-            if ready.is_empty() {
-                continue;
-            }
+        let total_queues = self.queues.len();
+        let start_index = self.queue_cursor % total_queues;
+        self.queue_cursor = (start_index + 1) % total_queues;
+        let fair_share = count.div_ceil(total_queues).max(1);
 
-            for job_id in ready {
+        for pass in 0..2 {
+            for offset in 0..total_queues {
                 if fetched >= count || self.shutdown.load(Ordering::SeqCst) {
-                    break;
+                    return Ok(fetched);
                 }
-                let job_opt = self.job_store.get_job_definition(&job_id).await?;
-                let job = match job_opt {
-                    Some(job) => job,
-                    None => {
-                        let _ = self
-                            .job_store
-                            .remove_job_from_queue(queue_name, &job_id)
-                            .await;
-                        continue;
-                    }
+                let queue_index = (start_index + offset) % total_queues;
+                let queue_name = &self.queues[queue_index];
+                let remaining = count - fetched;
+                let request_count = if pass == 0 {
+                    remaining.min(fair_share)
+                } else {
+                    remaining
                 };
-
-                let job_timeout = job
-                    .job_timeout_seconds
-                    .unwrap_or(self.settings.default_job_timeout_seconds);
-                let lock_timeout_ms = job_timeout
-                    .checked_add(self.settings.default_lock_timeout_extension_seconds)
-                    .and_then(|sum| sum.checked_mul(1000))
-                    .ok_or_else(|| anyhow::anyhow!("lock_timeout_ms overflow"))?;
-                if lock_timeout_ms <= 0 {
-                    return Err(anyhow::anyhow!("lock_timeout_ms must be positive"));
-                }
-
-                let start_time = Utc::now();
-                let (locked, removed) = self
-                    .job_store
-                    .atomic_lock_and_start_job(
-                        &job.id,
-                        queue_name,
-                        &self.worker_id,
-                        lock_timeout_ms,
-                        start_time,
-                    )
-                    .await?;
-                if !locked || removed == 0 {
+                if request_count == 0 {
                     continue;
                 }
-
-                let permit = self.semaphore.clone().acquire_owned().await?;
-                let job_store = self.job_store.clone();
-                let executors = self.executors.clone();
-                let executor_routes = self.executor_routes.clone();
-                let default_executor_name = self.default_executor_name.clone();
-                let settings = self.settings.clone();
-                let worker_id = self.worker_id.clone();
-                let running_jobs = self.running_jobs.clone();
-                let running_aborts = self.running_aborts.clone();
-                let queue_name = queue_name.clone();
-                let mut job_for_task = job.clone();
-                job_for_task.start_time = Some(start_time);
-                {
-                    let mut running = running_jobs.lock().await;
-                    running.insert(
-                        job.id.clone(),
-                        RunningJobInfo {
-                            queue_name: queue_name.clone(),
-                            executor_name: None,
-                            request_id: None,
-                        },
-                    );
+                let ready = self
+                    .job_store
+                    .get_ready_job_ids(queue_name, request_count)
+                    .await?;
+                if ready.is_empty() {
+                    continue;
                 }
+                let job_defs = self.job_store.get_job_definitions(&ready).await?;
 
-                let handle = tokio::spawn(async move {
-                    let _permit = permit;
-                    let context = ExecuteJobContext {
-                        settings,
-                        job_store,
-                        executors,
-                        default_executor_name,
-                        executor_routes,
-                        worker_id,
-                        running_jobs,
-                        running_aborts,
-                    };
-                    if let Err(err) = execute_job(job_for_task, queue_name, context).await {
-                        tracing::error!("job execution error: {err}");
+                for (job_id, job_opt) in ready.into_iter().zip(job_defs.into_iter()) {
+                    if fetched >= count || self.shutdown.load(Ordering::SeqCst) {
+                        return Ok(fetched);
                     }
-                });
-                {
-                    let mut aborts = self.running_aborts.lock().await;
-                    aborts.insert(job.id.clone(), handle.abort_handle());
-                }
+                    let job = match job_opt {
+                        Some(job) => job,
+                        None => {
+                            let _ = self
+                                .job_store
+                                .remove_job_from_queue(queue_name, &job_id)
+                                .await;
+                            continue;
+                        }
+                    };
 
-                fetched += 1;
+                    let job_timeout = job
+                        .job_timeout_seconds
+                        .unwrap_or(self.settings.default_job_timeout_seconds);
+                    let lock_timeout_ms = job_timeout
+                        .checked_add(self.settings.default_lock_timeout_extension_seconds)
+                        .and_then(|sum| sum.checked_mul(1000))
+                        .ok_or_else(|| anyhow::anyhow!("lock_timeout_ms overflow"))?;
+                    if lock_timeout_ms <= 0 {
+                        return Err(anyhow::anyhow!("lock_timeout_ms must be positive"));
+                    }
+
+                    let start_time = Utc::now();
+                    let (locked, removed) = self
+                        .job_store
+                        .atomic_lock_and_start_job(
+                            &job.id,
+                            queue_name,
+                            &self.worker_id,
+                            lock_timeout_ms,
+                            start_time,
+                        )
+                        .await?;
+                    if !locked || removed == 0 {
+                        continue;
+                    }
+
+                    let permit = self.semaphore.clone().acquire_owned().await?;
+                    let job_store = self.job_store.clone();
+                    let executors = self.executors.clone();
+                    let executor_routes = self.executor_routes.clone();
+                    let default_executor_name = self.default_executor_name.clone();
+                    let settings = self.settings.clone();
+                    let worker_id = self.worker_id.clone();
+                    let running_jobs = self.running_jobs.clone();
+                    let running_aborts = self.running_aborts.clone();
+                    let queue_name = queue_name.clone();
+                    let mut job_for_task = job.clone();
+                    job_for_task.start_time = Some(start_time);
+                    {
+                        let mut running = running_jobs.lock().await;
+                        running.insert(
+                            job.id.clone(),
+                            RunningJobInfo {
+                                queue_name: queue_name.clone(),
+                                executor_name: None,
+                                request_id: None,
+                            },
+                        );
+                    }
+
+                    let handle = tokio::spawn(async move {
+                        let _permit = permit;
+                        let context = ExecuteJobContext {
+                            settings,
+                            job_store,
+                            executors,
+                            default_executor_name,
+                            executor_routes,
+                            worker_id,
+                            running_jobs,
+                            running_aborts,
+                        };
+                        if let Err(err) = execute_job(job_for_task, queue_name, context).await {
+                            tracing::error!("job execution error: {err}");
+                        }
+                    });
+                    {
+                        let mut aborts = self.running_aborts.lock().await;
+                        aborts.insert(job.id.clone(), handle.abort_handle());
+                    }
+
+                    fetched += 1;
+                }
             }
         }
         Ok(fetched)
@@ -429,6 +449,17 @@ struct ExecuteJobContext {
     worker_id: String,
     running_jobs: Arc<Mutex<HashMap<String, RunningJobInfo>>>,
     running_aborts: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
+}
+
+struct HeartbeatContext {
+    shutdown: Arc<AtomicBool>,
+    job_store: JobStore,
+    worker_id: String,
+    queues: Vec<String>,
+    status: Arc<Mutex<String>>,
+    running_jobs: Arc<Mutex<HashMap<String, RunningJobInfo>>>,
+    worker_concurrency: usize,
+    settings: RRQSettings,
 }
 
 async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -> Result<()> {
@@ -830,15 +861,17 @@ fn calculate_backoff_seconds(settings: &RRQSettings, retry_attempt: i64) -> f64 
     delay.min(settings.max_retry_delay_seconds)
 }
 
-async fn heartbeat_loop(
-    shutdown: Arc<AtomicBool>,
-    mut job_store: JobStore,
-    worker_id: String,
-    queues: Vec<String>,
-    status: Arc<Mutex<String>>,
-    running_jobs: Arc<Mutex<HashMap<String, RunningJobInfo>>>,
-    settings: RRQSettings,
-) {
+async fn heartbeat_loop(context: HeartbeatContext) {
+    let HeartbeatContext {
+        shutdown,
+        mut job_store,
+        worker_id,
+        queues,
+        status,
+        running_jobs,
+        worker_concurrency,
+        settings,
+    } = context;
     while !shutdown.load(Ordering::SeqCst) {
         let status_value = { status.lock().await.clone() };
         let active_jobs = running_jobs.lock().await.len();
@@ -855,7 +888,7 @@ async fn heartbeat_loop(
         );
         health_data.insert(
             "concurrency_limit".to_string(),
-            Value::Number((settings.worker_concurrency as i64).into()),
+            Value::Number((worker_concurrency as i64).into()),
         );
         health_data.insert(
             "queues".to_string(),
@@ -884,9 +917,11 @@ async fn recover_orphaned_jobs(
     settings: &RRQSettings,
     shutdown: &Arc<AtomicBool>,
 ) -> Result<()> {
+    const MAX_RECOVERIES_PER_TICK: u64 = 100;
     let mut cursor: u64 = 0;
     let mut recovered = 0u64;
-    loop {
+    let mut recovery_limited = false;
+    'scan: loop {
         let (next, keys) = job_store.scan_active_job_keys(cursor, 100).await?;
         for key in keys {
             if !key.starts_with(crate::constants::ACTIVE_JOBS_PREFIX) {
@@ -894,6 +929,12 @@ async fn recover_orphaned_jobs(
             }
             let worker_id = key.trim_start_matches(crate::constants::ACTIVE_JOBS_PREFIX);
             if worker_id.is_empty() {
+                continue;
+            }
+            let (_, health_ttl) = job_store.get_worker_health(worker_id).await?;
+            if let Some(ttl) = health_ttl
+                && ttl > 0
+            {
                 continue;
             }
             let job_ids = job_store.get_active_job_ids(worker_id).await?;
@@ -963,6 +1004,10 @@ async fn recover_orphaned_jobs(
                     let _ = job_store.remove_active_job(worker_id, &job.id).await;
                     let _ = job_store.release_job_lock(&job.id).await;
                     recovered += 1;
+                    if recovered >= MAX_RECOVERIES_PER_TICK {
+                        recovery_limited = true;
+                        break 'scan;
+                    }
                 } else {
                     let _ = job_store.remove_active_job(worker_id, &job.id).await;
                     let _ = job_store.release_job_lock(&job.id).await;
@@ -976,6 +1021,9 @@ async fn recover_orphaned_jobs(
     }
     if recovered > 0 {
         tracing::warn!("re-queued {recovered} orphaned job(s)");
+    }
+    if recovery_limited {
+        tracing::warn!("orphan recovery hit per-tick limit of {MAX_RECOVERIES_PER_TICK}");
     }
     Ok(())
 }
@@ -1096,7 +1144,9 @@ mod tests {
     use super::*;
     use crate::test_support::RedisTestContext;
     use serde_json::json;
+    use std::collections::HashSet;
     use tokio::sync::Mutex as TokioMutex;
+    use tokio::sync::Notify;
     use uuid::Uuid;
 
     #[derive(Clone)]
@@ -1111,6 +1161,41 @@ mod tests {
         delay: Duration,
         last_request_id: Arc<TokioMutex<Option<String>>>,
         cancelled: Arc<TokioMutex<Vec<String>>>,
+    }
+
+    #[derive(Clone)]
+    struct BlockingExecutor {
+        gate: Arc<Notify>,
+        started_queues: Arc<TokioMutex<Vec<String>>>,
+    }
+
+    impl BlockingExecutor {
+        fn new() -> Self {
+            Self {
+                gate: Arc::new(Notify::new()),
+                started_queues: Arc::new(TokioMutex::new(Vec::new())),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Executor for BlockingExecutor {
+        async fn execute(&self, request: ExecutionRequest) -> Result<ExecutionOutcome> {
+            {
+                let mut guard = self.started_queues.lock().await;
+                guard.push(request.context.queue_name.clone());
+            }
+            self.gate.notified().await;
+            Ok(ExecutionOutcome::success(
+                request.job_id.clone(),
+                request.request_id.clone(),
+                json!({"ok": true}),
+            ))
+        }
+
+        async fn cancel(&self, _job_id: &str, _request_id: Option<&str>) -> Result<()> {
+            Ok(())
+        }
     }
 
     impl StaticExecutor {
@@ -1397,6 +1482,142 @@ mod tests {
         let active = ctx.store.get_active_job_ids(&worker_id).await.unwrap();
         assert!(active.contains(&job.id));
     }
+
+    #[tokio::test]
+    async fn recover_orphaned_jobs_skips_healthy_worker() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+        let mut job = build_job(&queue_name, &dlq_name, None);
+        job.status = JobStatus::Active;
+        ctx.store.save_job_definition(&job).await.unwrap();
+        let worker_id = format!("worker-{}", Uuid::new_v4());
+        ctx.store
+            .track_active_job(&worker_id, &job.id, Utc::now())
+            .await
+            .unwrap();
+        let mut health = serde_json::Map::new();
+        health.insert("worker_id".to_string(), json!(worker_id));
+        health.insert("status".to_string(), json!("running"));
+        ctx.store
+            .set_worker_health(&worker_id, &health, 60)
+            .await
+            .unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        recover_orphaned_jobs(&mut ctx.store, &ctx.settings, &shutdown)
+            .await
+            .unwrap();
+
+        assert!(!ctx.store.is_job_queued(&queue_name, &job.id).await.unwrap());
+        let active = ctx.store.get_active_job_ids(&worker_id).await.unwrap();
+        assert!(active.contains(&job.id));
+    }
+
+    #[tokio::test]
+    async fn recover_orphaned_jobs_respects_limit() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+        let worker_id = format!("worker-{}", Uuid::new_v4());
+        let total_jobs = 101;
+
+        for index in 0..total_jobs {
+            let mut job = build_job(&queue_name, &dlq_name, None);
+            job.id = format!("job-{index}");
+            job.status = JobStatus::Active;
+            job.next_scheduled_run_time = Some(Utc::now());
+            ctx.store.save_job_definition(&job).await.unwrap();
+            ctx.store
+                .track_active_job(&worker_id, &job.id, Utc::now())
+                .await
+                .unwrap();
+        }
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        recover_orphaned_jobs(&mut ctx.store, &ctx.settings, &shutdown)
+            .await
+            .unwrap();
+
+        let queue_size = ctx.store.queue_size(&queue_name).await.unwrap();
+        assert!(queue_size <= 100);
+        let active = ctx.store.get_active_job_ids(&worker_id).await.unwrap();
+        assert!(!active.is_empty());
+    }
+
+    #[tokio::test]
+    async fn poll_for_jobs_distributes_across_queues() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        ctx.settings.default_executor_name = "test".to_string();
+        let executor = Arc::new(BlockingExecutor::new());
+        let gate = executor.gate.clone();
+        let started = executor.started_queues.clone();
+        let mut executors: HashMap<String, Arc<dyn Executor>> = HashMap::new();
+        executors.insert("test".to_string(), executor);
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let queue_a = "queue-a".to_string();
+        let queue_b = "queue-b".to_string();
+
+        for i in 0..2 {
+            let options = EnqueueOptions {
+                queue_name: Some(queue_a.clone()),
+                job_id: Some(format!("qa-{i}")),
+                ..Default::default()
+            };
+            let _ = client
+                .enqueue("task", Vec::new(), serde_json::Map::new(), options)
+                .await
+                .unwrap();
+        }
+        for i in 0..2 {
+            let options = EnqueueOptions {
+                queue_name: Some(queue_b.clone()),
+                job_id: Some(format!("qb-{i}")),
+                ..Default::default()
+            };
+            let _ = client
+                .enqueue("task", Vec::new(), serde_json::Map::new(), options)
+                .await
+                .unwrap();
+        }
+
+        let mut worker = RRQWorker::new(
+            ctx.settings.clone(),
+            Some(vec![queue_a.clone(), queue_b.clone()]),
+            Some("worker-1".to_string()),
+            executors,
+            true,
+            2,
+        )
+        .await
+        .unwrap();
+
+        let fetched = worker.poll_for_jobs(2).await.unwrap();
+        assert_eq!(fetched, 2);
+
+        async fn wait_for_started(started: &Arc<TokioMutex<Vec<String>>>) -> Result<Vec<String>> {
+            for _ in 0..50 {
+                let guard = started.lock().await;
+                if guard.len() == 2 {
+                    return Ok(guard.clone());
+                }
+                drop(guard);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(anyhow::anyhow!("executor did not start expected jobs"))
+        }
+
+        let started_queues = wait_for_started(&started).await.unwrap();
+        let mut unique = started_queues.iter().cloned().collect::<HashSet<_>>();
+        assert!(unique.remove(&queue_a));
+        assert!(unique.remove(&queue_b));
+
+        gate.notify_waiters();
+        timeout(Duration::from_secs(2), worker.drain_tasks())
+            .await
+            .unwrap()
+            .unwrap();
+    }
     #[tokio::test]
     async fn calculate_backoff_respects_max_delay() {
         let settings = RRQSettings {
@@ -1435,6 +1656,7 @@ mod tests {
             Some("worker-1".to_string()),
             executors,
             true,
+            1,
         )
         .await
         .unwrap();
@@ -1478,6 +1700,7 @@ mod tests {
             Some("worker-1".to_string()),
             executors,
             true,
+            1,
         )
         .await
         .unwrap();
@@ -1523,6 +1746,7 @@ mod tests {
             Some("worker-1".to_string()),
             executors,
             true,
+            1,
         )
         .await
         .unwrap();

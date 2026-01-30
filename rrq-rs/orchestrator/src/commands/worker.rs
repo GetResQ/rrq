@@ -35,8 +35,6 @@ pub(crate) async fn run_worker(
         effective_concurrency += pool_size.saturating_mul(in_flight);
     }
     let effective_concurrency = std::cmp::max(1, effective_concurrency);
-    let mut settings = settings;
-    settings.worker_concurrency = effective_concurrency;
     let executors =
         build_executors_from_settings(&settings, Some(&pool_sizes), Some(&max_in_flight)).await?;
     let queues = if queues.is_empty() {
@@ -44,7 +42,15 @@ pub(crate) async fn run_worker(
     } else {
         Some(queues)
     };
-    let worker = RRQWorker::new(settings, queues, None, executors, burst).await?;
+    let worker = RRQWorker::new(
+        settings,
+        queues,
+        None,
+        executors,
+        burst,
+        effective_concurrency,
+    )
+    .await?;
     run_worker_loop(worker).await?;
     Ok(())
 }
@@ -270,7 +276,6 @@ pub(crate) async fn run_worker_watch(
         }
         let effective_concurrency = std::cmp::max(1, effective_concurrency);
         let mut settings = settings;
-        settings.worker_concurrency = effective_concurrency;
         settings.worker_shutdown_grace_period_seconds = 0.0;
         let executors =
             build_executors_from_settings(&settings, Some(&pool_sizes), Some(&max_in_flight))
@@ -280,7 +285,15 @@ pub(crate) async fn run_worker_watch(
         } else {
             Some(queues.clone())
         };
-        let mut worker = RRQWorker::new(settings, queue_arg, None, executors, false).await?;
+        let mut worker = RRQWorker::new(
+            settings,
+            queue_arg,
+            None,
+            executors,
+            false,
+            effective_concurrency,
+        )
+        .await?;
         let shutdown = worker.shutdown_handle();
         let shutdown_timeout = Duration::from_secs(2);
         let mut handle = tokio::spawn(async move {

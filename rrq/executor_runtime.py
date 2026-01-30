@@ -8,6 +8,7 @@ import importlib
 import inspect
 import os
 import logging
+from dataclasses import dataclass
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -40,6 +41,129 @@ class CancelRequest(BaseModel):
     hard_kill: bool = Field(default=False)
 
 
+@dataclass(slots=True)
+class _InflightEntry:
+    job_id: str
+    task: asyncio.Task
+
+
+@dataclass(slots=True)
+class _TrackerStart:
+    request_id: str
+    job_id: str
+    task: asyncio.Task
+
+
+@dataclass(slots=True)
+class _TrackerFinish:
+    request_id: str
+
+
+@dataclass(slots=True)
+class _TrackerCancelRequest:
+    request_id: str
+
+
+@dataclass(slots=True)
+class _TrackerCancelJob:
+    job_id: str
+
+
+@dataclass(slots=True)
+class _TrackerStop:
+    pass
+
+
+TrackerEvent = (
+    _TrackerStart
+    | _TrackerFinish
+    | _TrackerCancelRequest
+    | _TrackerCancelJob
+    | _TrackerStop
+)
+
+
+class _InflightTracker:
+    def __init__(self) -> None:
+        self._queue: asyncio.Queue[TrackerEvent] = asyncio.Queue()
+        self._task: asyncio.Task | None = None
+        self._in_flight: dict[str, _InflightEntry] = {}
+        self._job_index: dict[str, set[str]] = {}
+
+    async def start(self) -> None:
+        if self._task is not None:
+            return
+        self._task = asyncio.create_task(self._run(), name="rrq-inflight-tracker")
+
+    async def close(self) -> None:
+        if self._task is None:
+            return
+        await self._queue.put(_TrackerStop())
+        await self._task
+        self._task = None
+
+    async def track_start(
+        self, request_id: str, job_id: str, task: asyncio.Task
+    ) -> None:
+        await self._queue.put(_TrackerStart(request_id, job_id, task))
+
+    async def track_finish(self, request_id: str) -> None:
+        await self._queue.put(_TrackerFinish(request_id))
+
+    async def cancel_request(self, request_id: str) -> None:
+        await self._queue.put(_TrackerCancelRequest(request_id))
+
+    async def cancel_job(self, job_id: str) -> None:
+        await self._queue.put(_TrackerCancelJob(job_id))
+
+    async def _run(self) -> None:
+        while True:
+            event = await self._queue.get()
+            match event:
+                case _TrackerStart(request_id=request_id, job_id=job_id, task=task):
+                    self._in_flight[request_id] = _InflightEntry(
+                        job_id=job_id, task=task
+                    )
+                    self._job_index.setdefault(job_id, set()).add(request_id)
+                case _TrackerFinish(request_id=request_id):
+                    self._remove_request(request_id)
+                case _TrackerCancelRequest(request_id=request_id):
+                    self._cancel_request(request_id)
+                case _TrackerCancelJob(job_id=job_id):
+                    request_ids = list(self._job_index.get(job_id, set()))
+                    for request_id in request_ids:
+                        self._cancel_request(request_id)
+                case _TrackerStop():
+                    for request_id in list(self._in_flight.keys()):
+                        self._cancel_request(request_id)
+                    return
+                case _:
+                    continue
+
+    def _cancel_request(self, request_id: str) -> None:
+        entry = self._in_flight.pop(request_id, None)
+        if entry is None:
+            return
+        entry.task.cancel()
+        request_ids = self._job_index.get(entry.job_id)
+        if request_ids is None:
+            return
+        request_ids.discard(request_id)
+        if not request_ids:
+            self._job_index.pop(entry.job_id, None)
+
+    def _remove_request(self, request_id: str) -> None:
+        entry = self._in_flight.pop(request_id, None)
+        if entry is None:
+            return
+        request_ids = self._job_index.get(entry.job_id)
+        if request_ids is None:
+            return
+        request_ids.discard(request_id)
+        if not request_ids:
+            self._job_index.pop(entry.job_id, None)
+
+
 async def _write_outcome(
     writer: asyncio.StreamWriter,
     outcome: ExecutionOutcome,
@@ -57,9 +181,7 @@ async def _execute_and_respond(
     request: ExecutionRequest,
     writer: asyncio.StreamWriter,
     write_lock: asyncio.Lock,
-    in_flight: dict[str, asyncio.Task],
-    job_index: dict[str, set[str]],
-    inflight_lock: asyncio.Lock,
+    tracker: _InflightTracker,
     connection_requests: set[str],
     connection_jobs: dict[str, str],
     connection_lock: asyncio.Lock,
@@ -100,13 +222,7 @@ async def _execute_and_respond(
             )
         await _write_outcome(writer, outcome, write_lock)
     finally:
-        async with inflight_lock:
-            in_flight.pop(request.request_id, None)
-            request_ids = job_index.get(request.job_id)
-            if request_ids is not None:
-                request_ids.discard(request.request_id)
-                if not request_ids:
-                    job_index.pop(request.job_id, None)
+        await tracker.track_finish(request.request_id)
         async with connection_lock:
             connection_requests.discard(request.request_id)
             connection_jobs.pop(request.request_id, None)
@@ -232,9 +348,7 @@ async def _handle_connection(
     writer: asyncio.StreamWriter,
     executor: PythonExecutor,
     ready_event: asyncio.Event,
-    in_flight: dict[str, asyncio.Task],
-    job_index: dict[str, set[str]],
-    inflight_lock: asyncio.Lock,
+    tracker: _InflightTracker,
 ) -> None:
     write_lock = asyncio.Lock()
     connection_requests: set[str] = set()
@@ -268,18 +382,14 @@ async def _handle_connection(
                         request,
                         writer,
                         write_lock,
-                        in_flight,
-                        job_index,
-                        inflight_lock,
+                        tracker,
                         connection_requests,
                         connection_jobs,
                         connection_lock,
                     ),
                     name=f"rrq-executor-{request.request_id}",
                 )
-                async with inflight_lock:
-                    in_flight[request.request_id] = task
-                    job_index.setdefault(request.job_id, set()).add(request.request_id)
+                await tracker.track_start(request.request_id, request.job_id, task)
                 async with connection_lock:
                     connection_requests.add(request.request_id)
                     connection_jobs[request.request_id] = request.job_id
@@ -291,18 +401,9 @@ async def _handle_connection(
                     continue
                 request_id = cancel_request.request_id
                 if request_id is None:
-                    async with inflight_lock:
-                        request_ids = job_index.get(cancel_request.job_id, set()).copy()
-                    for active_request_id in request_ids:
-                        async with inflight_lock:
-                            task = in_flight.get(active_request_id)
-                        if task is not None:
-                            task.cancel()
+                    await tracker.cancel_job(cancel_request.job_id)
                 else:
-                    async with inflight_lock:
-                        task = in_flight.get(request_id)
-                    if task is not None:
-                        task.cancel()
+                    await tracker.cancel_request(request_id)
                 continue
 
             raise ValueError(f"Unexpected message type: {message_type}")
@@ -311,20 +412,10 @@ async def _handle_connection(
             async with connection_lock:
                 pending = list(connection_requests)
             for request_id in pending:
-                async with inflight_lock:
-                    task = in_flight.pop(request_id, None)
+                await tracker.cancel_request(request_id)
                 async with connection_lock:
-                    job_id = connection_jobs.pop(request_id, None)
+                    connection_jobs.pop(request_id, None)
                     connection_requests.discard(request_id)
-                if job_id is not None:
-                    async with inflight_lock:
-                        request_ids = job_index.get(job_id)
-                        if request_ids is not None:
-                            request_ids.discard(request_id)
-                            if not request_ids:
-                                job_index.pop(job_id, None)
-                if task is not None:
-                    task.cancel()
         writer.close()
         with suppress(Exception):
             await writer.wait_closed()
@@ -354,29 +445,24 @@ async def run_python_executor(
     )
     startup_completed = False
     ready_event = asyncio.Event()
-    in_flight: dict[str, asyncio.Task] = {}
-    job_index: dict[str, set[str]] = {}
-    inflight_lock = asyncio.Lock()
+    tracker = _InflightTracker()
     server: asyncio.AbstractServer | None = None
 
     try:
+        await tracker.start()
         if transport == "unix":
             path = Path(str(target))
             path.parent.mkdir(parents=True, exist_ok=True)
             if path.exists():
                 path.unlink()
             server = await asyncio.start_unix_server(
-                lambda r, w: _handle_connection(
-                    r, w, executor, ready_event, in_flight, job_index, inflight_lock
-                ),
+                lambda r, w: _handle_connection(r, w, executor, ready_event, tracker),
                 path=str(path),
             )
         else:
             host, port = target
             server = await asyncio.start_server(
-                lambda r, w: _handle_connection(
-                    r, w, executor, ready_event, in_flight, job_index, inflight_lock
-                ),
+                lambda r, w: _handle_connection(r, w, executor, ready_event, tracker),
                 host=host,
                 port=port,
             )
@@ -390,6 +476,7 @@ async def run_python_executor(
             server.close()
             with suppress(Exception):
                 await server.wait_closed()
+        await tracker.close()
         if startup_completed:
             await _call_hook(executor_settings.on_shutdown)
         await executor.close()

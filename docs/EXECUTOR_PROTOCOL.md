@@ -182,7 +182,6 @@ Example: `rust#send_email`. The orchestrator strips the prefix and sends only
 
 ## Reference Implementations
 - Python: `reference/python/socket_executor.py`
-- TypeScript: `reference/typescript/executor_runtime.ts`
-- Rust protocol types: `rrq-rs/rrq-protocol`
-- Rust executor: `rrq-rs/rrq-executor` (see
-  `rrq-rs/rrq-executor/examples/socket_executor.rs`)
+- Rust protocol types: `rrq-rs/protocol`
+- Rust executor: `rrq-rs/executor` (see
+  `rrq-rs/executor/examples/socket_executor.rs`)

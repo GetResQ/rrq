@@ -37,9 +37,9 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 uuid = { version = "1.20.0", features = ["v4"] }
 rand = "0.9.2"
 
-rrq-protocol = { version = "0.9.9", path = "../rrq-protocol" }
+rrq-protocol = { version = "0.9.9", path = "../protocol" }
 
 [dev-dependencies]
 serde_json = "1.0.149"
 tokio = { version = "1.49.0", features = ["io-std", "io-util", "macros", "rt-multi-thread"] }
-rrq-producer = { version = "0.9.9", path = "../rrq-producer" }
+rrq-producer = { version = "0.9.9", path = "../producer" }

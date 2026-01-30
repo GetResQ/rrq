@@ -6,7 +6,10 @@ use rrq_protocol::{CancelRequest, ExecutorMessage, OutcomeStatus, PROTOCOL_VERSI
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::{Mutex, mpsc};
@@ -272,6 +275,7 @@ where
                             payload.request_id.clone(),
                             "Executor busy: too many in-flight requests",
                         );
+                        drop(active);
                         let _ = response_tx.try_send(outcome);
                         continue;
                     }
@@ -286,10 +290,24 @@ where
                 let request_id_for_task = request_id.clone();
                 let job_id_for_task = job_id.clone();
                 let response_tx_for_task = response_tx.clone();
+                let completed = Arc::new(AtomicBool::new(false));
+                let completed_for_task = completed.clone();
 
                 let handle = tokio::spawn(async move {
                     let outcome =
                         execute_with_deadline(payload, registry, telemetry.as_ref()).await;
+                    completed_for_task.store(true, Ordering::SeqCst);
+                    let send_result =
+                        timeout(RESPONSE_SEND_TIMEOUT, response_tx_for_task.send(outcome)).await;
+                    match send_result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => {
+                            tracing::warn!("executor response channel closed; dropping outcome");
+                        }
+                        Err(_) => {
+                            tracing::warn!("executor response channel stalled; dropping outcome");
+                        }
+                    }
                     {
                         let mut in_flight = in_flight_for_task.lock().await;
                         in_flight.remove(&request_id_for_task);
@@ -307,12 +325,6 @@ where
                         let mut active = active_for_task.lock().await;
                         active.remove(&request_id_for_task);
                     }
-                    if timeout(RESPONSE_SEND_TIMEOUT, response_tx_for_task.send(outcome))
-                        .await
-                        .is_err()
-                    {
-                        tracing::warn!("executor response channel stalled; dropping outcome");
-                    }
                 });
 
                 {
@@ -323,6 +335,8 @@ where
                             job_id: job_id.clone(),
                             handle,
                             response_tx: response_tx.clone(),
+                            connection_requests: connection_requests.clone(),
+                            completed,
                         },
                     );
                 }
@@ -385,6 +399,8 @@ struct InFlightTask {
     job_id: String,
     handle: tokio::task::JoinHandle<()>,
     response_tx: mpsc::Sender<ExecutionOutcome>,
+    connection_requests: Arc<Mutex<HashSet<String>>>,
+    completed: Arc<AtomicBool>,
 }
 
 async fn handle_cancel(
@@ -411,10 +427,20 @@ async fn handle_cancel(
     for request_id in request_ids {
         let task = {
             let mut in_flight = in_flight.lock().await;
-            in_flight.remove(&request_id)
+            if let Some(task) = in_flight.get(&request_id)
+                && task.completed.load(Ordering::SeqCst)
+            {
+                None
+            } else {
+                in_flight.remove(&request_id)
+            }
         };
         if let Some(task) = task {
             task.handle.abort();
+            {
+                let mut active = task.connection_requests.lock().await;
+                active.remove(&request_id);
+            }
             let outcome = ExecutionOutcome {
                 job_id: Some(payload.job_id.clone()),
                 request_id: Some(request_id.clone()),
@@ -428,11 +454,15 @@ async fn handle_cancel(
                 }),
                 retry_after_seconds: None,
             };
-            if timeout(RESPONSE_SEND_TIMEOUT, task.response_tx.send(outcome))
-                .await
-                .is_err()
-            {
-                tracing::warn!("executor response channel stalled; dropping cancel outcome");
+            let send_result = timeout(RESPONSE_SEND_TIMEOUT, task.response_tx.send(outcome)).await;
+            match send_result {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => {
+                    tracing::warn!("executor response channel closed; dropping cancel outcome");
+                }
+                Err(_) => {
+                    tracing::warn!("executor response channel stalled; dropping cancel outcome");
+                }
             }
             let mut job_index = job_index.lock().await;
             if let Some(entries) = job_index.get_mut(&task.job_id) {
@@ -665,6 +695,103 @@ mod tests {
             }
             _ => panic!("expected response"),
         }
+        drop(client);
+        let _ = server_task.await;
+    }
+
+    #[tokio::test]
+    async fn cancel_frees_connection_capacity() {
+        let mut registry = Registry::new();
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let gate_for_handler = gate.clone();
+        registry.register("block", move |request| {
+            let gate = gate_for_handler.clone();
+            async move {
+                let _permit = gate.acquire().await.expect("semaphore closed");
+                ExecutionOutcome::success(
+                    request.job_id.clone(),
+                    request.request_id.clone(),
+                    json!({"ok": true}),
+                )
+            }
+        });
+        let (client, server) = UnixStream::pair().unwrap();
+        let in_flight = Arc::new(Mutex::new(HashMap::new()));
+        let job_index = Arc::new(Mutex::new(HashMap::new()));
+        let server_task = tokio::spawn(async move {
+            handle_connection(server, &registry, &NoopTelemetry, in_flight, job_index)
+                .await
+                .unwrap();
+        });
+        let mut client = client;
+        let job_id = "job-capacity".to_string();
+        for i in 0..RESPONSE_CHANNEL_CAPACITY {
+            let mut request = build_request("block");
+            request.request_id = format!("req-{i}");
+            request.job_id = job_id.clone();
+            request.context.job_id = job_id.clone();
+            write_message(&mut client, &ExecutorMessage::Request { payload: request })
+                .await
+                .unwrap();
+        }
+
+        let cancel = ExecutorMessage::Cancel {
+            payload: CancelRequest {
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                job_id: job_id.clone(),
+                request_id: Some("req-0".to_string()),
+                hard_kill: false,
+            },
+        };
+        write_message(&mut client, &cancel).await.unwrap();
+        let response = timeout(Duration::from_secs(1), read_message(&mut client))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        match response {
+            ExecutorMessage::Response { payload } => {
+                assert_eq!(payload.status, OutcomeStatus::Error);
+                let error_type = payload
+                    .error
+                    .as_ref()
+                    .and_then(|error| error.error_type.as_deref());
+                assert_eq!(error_type, Some("cancelled"));
+            }
+            _ => panic!("expected response"),
+        }
+
+        let mut extra_request = build_request("block");
+        extra_request.request_id = "req-extra".to_string();
+        extra_request.job_id = job_id.clone();
+        extra_request.context.job_id = job_id.clone();
+        write_message(
+            &mut client,
+            &ExecutorMessage::Request {
+                payload: extra_request,
+            },
+        )
+        .await
+        .unwrap();
+
+        gate.add_permits(RESPONSE_CHANNEL_CAPACITY + 1);
+
+        let mut saw_extra = false;
+        for _ in 0..RESPONSE_CHANNEL_CAPACITY {
+            let response = timeout(Duration::from_secs(1), read_message(&mut client))
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            if let ExecutorMessage::Response { payload } = response
+                && payload.request_id.as_deref() == Some("req-extra")
+            {
+                assert_eq!(payload.status, OutcomeStatus::Success);
+                saw_extra = true;
+            }
+        }
+        assert!(saw_extra, "extra request never completed");
+
         drop(client);
         let _ = server_task.await;
     }
@@ -924,6 +1051,7 @@ mod tests {
         let job_index = Arc::new(Mutex::new(HashMap::new()));
         let (tx, _rx) = mpsc::channel(1);
         let handle = tokio::spawn(async {});
+        let connection_requests = Arc::new(Mutex::new(HashSet::new()));
         {
             let mut guard = in_flight.lock().await;
             guard.insert(
@@ -932,6 +1060,8 @@ mod tests {
                     job_id: "job-1".to_string(),
                     handle,
                     response_tx: tx,
+                    connection_requests,
+                    completed: Arc::new(AtomicBool::new(false)),
                 },
             );
         }

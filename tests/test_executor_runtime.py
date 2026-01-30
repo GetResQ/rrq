@@ -9,6 +9,7 @@ import pytest
 from rrq.client import RRQClient
 from rrq.executor import ExecutionContext, ExecutionRequest, PythonExecutor
 from rrq.executor_runtime import (
+    _InflightTracker,
     _execute_and_respond,
     _execute_with_deadline,
     _handle_connection,
@@ -104,13 +105,10 @@ async def test_handle_connection_waits_for_ready_event() -> None:
         worker_id=None,
     )
     ready_event = asyncio.Event()
-    in_flight: dict[str, asyncio.Task] = {}
-    job_index: dict[str, set[str]] = {}
-    inflight_lock = asyncio.Lock()
+    tracker = _InflightTracker()
+    await tracker.start()
     server = await asyncio.start_server(
-        lambda r, w: _handle_connection(
-            r, w, executor, ready_event, in_flight, job_index, inflight_lock
-        ),
+        lambda r, w: _handle_connection(r, w, executor, ready_event, tracker),
         host="127.0.0.1",
         port=0,
     )
@@ -147,6 +145,7 @@ async def test_handle_connection_waits_for_ready_event() -> None:
             await writer.wait_closed()
         server.close()
         await server.wait_closed()
+        await tracker.close()
 
 
 @pytest.mark.asyncio
@@ -167,13 +166,10 @@ async def test_cancel_by_job_id_cancels_all_requests() -> None:
     )
     ready_event = asyncio.Event()
     ready_event.set()
-    in_flight: dict[str, asyncio.Task] = {}
-    job_index: dict[str, set[str]] = {}
-    inflight_lock = asyncio.Lock()
+    tracker = _InflightTracker()
+    await tracker.start()
     server = await asyncio.start_server(
-        lambda r, w: _handle_connection(
-            r, w, executor, ready_event, in_flight, job_index, inflight_lock
-        ),
+        lambda r, w: _handle_connection(r, w, executor, ready_event, tracker),
         host="127.0.0.1",
         port=0,
     )
@@ -213,13 +209,13 @@ async def test_cancel_by_job_id_cancels_all_requests() -> None:
         await write_message(writer, "request", req1.model_dump(mode="json"))
         await write_message(writer, "request", req2.model_dump(mode="json"))
 
-        for _ in range(50):
-            async with inflight_lock:
-                if len(in_flight) == 2:
-                    break
-            await asyncio.sleep(0.01)
-        else:
-            pytest.fail("in_flight did not reach expected size")
+        async def wait_for_tracking() -> None:
+            while True:
+                if len(tracker._in_flight) == 2:  # type: ignore[attr-defined]
+                    return
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_for_tracking(), timeout=1)
 
         cancel_payload = {
             "protocol_version": "1",
@@ -243,9 +239,8 @@ async def test_cancel_by_job_id_cancels_all_requests() -> None:
 
         async def wait_for_cleanup() -> None:
             while True:
-                async with inflight_lock:
-                    if not in_flight and not job_index:
-                        return
+                if not tracker._in_flight and not tracker._job_index:  # type: ignore[attr-defined]
+                    return
                 await asyncio.sleep(0.01)
 
         await asyncio.wait_for(wait_for_cleanup(), timeout=1)
@@ -256,6 +251,7 @@ async def test_cancel_by_job_id_cancels_all_requests() -> None:
             await writer.wait_closed()
         server.close()
         await server.wait_closed()
+        await tracker.close()
 
 
 @pytest.mark.asyncio
@@ -293,10 +289,10 @@ async def test_execute_and_respond_cleans_inflight_on_write_error(
 
     monkeypatch.setattr("rrq.executor_runtime.write_message", boom)
 
+    tracker = _InflightTracker()
+    await tracker.start()
     dummy_task = asyncio.create_task(asyncio.sleep(0))
-    in_flight = {request.request_id: dummy_task}
-    job_index = {request.job_id: {request.request_id}}
-    inflight_lock = asyncio.Lock()
+    await tracker.track_start(request.request_id, request.job_id, dummy_task)
     write_lock = asyncio.Lock()
     connection_requests = {request.request_id}
     connection_jobs = {request.request_id: request.job_id}
@@ -307,19 +303,34 @@ async def test_execute_and_respond_cleans_inflight_on_write_error(
         request,
         cast(asyncio.StreamWriter, object()),
         write_lock,
-        in_flight,
-        job_index,
-        inflight_lock,
+        tracker,
         connection_requests,
         connection_jobs,
         connection_lock,
     )
 
     await dummy_task
-    assert request.request_id not in in_flight
-    assert request.job_id not in job_index
+    assert not tracker._in_flight  # type: ignore[attr-defined]
+    assert not tracker._job_index  # type: ignore[attr-defined]
     assert request.request_id not in connection_requests
     assert request.request_id not in connection_jobs
+    await tracker.close()
+
+
+@pytest.mark.asyncio
+async def test_inflight_tracker_cancels_request() -> None:
+    tracker = _InflightTracker()
+    await tracker.start()
+    task = asyncio.create_task(asyncio.sleep(10))
+    await tracker.track_start("req-track", "job-track", task)
+    await tracker.cancel_request("req-track")
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not tracker._in_flight  # type: ignore[attr-defined]
+    assert not tracker._job_index  # type: ignore[attr-defined]
+    await tracker.close()
 
 
 def test_parse_tcp_socket_allows_localhost() -> None:

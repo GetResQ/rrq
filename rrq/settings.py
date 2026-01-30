@@ -125,13 +125,6 @@ class RRQSettings(BaseModel):
         default=DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
         description="Default TTL (in seconds) for unique job locks if `_unique_key` is used during enqueue.",
     )
-    worker_concurrency: int = Field(
-        default=10,
-        description=(
-            "Internal concurrency limit used by the worker runtime; "
-            "computed from executor pool sizes and max_in_flight."
-        ),
-    )
     default_executor_name: str = Field(
         default="python",
         description="Default executor name for jobs without an explicit executor prefix.",

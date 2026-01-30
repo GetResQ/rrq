@@ -176,6 +176,20 @@ async def test_enqueue_rejects_non_positive_timeout():
 
 
 @pytest.mark.asyncio
+async def test_enqueue_invalid_timeout_releases_unique_lock(
+    rrq_settings_for_client: RRQSettings, job_store_for_client_tests: JobStore
+):
+    client = RRQClient(
+        settings=rrq_settings_for_client, job_store=job_store_for_client_tests
+    )
+    unique_key = "bad-timeout-lock"
+    with pytest.raises(ValueError):
+        await client.enqueue("func", _unique_key=unique_key, _job_timeout_seconds=0)
+    ttl = await job_store_for_client_tests.get_lock_ttl(unique_key)
+    assert ttl == 0
+
+
+@pytest.mark.asyncio
 async def test_enqueue_with_unique_key(
     rrq_client: RRQClient,
     job_store_for_client_tests: JobStore,
@@ -360,20 +374,32 @@ async def test_unique_lock_ttl_respects_defer_by_override():
     assert store.locks, "Unique lock was not acquired"
     key, job_id, ttl = store.locks[-1]
     assert key == "key1"
-    # TTL should be at least defer seconds + 1 (i.e., 6)
-    assert ttl == 6, f"Expected TTL 6, got {ttl}"
+    expected = max(
+        settings.default_unique_job_lock_ttl_seconds,
+        int(defer.total_seconds()) + 1,
+        settings.default_job_timeout_seconds
+        + settings.default_lock_timeout_extension_seconds
+        + 1,
+    )
+    assert ttl == expected, f"Expected TTL {expected}, got {ttl}"
 
 
 @pytest.mark.asyncio
 async def test_unique_lock_ttl_default_no_defer():
-    # When no defer, TTL should equal default
+    # When no defer, TTL should respect default/job timeout floor
     settings = RRQSettings(default_unique_job_lock_ttl_seconds=3)
     store = DummyStore()
     client = RRQClient(settings=settings, job_store=cast(JobStore, store))
     await client.enqueue("func", _unique_key="key2")
     assert store.locks, "Unique lock was not acquired"
     _, _, ttl = store.locks[-1]
-    assert ttl == 3, f"Expected TTL 3, got {ttl}"
+    expected = max(
+        settings.default_unique_job_lock_ttl_seconds,
+        settings.default_job_timeout_seconds
+        + settings.default_lock_timeout_extension_seconds
+        + 1,
+    )
+    assert ttl == expected, f"Expected TTL {expected}, got {ttl}"
 
 
 @pytest.mark.asyncio

@@ -18,7 +18,7 @@ rrq-producer = { git = "https://github.com/getresq/rrq", package = "rrq-producer
 ## Executor example
 
 ```
-cd rrq-rs/rrq-executor
+cd rrq-rs/executor
 RRQ_EXECUTOR_SOCKET=/tmp/rrq-executor.sock cargo run --example socket_executor
 ```
 

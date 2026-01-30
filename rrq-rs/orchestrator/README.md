@@ -38,7 +38,6 @@ rrq = "0.9"
 [rrq]
 redis_dsn = "redis://localhost:6379/0"
 default_executor_name = "python"
-worker_concurrency = 4
 
 [rrq.executors.python]
 type = "socket"
@@ -142,8 +141,7 @@ redis_dsn = "redis://localhost:6379/0"
 # Default executor for jobs without explicit executor
 default_executor_name = "python"
 
-# Maximum concurrent jobs per worker
-worker_concurrency = 4
+# Worker concurrency is derived from executor pool_size * max_in_flight
 
 # Worker heartbeat interval (seconds)
 heartbeat_interval_seconds = 60

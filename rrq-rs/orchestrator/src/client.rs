@@ -53,9 +53,26 @@ impl RRQClient {
         );
         let _enter = span.enter();
 
+        let job_timeout_seconds = options
+            .job_timeout_seconds
+            .unwrap_or(self.settings.default_job_timeout_seconds);
+        if job_timeout_seconds <= 0 {
+            anyhow::bail!("job_timeout_seconds must be positive");
+        }
+        let lock_ttl_floor = job_timeout_seconds
+            .checked_add(self.settings.default_lock_timeout_extension_seconds)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| anyhow::anyhow!("lock_ttl_seconds overflow"))?;
+        if lock_ttl_floor <= 0 {
+            anyhow::bail!("lock_ttl_seconds must be positive");
+        }
+
         let enqueue_time = Utc::now();
         let mut desired_run_time = enqueue_time;
-        let mut lock_ttl_seconds = self.settings.default_unique_job_lock_ttl_seconds;
+        let mut lock_ttl_seconds = self
+            .settings
+            .default_unique_job_lock_ttl_seconds
+            .max(lock_ttl_floor);
 
         if let Some(defer_until) = options.defer_until {
             desired_run_time = defer_until;
@@ -94,13 +111,6 @@ impl RRQClient {
             }
         }
 
-        let job_timeout_seconds = options
-            .job_timeout_seconds
-            .unwrap_or(self.settings.default_job_timeout_seconds);
-        if job_timeout_seconds <= 0 {
-            anyhow::bail!("job_timeout_seconds must be positive");
-        }
-
         let job = Job {
             id: job_id.clone(),
             function_name: function_name.to_string(),
@@ -131,21 +141,24 @@ impl RRQClient {
         };
 
         let score_ms = desired_run_time.timestamp_millis() as f64;
-        if let Err(err) = self.job_store.save_job_definition(&job).await {
-            if unique_acquired && let Some(unique_key) = options.unique_key.as_deref() {
-                let _ = self.job_store.release_unique_job_lock(unique_key).await;
-            }
-            return Err(err);
-        }
-        if let Err(err) = self
+        match self
             .job_store
-            .add_job_to_queue(&queue_name, &job.id, score_ms)
+            .atomic_enqueue_job(&job, &queue_name, score_ms)
             .await
         {
-            if unique_acquired && let Some(unique_key) = options.unique_key.as_deref() {
-                let _ = self.job_store.release_unique_job_lock(unique_key).await;
+            Ok(true) => {}
+            Ok(false) => {
+                if unique_acquired && let Some(unique_key) = options.unique_key.as_deref() {
+                    let _ = self.job_store.release_unique_job_lock(unique_key).await;
+                }
+                anyhow::bail!("job_id already exists");
             }
-            return Err(err);
+            Err(err) => {
+                if unique_acquired && let Some(unique_key) = options.unique_key.as_deref() {
+                    let _ = self.job_store.release_unique_job_lock(unique_key).await;
+                }
+                return Err(err);
+            }
         }
 
         tracing::info!("job enqueued");
@@ -274,5 +287,70 @@ mod tests {
             err.to_string()
                 .contains("job_timeout_seconds must be positive")
         );
+    }
+
+    #[tokio::test]
+    async fn enqueue_releases_unique_lock_on_invalid_timeout() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let options = EnqueueOptions {
+            unique_key: Some("invalid-timeout-lock".to_string()),
+            job_timeout_seconds: Some(0),
+            ..Default::default()
+        };
+        let err = client
+            .enqueue("task", Vec::new(), serde_json::Map::new(), options)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("job_timeout_seconds must be positive")
+        );
+        let ttl = ctx
+            .store
+            .get_lock_ttl("invalid-timeout-lock")
+            .await
+            .unwrap();
+        assert_eq!(ttl, 0);
+    }
+
+    #[tokio::test]
+    async fn enqueue_rejects_duplicate_job_id_preserves_existing_job() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let options = EnqueueOptions {
+            job_id: Some("fixed-id".to_string()),
+            ..Default::default()
+        };
+        let first = client
+            .enqueue(
+                "task",
+                vec![json!(1)],
+                serde_json::Map::new(),
+                options.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.id, "fixed-id");
+
+        let err = client
+            .enqueue("task", vec![json!(2)], serde_json::Map::new(), options)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("job_id already exists"));
+
+        let stored = ctx
+            .store
+            .get_job_definition("fixed-id")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.job_args, vec![json!(1)]);
+        let queue_size = ctx
+            .store
+            .queue_size(&ctx.settings.default_queue_name)
+            .await
+            .unwrap();
+        assert_eq!(queue_size, 1);
     }
 }

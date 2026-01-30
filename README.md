@@ -219,10 +219,10 @@ uv run python -m examples.integration_test
 
 ## Reference Implementations
 
-- Rust orchestrator (crate `rrq`): `rrq-rs/rrq-orchestrator`
-- Rust producer: `rrq-rs/rrq-producer`
-- Rust executor: `rrq-rs/rrq-executor`
-- Protocol types: `rrq-rs/rrq-protocol`
+- Rust orchestrator (crate `rrq`): `rrq-rs/orchestrator`
+- Rust producer: `rrq-rs/producer`
+- Rust executor: `rrq-rs/executor`
+- Protocol types: `rrq-rs/protocol`
 - Python socket executor example: `reference/python/socket_executor.py`
 
 ## Telemetry

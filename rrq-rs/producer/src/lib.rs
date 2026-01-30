@@ -380,7 +380,7 @@ fn validate_name(label: &str, value: &str) -> Result<()> {
 }
 
 fn build_enqueue_script() -> Script {
-    Script::new(
+    let script = format!(
         "-- KEYS: [1] = job_key, [2] = queue_key, [3] = idempotency_key (optional)\n\
          -- ARGV: [1] = job_id, [2] = function_name, [3] = job_args, [4] = job_kwargs\n\
          --       [5] = enqueue_time, [6] = status, [7] = current_retries\n\
@@ -392,11 +392,15 @@ fn build_enqueue_script() -> Script {
          if idem_key ~= '' then\n\
              local existing = redis.call('GET', idem_key)\n\
              if existing then\n\
-                 return {0, existing}\n\
+                 local existing_job_key = '{job_prefix}' .. existing\n\
+                 if redis.call('EXISTS', existing_job_key) == 1 then\n\
+                     return {{0, existing}}\n\
+                 end\n\
+                 redis.call('DEL', idem_key)\n\
              end\n\
          end\n\
          if redis.call('EXISTS', KEYS[1]) == 1 then\n\
-             return {-1, ARGV[1]}\n\
+             return {{-1, ARGV[1]}}\n\
          end\n\
          if idem_key ~= '' then\n\
              local ttl = tonumber(ARGV[16])\n\
@@ -424,8 +428,10 @@ fn build_enqueue_script() -> Script {
              redis.call('HSET', KEYS[1], 'trace_context', ARGV[14])\n\
          end\n\
          redis.call('ZADD', KEYS[2], ARGV[15], ARGV[1])\n\
-         return {1, ARGV[1]}",
-    )
+         return {{1, ARGV[1]}}",
+        job_prefix = JOB_KEY_PREFIX
+    );
+    Script::new(&script)
 }
 
 fn parse_result(result: &str) -> Option<Value> {
@@ -584,6 +590,42 @@ mod tests {
         let queue_key = format_queue_key("default");
         let count: i64 = conn.zcard(queue_key).await.unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn producer_idempotency_key_replaces_stale_entry() {
+        let _guard = redis_lock().lock().await;
+        let dsn = std::env::var("RRQ_TEST_REDIS_DSN")
+            .unwrap_or_else(|_| "redis://localhost:6379/15".to_string());
+        let client = redis::Client::open(dsn.as_str()).unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let _: () = redis::cmd("FLUSHDB").query_async(&mut conn).await.unwrap();
+
+        let idem_key = format_idempotency_key("stale");
+        let _: () = redis::cmd("SET")
+            .arg(&idem_key)
+            .arg("missing-job")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let producer = Producer::new(&dsn).await.unwrap();
+        let options = EnqueueOptions {
+            job_id: Some("fresh-id".to_string()),
+            idempotency_key: Some("stale".to_string()),
+            ..Default::default()
+        };
+        let job_id = producer
+            .enqueue("work", vec![], serde_json::Map::new(), options)
+            .await
+            .unwrap();
+        assert_eq!(job_id, "fresh-id");
+
+        let stored: Option<String> = conn.get(&idem_key).await.unwrap();
+        assert_eq!(stored.as_deref(), Some("fresh-id"));
+        let job_key = format!("{JOB_KEY_PREFIX}{job_id}");
+        let exists: bool = conn.exists(job_key).await.unwrap();
+        assert!(exists);
     }
 
     #[tokio::test]

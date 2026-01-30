@@ -91,11 +91,24 @@ class RRQClient:
             function_name=function_name,
             queue_name=queue_name_to_use,
         ) as trace_context:
+            job_timeout_seconds = (
+                _job_timeout_seconds
+                if _job_timeout_seconds is not None
+                else self.settings.default_job_timeout_seconds
+            )
+            if job_timeout_seconds <= 0:
+                raise ValueError("job_timeout_seconds must be positive")
+
             # Determine enqueue timestamp (after telemetry span starts).
             enqueue_time_utc = datetime.now(timezone.utc)
 
-            # Compute base desired run time and unique lock TTL to cover deferral
-            lock_ttl_seconds = self.settings.default_unique_job_lock_ttl_seconds
+            # Compute base desired run time and unique lock TTL to cover deferral + execution
+            lock_ttl_seconds = max(
+                self.settings.default_unique_job_lock_ttl_seconds,
+                job_timeout_seconds
+                + self.settings.default_lock_timeout_extension_seconds
+                + 1,
+            )
             desired_run_time = enqueue_time_utc
             if _defer_until is not None:
                 dt = _defer_until
@@ -135,14 +148,6 @@ class RRQClient:
                             enqueue_time_utc
                             + timedelta(seconds=max(0, int(remaining))),
                         )
-
-            job_timeout_seconds = (
-                _job_timeout_seconds
-                if _job_timeout_seconds is not None
-                else self.settings.default_job_timeout_seconds
-            )
-            if job_timeout_seconds <= 0:
-                raise ValueError("job_timeout_seconds must be positive")
 
             # Create the Job instance with all provided details and defaults
             job = Job(
