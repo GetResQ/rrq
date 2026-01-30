@@ -55,8 +55,8 @@ def _write_config(
     default_executor: str,
     python_cmd: list[str] | None = None,
     rust_cmd: list[str] | None = None,
-    worker_concurrency: int = 4,
-    routing: dict[str, str] | None = None,
+    max_in_flight: int = 4,
+    executor_routes: dict[str, str] | None = None,
     default_max_retries: int | None = None,
     base_retry_delay_seconds: float | None = None,
     max_retry_delay_seconds: float | None = None,
@@ -65,7 +65,6 @@ def _write_config(
         "[rrq]",
         f'redis_dsn = "{redis_dsn}"',
         f'default_executor_name = "{default_executor}"',
-        f"worker_concurrency = {worker_concurrency}",
     ]
     if default_max_retries is not None:
         lines.append(f"default_max_retries = {default_max_retries}")
@@ -81,6 +80,8 @@ def _write_config(
                 "[rrq.executors.python]",
                 'type = "socket"',
                 f"cmd = {_toml_list(python_cmd)}",
+                "pool_size = 1",
+                f"max_in_flight = {max_in_flight}",
                 "",
             ]
         )
@@ -91,13 +92,15 @@ def _write_config(
                 "[rrq.executors.rust]",
                 'type = "socket"',
                 f"cmd = {_toml_list(rust_cmd)}",
+                "pool_size = 1",
+                f"max_in_flight = {max_in_flight}",
                 "",
             ]
         )
 
-    if routing:
-        lines.append("[rrq.routing]")
-        for queue_name, executor_name in routing.items():
+    if executor_routes:
+        lines.append("[rrq.executor_routes]")
+        for queue_name, executor_name in executor_routes.items():
             lines.append(f'{queue_name} = "{executor_name}"')
         lines.append("")
 
@@ -111,40 +114,15 @@ def _run(
     subprocess.run(cmd, cwd=cwd, env=env, check=True)
 
 
-def _resolve_rrq_cmd(root: Path) -> list[str]:
-    packaged = root / "rrq" / "bin"
-    if sys.platform == "win32":
-        packaged_bin = packaged / "rrq.exe"
-    else:
-        packaged_bin = packaged / "rrq"
-    if packaged_bin.exists():
-        return [str(packaged_bin)]
-
+def _resolve_rrq_cmd() -> list[str]:
     rrq_path = shutil.which("rrq")
     if rrq_path:
-        resolved = Path(rrq_path).resolve()
-        # Prefer cargo run if rrq comes from the repo's .venv (often stale in dev).
-        if ".venv" not in resolved.parts or root not in resolved.parents:
-            return [str(resolved)]
+        return [rrq_path]
 
-    if shutil.which("cargo") is None:
-        raise SystemExit(
-            "rrq CLI not found on PATH and cargo is unavailable to build it."
-        )
-
-    manifest_path = root / "rrq-rs" / "Cargo.toml"
-    return [
-        "cargo",
-        "run",
-        "--quiet",
-        "-p",
-        "rrq",
-        "--bin",
-        "rrq",
-        "--manifest-path",
-        str(manifest_path),
-        "--",
-    ]
+    raise SystemExit(
+        "rrq CLI not found on PATH. Install it via `pip install rrq` or "
+        "`cargo install rrq`."
+    )
 
 
 def _start_worker(
@@ -236,23 +214,21 @@ def _wait_for_completion(
     return False
 
 
-def _resolve_rust_executor_cmd(
-    root: Path, build: bool, override: str | None
-) -> list[str]:
+def _resolve_rust_executor_cmd(override: str | None) -> list[str]:
     if override:
         return shlex.split(override)
     if "RRQ_RUST_EXECUTOR_CMD" in os.environ:
         return shlex.split(os.environ["RRQ_RUST_EXECUTOR_CMD"])
 
-    executor_dir = root / "rrq-rs" / "rrq-executor"
-    workspace_target = root / "rrq-rs" / "target"
-    binary = executor_dir / "target" / "debug" / "examples" / "socket_executor"
-    workspace_binary = workspace_target / "debug" / "examples" / "socket_executor"
-    if not binary.exists() and not workspace_binary.exists() and build:
-        _run(["cargo", "build", "--example", "socket_executor"], cwd=executor_dir)
-    if workspace_binary.exists():
-        return [str(workspace_binary)]
-    return [str(binary)]
+    executor_path = shutil.which("socket_executor")
+    if executor_path:
+        return [executor_path]
+
+    raise SystemExit(
+        "socket_executor not found on PATH. Install it via "
+        "`cargo install rrq-executor --example socket_executor` or provide "
+        "--rust-executor-cmd."
+    )
 
 
 def main() -> int:
@@ -276,10 +252,10 @@ def main() -> int:
         help="Seconds between progress logs if status unchanged",
     )
     parser.add_argument(
-        "--worker-concurrency",
+        "--max-in-flight",
         type=int,
         default=4,
-        help="Worker concurrency",
+        help="Max in-flight requests per executor process",
     )
     parser.add_argument(
         "--flush",
@@ -292,15 +268,10 @@ def main() -> int:
         help="Do not flush Redis DB before each scenario",
     )
     parser.add_argument(
-        "--no-build-rust",
-        action="store_true",
-        help="Skip building the Rust socket executor",
-    )
-    parser.add_argument(
         "--rust-executor-cmd",
         type=str,
         default=None,
-        help="Command to launch the Rust socket executor (overrides build)",
+        help="Command to launch the Rust socket executor (overrides PATH lookup)",
     )
     parser.add_argument(
         "--burst-worker",
@@ -320,7 +291,7 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     client = redis.Redis.from_url(args.redis_dsn, decode_responses=False)
 
-    rrq_cmd = _resolve_rrq_cmd(root)
+    rrq_cmd = _resolve_rrq_cmd()
     if shutil.which("cargo") is None:
         raise SystemExit("cargo not found on PATH. Install Rust to run Rust scenarios.")
 
@@ -331,9 +302,7 @@ def main() -> int:
         "--settings",
         "examples.python.executor_config.python_executor_settings",
     ]
-    rust_executor_cmd = _resolve_rust_executor_cmd(
-        root, not args.no_build_rust, args.rust_executor_cmd
-    )
+    rust_executor_cmd = _resolve_rust_executor_cmd(args.rust_executor_cmd)
 
     env_base = os.environ.copy()
 
@@ -348,7 +317,7 @@ def main() -> int:
             redis_dsn=args.redis_dsn,
             default_executor="python",
             python_cmd=python_executor_cmd,
-            worker_concurrency=args.worker_concurrency,
+            max_in_flight=args.max_in_flight,
             default_max_retries=3,
             base_retry_delay_seconds=1.0,
             max_retry_delay_seconds=5.0,
@@ -358,7 +327,7 @@ def main() -> int:
             redis_dsn=args.redis_dsn,
             default_executor="rust",
             rust_cmd=rust_executor_cmd,
-            worker_concurrency=args.worker_concurrency,
+            max_in_flight=args.max_in_flight,
             default_max_retries=3,
             base_retry_delay_seconds=1.0,
             max_retry_delay_seconds=5.0,
@@ -369,8 +338,8 @@ def main() -> int:
             default_executor="python",
             python_cmd=python_executor_cmd,
             rust_cmd=rust_executor_cmd,
-            worker_concurrency=args.worker_concurrency,
-            routing={"rust_queue": "rust"},
+            max_in_flight=args.max_in_flight,
+            executor_routes={"rust_queue": "rust"},
             default_max_retries=3,
             base_retry_delay_seconds=1.0,
             max_retry_delay_seconds=5.0,

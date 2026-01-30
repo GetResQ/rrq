@@ -2,10 +2,11 @@
 
 Redis-based async job queue library for Python.
 
-See @tests/CLAUDE.md for testing guidelines.
+See @rrq-py/tests/CLAUDE.md for testing guidelines.
 
 ## Commands
 ```bash
+cd rrq-py
 uv run pytest                     # Run tests
 uv run pytest --maxfail=1         # Debug failing tests
 uv run ruff format && uv run ruff check --fix   # Format and lint (run before commits)
@@ -22,7 +23,7 @@ uv add <package>                  # Add dependency
 - No blocking I/O in async contexts
 
 ## Code References
-Use VS Code clickable format: `rrq/queue.py:45` or `rrq/worker.py:120-135`
+Use VS Code clickable format: `rrq-py/rrq/queue.py:45` or `rrq-py/rrq/worker.py:120-135`
 
 ## Rules
 - Never commit broken tests

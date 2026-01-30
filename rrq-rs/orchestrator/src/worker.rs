@@ -141,9 +141,15 @@ impl RRQWorker {
     }
 
     fn calculate_jittered_delay(&self, base_delay: f64, jitter_factor: f64) -> Duration {
+        if base_delay <= 0.0 {
+            return Duration::ZERO;
+        }
         let jitter = jitter_factor.clamp(0.0, 0.99);
-        let min_delay = (base_delay * (1.0 - jitter)).max(0.001);
-        let max_delay = base_delay * (1.0 + jitter);
+        let min_delay = (base_delay * (1.0 - jitter)).max(0.0);
+        let mut max_delay = base_delay * (1.0 + jitter);
+        if max_delay < min_delay {
+            max_delay = min_delay;
+        }
         let mut rng = rand::rng();
         let delay = rng.random_range(min_delay..=max_delay);
         Duration::from_secs_f64(delay)
@@ -1618,6 +1624,32 @@ mod tests {
             .unwrap()
             .unwrap();
     }
+
+    #[tokio::test]
+    async fn calculate_jittered_delay_handles_non_positive_base() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        ctx.settings.default_executor_name = "test".to_string();
+        let executor = Arc::new(StaticExecutor::new(
+            TestOutcome::Success(json!({"ok": true})),
+            Duration::from_millis(0),
+        ));
+        let mut executors: HashMap<String, Arc<dyn Executor>> = HashMap::new();
+        executors.insert("test".to_string(), executor);
+        let worker = RRQWorker::new(
+            ctx.settings.clone(),
+            None,
+            Some("worker-1".to_string()),
+            executors,
+            true,
+            1,
+        )
+        .await
+        .unwrap();
+
+        assert!(worker.calculate_jittered_delay(0.0, 0.5).is_zero());
+        assert!(worker.calculate_jittered_delay(-1.0, 0.5).is_zero());
+    }
+
     #[tokio::test]
     async fn calculate_backoff_respects_max_delay() {
         let settings = RRQSettings {

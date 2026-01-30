@@ -12,6 +12,15 @@ implemented in Rust, with executors available in multiple languages.
 - **Unix socket executors**: Python, Rust, or any other runtime.
 - **Python SDK**: enqueue jobs and run a Python executor runtime.
 
+## Repo Layout
+
+- `.github/` CI workflows
+- `docs/` design docs, protocols, references
+- `examples/` Python + Rust usage samples
+- `rrq-py/` Python package (`rrq`), tests, and build tooling
+- `rrq-rs/` Rust workspace (orchestrator, producer, executor, protocol)
+- `rrq-ts/` placeholder for the future TypeScript package
+
 ## Architecture
 
 ```
@@ -138,7 +147,8 @@ asyncio.run(main())
 - `[rrq]` basic settings (Redis, retries, timeouts, poll delay)
 - `[rrq.executors.<name>]` socket executor commands, pool sizes, and
   `max_in_flight`
-- `[rrq.routing]` queue → executor mapping
+- `[rrq.executor_routes]` queue → executor mapping (legacy `[rrq.routing]` still
+  accepted)
 - `[[rrq.cron_jobs]]` periodic scheduling
 - `[rrq.watch]` watch mode defaults (path/patterns)
 
@@ -208,13 +218,15 @@ wire protocol.
 Runtime-only Python tests (producer + executor + store):
 
 ```
+cd rrq-py
 uv run pytest
 ```
 
 End-to-end integration (Python-only, Rust-only, mixed):
 
 ```
-uv run python -m examples.integration_test
+cd rrq-py
+uv run python ../examples/integration_test.py
 ```
 
 ## Reference Implementations
@@ -223,9 +235,9 @@ uv run python -m examples.integration_test
 - Rust producer: `rrq-rs/producer`
 - Rust executor: `rrq-rs/executor`
 - Protocol types: `rrq-rs/protocol`
-- Python socket executor example: `reference/python/socket_executor.py`
+- Python executor examples: `examples/python/`
 
 ## Telemetry
 
 Optional tracing integrations are available for Python producers and the Python
-executor runtime. See `rrq/integrations/`.
+executor runtime. See `rrq-py/rrq/integrations/`.

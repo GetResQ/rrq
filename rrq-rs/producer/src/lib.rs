@@ -404,10 +404,17 @@ fn build_enqueue_script() -> Script {
          end\n\
          if idem_key ~= '' then\n\
              local ttl = tonumber(ARGV[16])\n\
+             local set_ok = nil\n\
              if ttl and ttl > 0 then\n\
-                 redis.call('SET', idem_key, ARGV[1], 'NX', 'EX', ttl)\n\
+                 set_ok = redis.call('SET', idem_key, ARGV[1], 'NX', 'EX', ttl)\n\
              else\n\
-                 redis.call('SET', idem_key, ARGV[1], 'NX')\n\
+                 set_ok = redis.call('SET', idem_key, ARGV[1], 'NX')\n\
+             end\n\
+             if not set_ok then\n\
+                 local winner = redis.call('GET', idem_key)\n\
+                 if winner then\n\
+                     return {{0, winner}}\n\
+                 end\n\
              end\n\
          end\n\
          redis.call('HSET', KEYS[1],\n\

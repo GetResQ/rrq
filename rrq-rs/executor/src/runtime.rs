@@ -1078,6 +1078,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_cancel_skips_completed_requests() {
+        let in_flight = Arc::new(Mutex::new(HashMap::new()));
+        let job_index = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, mut rx) = mpsc::channel(1);
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+        let connection_requests = Arc::new(Mutex::new(HashSet::new()));
+        {
+            let mut guard = in_flight.lock().await;
+            guard.insert(
+                "req-1".to_string(),
+                InFlightTask {
+                    job_id: "job-1".to_string(),
+                    handle,
+                    response_tx: tx,
+                    connection_requests,
+                    completed: Arc::new(AtomicBool::new(true)),
+                },
+            );
+        }
+        {
+            let mut guard = job_index.lock().await;
+            guard.insert("job-1".to_string(), HashSet::from(["req-1".to_string()]));
+        }
+        let payload = CancelRequest {
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            job_id: "job-1".to_string(),
+            request_id: Some("req-1".to_string()),
+            hard_kill: false,
+        };
+        handle_cancel(payload, &in_flight, &job_index).await;
+        assert!(in_flight.lock().await.contains_key("req-1"));
+        assert!(job_index.lock().await.contains_key("job-1"));
+        assert!(rx.try_recv().is_err());
+        let task = in_flight.lock().await.remove("req-1").unwrap();
+        task.handle.abort();
+    }
+
+    #[tokio::test]
     async fn read_message_handles_empty_and_invalid_payloads() {
         let (mut client, mut server) = tokio::io::duplex(64);
         // length = 0

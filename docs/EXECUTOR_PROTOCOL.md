@@ -181,7 +181,7 @@ Example: `rust#send_email`. The orchestrator strips the prefix and sends only
 `handler` as `function_name` in the `ExecutionRequest`.
 
 ## Reference Implementations
-- Python: `reference/python/socket_executor.py`
+- Python: `rrq-py/rrq/executor_runtime.py` (see `examples/python/`)
 - Rust protocol types: `rrq-rs/protocol`
 - Rust executor: `rrq-rs/executor` (see
   `rrq-rs/executor/examples/socket_executor.rs`)

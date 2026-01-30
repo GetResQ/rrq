@@ -32,18 +32,23 @@ jobs:
 
       - name: Sync dependencies
         run: uv sync --extra dev
+        working-directory: rrq-py
 
       - name: Ruff format check
         run: uv run ruff format --check
+        working-directory: rrq-py
 
       - name: Ruff lint
         run: uv run ruff check
+        working-directory: rrq-py
 
       - name: Type check
         run: uv run ty check
+        working-directory: rrq-py
 
       - name: Run tests
         run: uv run pytest --disable-warnings -q --maxfail=1
+        working-directory: rrq-py
 
   rust:
     runs-on: ubuntu-latest

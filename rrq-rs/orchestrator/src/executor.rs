@@ -374,6 +374,15 @@ impl SocketExecutorPool {
                     }
                 }
             };
+            if let ExecutorSocketTarget::Tcp(addr) = &socket
+                && let Err(err) = self.ensure_tcp_port_available(*addr)
+            {
+                attempts += 1;
+                if reuse_socket.is_some() || attempts >= max_attempts {
+                    return Err(err);
+                }
+                continue;
+            }
 
             let mut command = Command::new(&self.cmd[0]);
             if self.cmd.len() > 1 {
@@ -459,6 +468,20 @@ set socket_dir to a shorter absolute path (e.g. /tmp/rrq).",
             }
         }
         Ok(())
+    }
+
+    fn ensure_tcp_port_available(&self, addr: SocketAddr) -> Result<()> {
+        match std::net::TcpListener::bind(addr) {
+            Ok(listener) => {
+                drop(listener);
+                Ok(())
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => Err(anyhow::anyhow!(
+                "executor tcp_socket port {} is already in use",
+                addr
+            )),
+            Err(err) => Err(err.into()),
+        }
     }
 
     async fn connect_socket(&self, socket: &ExecutorSocketTarget, child: &mut Child) -> Result<()> {
@@ -940,6 +963,7 @@ where
 mod tests {
     use super::*;
     use crate::settings::{ExecutorConfig, ExecutorType, RRQSettings};
+    use std::net::TcpListener;
     use tokio::process::Command;
     use tokio::time::sleep;
 
@@ -1244,6 +1268,38 @@ mod tests {
             third,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9002)
         );
+    }
+
+    #[test]
+    fn tcp_port_collision_is_detected() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let pool = SocketExecutorPool {
+            cmd: vec!["true".to_string()],
+            pool_size: 1,
+            max_in_flight: 1,
+            env: None,
+            cwd: None,
+            socket_dir: None,
+            owned_socket_dir: None,
+            tcp_socket: Some(TcpSocketSpec {
+                host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                port: addr.port(),
+            }),
+            tcp_port_cursor: AtomicUsize::new(0),
+            processes: Mutex::new(Vec::new()),
+            cursor: AtomicUsize::new(0),
+            availability: Arc::new(Notify::new()),
+            response_timeout: None,
+            connect_timeout: Duration::from_millis(DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS as u64),
+            spawn_override: None,
+        };
+
+        let err = pool.ensure_tcp_port_available(addr).unwrap_err();
+        assert!(err.to_string().contains("already in use"));
+
+        drop(listener);
+        pool.ensure_tcp_port_available(addr).unwrap();
     }
 
     #[tokio::test]

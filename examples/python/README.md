@@ -5,6 +5,12 @@
 `examples/python/rrq.toml` configures the Rust orchestrator and points at the Python
 socket executor.
 
+Install the published packages first:
+
+```
+pip install rrq
+```
+
 ## Run the Rust orchestrator + Python executor
 
 ```

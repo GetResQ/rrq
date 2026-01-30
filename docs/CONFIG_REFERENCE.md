@@ -87,20 +87,20 @@ Notes:
   `socket_dir` (for example, `/tmp/rrq`) if you see “socket path too long”
   errors.
 
-## [rrq.routing]
+## [rrq.executor_routes]
 
-Optional queue-to-executor routing map. This is normalized to `executor_routes`
-internally.
+Optional queue-to-executor routing map. Legacy `[rrq.routing]` is still
+accepted and normalized to `executor_routes`.
 
 ```toml
-[rrq.routing]
+[rrq.executor_routes]
 low_latency = "python"
 bulk = "rust"
 ```
 
 Resolution order:
 1) `executor#handler` prefix in the job's function name
-2) `[rrq.routing]` entry for the queue
+2) `[rrq.executor_routes]` entry for the queue
 3) `default_executor_name`
 
 ## [[rrq.cron_jobs]]

@@ -24,21 +24,25 @@ jobs:
 
       - name: Sync dependencies
         run: uv sync --extra dev
+        working-directory: rrq-py
 
       - name: Install build tooling
         run: uv pip install build
+        working-directory: rrq-py
 
       - name: Build Rust binary
         run: uv run python scripts/build_rust_binary.py
+        working-directory: rrq-py
 
       - name: Build wheel
         run: uv run python -m build --wheel
+        working-directory: rrq-py
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-x86_64
-          path: dist/*.whl
+          path: rrq-py/dist/*.whl
 
   build-linux-aarch64:
     runs-on: ubuntu-22.04-arm
@@ -57,21 +61,25 @@ jobs:
 
       - name: Sync dependencies
         run: uv sync --extra dev
+        working-directory: rrq-py
 
       - name: Install build tooling
         run: uv pip install build
+        working-directory: rrq-py
 
       - name: Build Rust binary
         run: uv run python scripts/build_rust_binary.py
+        working-directory: rrq-py
 
       - name: Build wheel
         run: uv run python -m build --wheel
+        working-directory: rrq-py
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-aarch64
-          path: dist/*.whl
+          path: rrq-py/dist/*.whl
 
   build-macos:
     runs-on: ${{ matrix.os }}
@@ -89,10 +97,12 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.21.0
         with:
-          output-dir: wheelhouse
+          output-dir: rrq-py/wheelhouse
+        env:
+          CIBW_PROJECT_DIR: rrq-py
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.arch }}
-          path: wheelhouse/*.whl
+          path: rrq-py/wheelhouse/*.whl

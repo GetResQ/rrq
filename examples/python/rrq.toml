@@ -1,9 +1,9 @@
 [rrq]
 redis_dsn = "redis://localhost:6379/3"
 default_executor_name = "python"
-worker_concurrency = 4
 
 [rrq.executors.python]
 type = "socket"
 cmd = ["rrq-executor", "--settings", "examples.python.executor_config.python_executor_settings"]
 pool_size = 1
+max_in_flight = 4
