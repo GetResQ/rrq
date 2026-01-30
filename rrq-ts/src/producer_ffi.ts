@@ -163,6 +163,11 @@ function bunTakeError(lib: BunLibrary, errOut: BigUint64Array): string | null {
   return message;
 }
 
+function encodeCString(value: string): Uint8Array {
+  const bytes = new TextEncoder().encode(`${value}\0`);
+  return bytes;
+}
+
 export class RustProducer {
   private handle: unknown | number | null;
   private backend: "node" | "bun";
@@ -175,9 +180,9 @@ export class RustProducer {
   static fromConfig(config: Record<string, unknown>): RustProducer {
     if (isBunRuntime()) {
       const lib = getBunLibrary();
-      const payload = new lib.CString(JSON.stringify(config));
+      const payload = encodeCString(JSON.stringify(config));
       const errOut = bunAllocErrorOut();
-      const handle = lib.symbols.rrq_producer_new(payload, lib.ptr(errOut));
+      const handle = lib.symbols.rrq_producer_new(lib.ptr(payload), lib.ptr(errOut));
       if (!handle) {
         const message = bunTakeError(lib, errOut);
         throw new RustProducerError(message ?? "Failed to create producer");
@@ -223,11 +228,15 @@ export class RustProducer {
         return Promise.reject(new RustProducerError("Producer handle is closed"));
       }
       const lib = getBunLibrary();
-      const payload = new lib.CString(JSON.stringify(request));
+      const payload = encodeCString(JSON.stringify(request));
       const errOut = bunAllocErrorOut();
       let resultPtr: number;
       try {
-        resultPtr = lib.symbols.rrq_producer_enqueue(this.handle, payload, lib.ptr(errOut));
+        resultPtr = lib.symbols.rrq_producer_enqueue(
+          this.handle,
+          lib.ptr(payload),
+          lib.ptr(errOut),
+        );
       } catch (error) {
         return Promise.reject(error);
       }
