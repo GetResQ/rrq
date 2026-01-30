@@ -9,3 +9,9 @@ members = [
 
 [profile.release]
 overflow-checks = true
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+dead_code = "warn"
+
+[workspace.lints.clippy]

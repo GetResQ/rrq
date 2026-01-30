@@ -146,6 +146,37 @@ def _resolve_rrq_cmd() -> list[str]:
     )
 
 
+def _resolve_producer_lib_path() -> str:
+    override = os.getenv("RRQ_PRODUCER_LIB_PATH")
+    if override:
+        path = Path(override)
+        if path.exists():
+            return str(path)
+        raise SystemExit(f"RRQ_PRODUCER_LIB_PATH not found: {override}")
+
+    repo_root = Path(__file__).resolve().parents[1]
+    candidates: list[Path] = [
+        repo_root / "rrq-py" / "rrq" / "bin" / "librrq_producer.dylib",
+        repo_root / "rrq-py" / "rrq" / "bin" / "librrq_producer.so",
+        repo_root / "rrq-py" / "rrq" / "bin" / "rrq_producer.dll",
+        repo_root / "rrq-rs" / "target" / "release" / "librrq_producer.dylib",
+        repo_root / "rrq-rs" / "target" / "release" / "librrq_producer.so",
+        repo_root / "rrq-rs" / "target" / "release" / "rrq_producer.dll",
+        repo_root / "rrq-rs" / "target" / "debug" / "librrq_producer.dylib",
+        repo_root / "rrq-rs" / "target" / "debug" / "librrq_producer.so",
+        repo_root / "rrq-rs" / "target" / "debug" / "rrq_producer.dll",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    raise SystemExit(
+        "RRQ producer library not found. Build it via "
+        "`scripts/with-producer-lib.sh -- true` or "
+        "`python rrq-py/scripts/build_rust_binary.py`."
+    )
+
+
 def _start_worker(
     *,
     rrq_cmd: list[str],
@@ -259,6 +290,19 @@ def _resolve_rust_executor_cmd(override: str | None) -> list[str]:
     )
 
 
+def _resolve_ts_producer_cmd() -> list[str]:
+    bun_path = shutil.which("bun")
+    if bun_path is None:
+        raise SystemExit("bun not found on PATH. Install Bun to run TS scenarios.")
+
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "rrq-ts" / "examples" / "integration_producer.ts"
+    if not script_path.exists():
+        raise SystemExit(f"TypeScript producer script not found at {script_path}")
+
+    return [bun_path, str(script_path)]
+
+
 def _pick_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -338,6 +382,8 @@ def main() -> int:
         "examples.python.executor_config.python_executor_settings",
     ]
     rust_executor_cmd = _resolve_rust_executor_cmd(args.rust_executor_cmd)
+    ts_producer_cmd = _resolve_ts_producer_cmd()
+    producer_lib_path = _resolve_producer_lib_path()
 
     env_base = os.environ.copy()
 
@@ -405,6 +451,52 @@ def main() -> int:
                         ],
                         cwd=root,
                     )
+                ],
+            ),
+            Scenario(
+                name="typescript-only",
+                config=python_config,
+                queues=["default"],
+                producers=[
+                    ProducerSpec(
+                        cmd=ts_producer_cmd,
+                        cwd=root,
+                        env={
+                            "RRQ_PRODUCER_LIB_PATH": producer_lib_path,
+                            "RRQ_REDIS_DSN": args.redis_dsn,
+                            "RRQ_QUEUE": "default",
+                            "RRQ_FUNCTION": "quick_task",
+                            "RRQ_COUNT": str(args.count),
+                        },
+                    )
+                ],
+            ),
+            Scenario(
+                name="typescript-rust",
+                config=rust_config,
+                queues=["rust_queue"],
+                producers=[
+                    ProducerSpec(
+                        cmd=ts_producer_cmd,
+                        cwd=root,
+                        env={
+                            "RRQ_PRODUCER_LIB_PATH": producer_lib_path,
+                            "RRQ_REDIS_DSN": args.redis_dsn,
+                            "RRQ_QUEUE": "rust_queue",
+                            "RRQ_FUNCTION": "echo",
+                            "RRQ_COUNT": str(args.count),
+                        },
+                    ),
+                    ProducerSpec(
+                        cmd=["cargo", "run", "--quiet"],
+                        cwd=rust_cwd,
+                        env={
+                            "RRQ_REDIS_DSN": args.redis_dsn,
+                            "RRQ_QUEUE": "rust_queue",
+                            "RRQ_FUNCTION": "echo",
+                            "RRQ_COUNT": str(args.count),
+                        },
+                    ),
                 ],
             ),
             Scenario(
@@ -497,6 +589,7 @@ def main() -> int:
 
             worker_env = env_base.copy()
             worker_env["RRQ_EXECUTOR_CONFIG"] = str(scenario.config)
+            worker_env.setdefault("RUST_LOG", "warn")
             worker = _start_worker(
                 rrq_cmd=rrq_cmd,
                 config_path=scenario.config,

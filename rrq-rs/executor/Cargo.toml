@@ -33,3 +33,6 @@ otel = [
     "tracing-opentelemetry",
     "tracing-subscriber",
 ]
+
+[lints]
+workspace = true

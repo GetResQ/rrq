@@ -224,6 +224,7 @@ mod tests {
         prev: Vec<(&'static str, Option<String>)>,
     }
 
+    #[allow(unsafe_code)] // env var manipulation in tests
     impl EnvGuard {
         fn set_many(pairs: &[(&'static str, &str)]) -> Self {
             let lock = env_lock().lock().unwrap();
@@ -238,6 +239,7 @@ mod tests {
         }
     }
 
+    #[allow(unsafe_code)] // env var manipulation in tests
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             for (key, prev) in self.prev.drain(..) {

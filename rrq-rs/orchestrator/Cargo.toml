@@ -43,3 +43,6 @@ rrq-protocol = { version = "0.9.9", path = "../protocol" }
 serde_json = "1.0.149"
 tokio = { version = "1.49.0", features = ["io-std", "io-util", "macros", "rt-multi-thread"] }
 rrq-producer = { version = "0.9.9", path = "../producer" }
+
+[lints]
+workspace = true

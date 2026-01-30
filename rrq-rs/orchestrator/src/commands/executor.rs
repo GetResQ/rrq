@@ -36,6 +36,7 @@ mod tests {
         prev: Option<String>,
     }
 
+    #[allow(unsafe_code)] // env var manipulation in tests
     impl EnvGuard {
         fn set(key: &'static str, value: String) -> Self {
             let prev = std::env::var(key).ok();
@@ -46,6 +47,7 @@ mod tests {
         }
     }
 
+    #[allow(unsafe_code)] // env var manipulation in tests
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             if let Some(prev) = self.prev.take() {

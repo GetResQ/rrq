@@ -503,6 +503,7 @@ mod tests {
         prev: Option<String>,
     }
 
+    #[allow(unsafe_code)] // env var manipulation in tests
     impl EnvGuard {
         async fn set(key: &'static str, value: String) -> Self {
             let lock = env_lock().lock_owned().await;
@@ -518,6 +519,7 @@ mod tests {
         }
     }
 
+    #[allow(unsafe_code)] // env var manipulation in tests
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             if let Some(prev) = self.prev.take() {

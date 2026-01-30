@@ -199,8 +199,8 @@ pub enum FrameError {
 impl fmt::Display for FrameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            FrameError::InvalidLength => write!(f, "invalid frame length"),
-            FrameError::Json(err) => write!(f, "json decode error: {err}"),
+            Self::InvalidLength => write!(f, "invalid frame length"),
+            Self::Json(err) => write!(f, "json decode error: {err}"),
         }
     }
 }
@@ -209,7 +209,7 @@ impl std::error::Error for FrameError {}
 
 impl From<serde_json::Error> for FrameError {
     fn from(err: serde_json::Error) -> Self {
-        FrameError::Json(err)
+        Self::Json(err)
     }
 }
 
@@ -297,13 +297,11 @@ mod tests {
         let msg = ExecutorMessage::Request { payload: request };
         let serialized = serde_json::to_string(&msg).unwrap();
         let decoded: ExecutorMessage = serde_json::from_str(&serialized).unwrap();
-        match decoded {
-            ExecutorMessage::Request { payload } => {
-                assert_eq!(payload.protocol_version, PROTOCOL_VERSION);
-                assert_eq!(payload.request_id, "req-1");
-            }
-            _ => panic!("unexpected message type"),
-        }
+        let ExecutorMessage::Request { payload } = decoded else {
+            panic!("unexpected message type")
+        };
+        assert_eq!(payload.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(payload.request_id, "req-1");
     }
 
     #[test]
@@ -317,14 +315,12 @@ mod tests {
         let msg = ExecutorMessage::Cancel { payload: cancel };
         let serialized = serde_json::to_string(&msg).unwrap();
         let decoded: ExecutorMessage = serde_json::from_str(&serialized).unwrap();
-        match decoded {
-            ExecutorMessage::Cancel { payload } => {
-                assert_eq!(payload.protocol_version, PROTOCOL_VERSION);
-                assert_eq!(payload.request_id.as_deref(), Some("req-1"));
-                assert!(payload.hard_kill);
-            }
-            _ => panic!("unexpected message type"),
-        }
+        let ExecutorMessage::Cancel { payload } = decoded else {
+            panic!("unexpected message type")
+        };
+        assert_eq!(payload.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(payload.request_id.as_deref(), Some("req-1"));
+        assert!(payload.hard_kill);
     }
 
     #[test]
@@ -333,12 +329,10 @@ mod tests {
         let message = ExecutorMessage::Response { payload: outcome };
         let framed = encode_frame(&message).expect("frame encode failed");
         let decoded = decode_frame(&framed).expect("frame decode failed");
-        match decoded {
-            ExecutorMessage::Response { payload } => {
-                assert_eq!(payload.status, OutcomeStatus::Success);
-                assert_eq!(payload.job_id.as_deref(), Some("job-1"));
-            }
-            _ => panic!("unexpected message variant"),
-        }
+        let ExecutorMessage::Response { payload } = decoded else {
+            panic!("unexpected message variant")
+        };
+        assert_eq!(payload.status, OutcomeStatus::Success);
+        assert_eq!(payload.job_id.as_deref(), Some("job-1"));
     }
 }

@@ -1,0 +1,11 @@
+[build]
+rustflags = ["-Dwarnings"]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-Dwarnings"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-Dwarnings"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-Dwarnings"]

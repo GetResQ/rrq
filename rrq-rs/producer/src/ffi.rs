@@ -1,3 +1,5 @@
+#![allow(unsafe_code)] // FFI requires unsafe for C interop
+
 use crate::{EnqueueOptions, Producer, ProducerConfig};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
