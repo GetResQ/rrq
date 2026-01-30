@@ -7,6 +7,7 @@ import asyncio
 import importlib
 import inspect
 import os
+import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -22,6 +23,8 @@ from .executor_settings import PythonExecutorSettings
 from .protocol import read_message, write_message
 from .registry import JobRegistry
 from .store import JobStore
+
+logger = logging.getLogger(__name__)
 
 
 ENV_EXECUTOR_SETTINGS = "RRQ_EXECUTOR_SETTINGS"
@@ -43,7 +46,10 @@ async def _write_outcome(
     lock: asyncio.Lock,
 ) -> None:
     async with lock:
-        await write_message(writer, "response", outcome.model_dump(mode="json"))
+        try:
+            await write_message(writer, "response", outcome.model_dump(mode="json"))
+        except Exception:
+            logger.warning("executor response write failed", exc_info=True)
 
 
 async def _execute_and_respond(
@@ -155,10 +161,12 @@ def _parse_tcp_socket(tcp_socket: str) -> tuple[str, int]:
             raise ValueError("TCP socket host cannot be empty")
 
     if host not in _LOCALHOST_ALIASES:
-        try:
-            ip = ip_address(host)
-        except ValueError as exc:
-            raise ValueError(f"Invalid TCP socket host: {host}") from exc
+    try:
+        ip = ip_address(host)
+    except ValueError as exc:
+        raise ValueError(f"Invalid TCP socket host: {host}") from exc
+    if not ip.is_loopback:
+        raise ValueError("TCP socket must bind to loopback-only interfaces")
         if not ip.is_loopback:
             raise ValueError(f"TCP socket host must be localhost; got {host}")
         host = str(ip)
@@ -220,6 +228,8 @@ async def _handle_connection(
     inflight_lock: asyncio.Lock,
 ) -> None:
     write_lock = asyncio.Lock()
+    connection_requests: set[str] = set()
+    connection_jobs: dict[str, str] = {}
     try:
         while True:
             message = await read_message(reader)
@@ -257,6 +267,8 @@ async def _handle_connection(
                 async with inflight_lock:
                     in_flight[request.request_id] = task
                     job_index[request.job_id] = request.request_id
+                connection_requests.add(request.request_id)
+                connection_jobs[request.request_id] = request.job_id
                 continue
 
             if message_type == "cancel":
@@ -276,6 +288,17 @@ async def _handle_connection(
 
             raise ValueError(f"Unexpected message type: {message_type}")
     finally:
+        if connection_requests:
+            async with inflight_lock:
+                pending = list(connection_requests)
+            for request_id in pending:
+                async with inflight_lock:
+                    task = in_flight.pop(request_id, None)
+                    job_id = connection_jobs.get(request_id)
+                    if job_id is not None:
+                        job_index.pop(job_id, None)
+                if task is not None:
+                    task.cancel()
         writer.close()
         with suppress(Exception):
             await writer.wait_closed()

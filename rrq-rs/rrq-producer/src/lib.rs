@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use redis::AsyncCommands;
+use redis::Script;
 use redis::aio::ConnectionManager;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -19,6 +20,8 @@ use uuid::Uuid;
 
 const JOB_KEY_PREFIX: &str = "rrq:job:";
 const QUEUE_KEY_PREFIX: &str = "rrq:queue:";
+const IDEMPOTENCY_KEY_PREFIX: &str = "rrq:idempotency:";
+const DEFAULT_IDEMPOTENCY_TTL_SECONDS: i64 = 6 * 60 * 60;
 
 /// Job status as stored in Redis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +60,8 @@ pub struct JobResult {
 pub struct EnqueueOptions {
     pub queue_name: Option<String>,
     pub job_id: Option<String>,
+    pub idempotency_key: Option<String>,
+    pub idempotency_ttl_seconds: Option<i64>,
     pub max_retries: Option<i64>,
     pub job_timeout_seconds: Option<i64>,
     pub result_ttl_seconds: Option<i64>,
@@ -94,6 +99,7 @@ pub struct Producer {
     default_max_retries: i64,
     default_job_timeout_seconds: i64,
     default_result_ttl_seconds: i64,
+    enqueue_script: Script,
 }
 
 /// Configuration for creating a Producer.
@@ -135,6 +141,7 @@ impl Producer {
             default_max_retries: config.max_retries,
             default_job_timeout_seconds: config.job_timeout_seconds,
             default_result_ttl_seconds: config.result_ttl_seconds,
+            enqueue_script: build_enqueue_script(),
         })
     }
 
@@ -146,6 +153,7 @@ impl Producer {
             default_max_retries: config.max_retries,
             default_job_timeout_seconds: config.job_timeout_seconds,
             default_result_ttl_seconds: config.result_ttl_seconds,
+            enqueue_script: build_enqueue_script(),
         }
     }
 
@@ -157,9 +165,11 @@ impl Producer {
         kwargs: Map<String, Value>,
         options: EnqueueOptions,
     ) -> Result<String> {
+        validate_name("function_name", function_name)?;
         let queue_name = options
             .queue_name
             .unwrap_or_else(|| self.default_queue_name.clone());
+        validate_name("queue_name", &queue_name)?;
         let job_id = options.job_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let enqueue_time = options.enqueue_time.unwrap_or_else(Utc::now);
         let scheduled_time = options.scheduled_time.unwrap_or(enqueue_time);
@@ -174,42 +184,59 @@ impl Producer {
         let job_key = format!("{JOB_KEY_PREFIX}{job_id}");
         let queue_key = format_queue_key(&queue_name);
         let score_ms = scheduled_time.timestamp_millis() as f64;
+        let idempotency_key = if let Some(key) = options.idempotency_key.as_deref() {
+            validate_name("idempotency_key", key)?;
+            format_idempotency_key(key)
+        } else {
+            String::new()
+        };
+        let idempotency_ttl_seconds = options
+            .idempotency_ttl_seconds
+            .unwrap_or(DEFAULT_IDEMPOTENCY_TTL_SECONDS);
+        if !idempotency_key.is_empty() && idempotency_ttl_seconds <= 0 {
+            anyhow::bail!("idempotency_ttl_seconds must be positive");
+        }
 
         let job_args_json = serde_json::to_string(&args)?;
         let job_kwargs_json = serde_json::to_string(&kwargs)?;
+        let trace_context_json = if let Some(trace_context) = options.trace_context {
+            serde_json::to_string(&trace_context)?
+        } else {
+            String::new()
+        };
 
-        // Build the job hash fields
+        // Enqueue atomically, preventing job_id collisions and supporting idempotency keys.
         let mut conn = self.manager.clone();
-        let mut pipe = redis::pipe();
-        pipe.atomic();
+        let (status, returned_id): (i64, String) = self
+            .enqueue_script
+            .key(job_key)
+            .key(queue_key)
+            .key(idempotency_key)
+            .arg(&job_id)
+            .arg(function_name)
+            .arg(&job_args_json)
+            .arg(&job_kwargs_json)
+            .arg(enqueue_time.to_rfc3339())
+            .arg("PENDING")
+            .arg(0i64)
+            .arg(scheduled_time.to_rfc3339())
+            .arg(max_retries)
+            .arg(job_timeout_seconds)
+            .arg(result_ttl_seconds)
+            .arg(&queue_name)
+            .arg("null")
+            .arg(trace_context_json)
+            .arg(score_ms)
+            .arg(idempotency_ttl_seconds)
+            .invoke_async(&mut conn)
+            .await?;
 
-        pipe.hset(&job_key, "id", &job_id)
-            .hset(&job_key, "function_name", function_name)
-            .hset(&job_key, "job_args", &job_args_json)
-            .hset(&job_key, "job_kwargs", &job_kwargs_json)
-            .hset(&job_key, "enqueue_time", enqueue_time.to_rfc3339())
-            .hset(&job_key, "status", "PENDING")
-            .hset(&job_key, "current_retries", 0i64)
-            .hset(
-                &job_key,
-                "next_scheduled_run_time",
-                scheduled_time.to_rfc3339(),
-            )
-            .hset(&job_key, "max_retries", max_retries)
-            .hset(&job_key, "job_timeout_seconds", job_timeout_seconds)
-            .hset(&job_key, "result_ttl_seconds", result_ttl_seconds)
-            .hset(&job_key, "queue_name", &queue_name)
-            .hset(&job_key, "result", "null");
-
-        if let Some(trace_context) = options.trace_context {
-            let trace_json = serde_json::to_string(&trace_context)?;
-            pipe.hset(&job_key, "trace_context", trace_json);
+        match status {
+            1 => Ok(returned_id),
+            0 => Ok(returned_id),
+            -1 => anyhow::bail!("job_id already exists"),
+            _ => anyhow::bail!("unexpected enqueue status"),
         }
-
-        pipe.zadd(&queue_key, &job_id, score_ms);
-        pipe.query_async::<()>(&mut conn).await?;
-
-        Ok(job_id)
     }
 
     /// Wait for a job to complete, polling at the given interval.
@@ -230,24 +257,26 @@ impl Producer {
             }
 
             let mut conn = self.manager.clone();
-            let data: HashMap<String, String> = conn.hgetall(&job_key).await?;
+            let (status, result, last_error): (Option<String>, Option<String>, Option<String>) =
+                redis::cmd("HMGET")
+                    .arg(&job_key)
+                    .arg("status")
+                    .arg("result")
+                    .arg("last_error")
+                    .query_async(&mut conn)
+                    .await?;
 
-            if data.is_empty() {
-                tokio::time::sleep(poll_interval).await;
-                continue;
-            }
-
-            let status = data
-                .get("status")
-                .map(|s| JobStatus::from_str(s))
-                .unwrap_or(JobStatus::Unknown);
+            let status = match status {
+                Some(status) => JobStatus::from_str(&status),
+                None => anyhow::bail!("job {job_id} not found"),
+            };
 
             match status {
                 JobStatus::Completed => {
-                    let result = data.get("result").and_then(|r| parse_result(r));
+                    let parsed = result.as_deref().and_then(parse_result);
                     return Ok(JobResult {
                         status,
-                        result,
+                        result: parsed,
                         last_error: None,
                     });
                 }
@@ -255,7 +284,7 @@ impl Producer {
                     return Ok(JobResult {
                         status,
                         result: None,
-                        last_error: data.get("last_error").cloned(),
+                        last_error,
                     });
                 }
                 _ => {
@@ -319,6 +348,66 @@ fn format_queue_key(queue_name: &str) -> String {
     } else {
         format!("{QUEUE_KEY_PREFIX}{queue_name}")
     }
+}
+
+fn format_idempotency_key(key: &str) -> String {
+    format!("{IDEMPOTENCY_KEY_PREFIX}{key}")
+}
+
+fn validate_name(label: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        anyhow::bail!("{label} cannot be empty");
+    }
+    Ok(())
+}
+
+fn build_enqueue_script() -> Script {
+    Script::new(
+        "-- KEYS: [1] = job_key, [2] = queue_key, [3] = idempotency_key (optional)\n\
+         -- ARGV: [1] = job_id, [2] = function_name, [3] = job_args, [4] = job_kwargs\n\
+         --       [5] = enqueue_time, [6] = status, [7] = current_retries\n\
+         --       [8] = next_scheduled_run_time, [9] = max_retries\n\
+         --       [10] = job_timeout_seconds, [11] = result_ttl_seconds\n\
+         --       [12] = queue_name, [13] = result, [14] = trace_context_json\n\
+         --       [15] = score_ms, [16] = idempotency_ttl_seconds\n\
+         local idem_key = KEYS[3]\n\
+         if idem_key ~= '' then\n\
+             local existing = redis.call('GET', idem_key)\n\
+             if existing then\n\
+                 return {0, existing}\n\
+             end\n\
+         end\n\
+         if redis.call('EXISTS', KEYS[1]) == 1 then\n\
+             return {-1, ARGV[1]}\n\
+         end\n\
+         if idem_key ~= '' then\n\
+             local ttl = tonumber(ARGV[16])\n\
+             if ttl and ttl > 0 then\n\
+                 redis.call('SET', idem_key, ARGV[1], 'NX', 'EX', ttl)\n\
+             else\n\
+                 redis.call('SET', idem_key, ARGV[1], 'NX')\n\
+             end\n\
+         end\n\
+         redis.call('HSET', KEYS[1],\n\
+             'id', ARGV[1],\n\
+             'function_name', ARGV[2],\n\
+             'job_args', ARGV[3],\n\
+             'job_kwargs', ARGV[4],\n\
+             'enqueue_time', ARGV[5],\n\
+             'status', ARGV[6],\n\
+             'current_retries', ARGV[7],\n\
+             'next_scheduled_run_time', ARGV[8],\n\
+             'max_retries', ARGV[9],\n\
+             'job_timeout_seconds', ARGV[10],\n\
+             'result_ttl_seconds', ARGV[11],\n\
+             'queue_name', ARGV[12],\n\
+             'result', ARGV[13])\n\
+         if ARGV[14] ~= '' then\n\
+             redis.call('HSET', KEYS[1], 'trace_context', ARGV[14])\n\
+         end\n\
+         redis.call('ZADD', KEYS[2], ARGV[15], ARGV[1])\n\
+         return {1, ARGV[1]}",
+    )
 }
 
 fn parse_result(result: &str) -> Option<Value> {
@@ -422,6 +511,78 @@ mod tests {
         assert_eq!(max_retries, 5);
         let queue_name: String = conn.hget(&job_key, "queue_name").await.unwrap();
         assert_eq!(queue_name, "custom-queue");
+    }
+
+    #[tokio::test]
+    async fn producer_rejects_duplicate_job_id() {
+        let _guard = redis_lock().lock().await;
+        let dsn = std::env::var("RRQ_TEST_REDIS_DSN")
+            .unwrap_or_else(|_| "redis://localhost:6379/15".to_string());
+        let client = redis::Client::open(dsn.as_str()).unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let _: () = redis::cmd("FLUSHDB").query_async(&mut conn).await.unwrap();
+
+        let producer = Producer::new(&dsn).await.unwrap();
+        let options = EnqueueOptions {
+            job_id: Some("fixed-id".to_string()),
+            ..Default::default()
+        };
+        let first = producer
+            .enqueue("work", vec![], serde_json::Map::new(), options.clone())
+            .await
+            .unwrap();
+        assert_eq!(first, "fixed-id");
+
+        let err = producer
+            .enqueue("work", vec![], serde_json::Map::new(), options)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("job_id already exists"));
+    }
+
+    #[tokio::test]
+    async fn producer_idempotency_key_reuses_job() {
+        let _guard = redis_lock().lock().await;
+        let dsn = std::env::var("RRQ_TEST_REDIS_DSN")
+            .unwrap_or_else(|_| "redis://localhost:6379/15".to_string());
+        let client = redis::Client::open(dsn.as_str()).unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let _: () = redis::cmd("FLUSHDB").query_async(&mut conn).await.unwrap();
+
+        let producer = Producer::new(&dsn).await.unwrap();
+        let options = EnqueueOptions {
+            idempotency_key: Some("dedupe".to_string()),
+            ..Default::default()
+        };
+        let first = producer
+            .enqueue("work", vec![], serde_json::Map::new(), options.clone())
+            .await
+            .unwrap();
+        let second = producer
+            .enqueue("work", vec![], serde_json::Map::new(), options)
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+        let queue_key = format_queue_key("default");
+        let count: i64 = conn.zcard(queue_key).await.unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn producer_rejects_empty_names() {
+        let _guard = redis_lock().lock().await;
+        let dsn = std::env::var("RRQ_TEST_REDIS_DSN")
+            .unwrap_or_else(|_| "redis://localhost:6379/15".to_string());
+        let producer = Producer::new(&dsn).await.unwrap();
+        let options = EnqueueOptions {
+            queue_name: Some(" ".to_string()),
+            ..Default::default()
+        };
+        let err = producer
+            .enqueue("", vec![], serde_json::Map::new(), options)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("function_name cannot be empty"));
     }
 
     #[tokio::test]

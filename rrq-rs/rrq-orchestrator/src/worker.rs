@@ -362,21 +362,38 @@ impl RRQWorker {
             abort.abort();
         }
         for (job_id, info) in running {
-            tracing::warn!("re-queueing job {} after shutdown", job_id);
             let mut store = self.job_store.clone();
-            let _ = store
-                .mark_job_pending(
-                    &job_id,
-                    Some("Job execution interrupted by worker shutdown. Re-queued."),
-                )
-                .await;
-            let _ = store
-                .add_job_to_queue(
-                    &info.queue_name,
-                    &job_id,
-                    Utc::now().timestamp_millis() as f64,
-                )
-                .await;
+            let job_opt = store.get_job_definition(&job_id).await?;
+            let status = job_opt.as_ref().map(|job| job.status);
+            let should_requeue = matches!(
+                status,
+                Some(JobStatus::Active | JobStatus::Pending | JobStatus::Retrying)
+            );
+            if should_requeue {
+                let already_queued = store
+                    .is_job_queued(&info.queue_name, &job_id)
+                    .await
+                    .unwrap_or(false);
+                if !already_queued {
+                    tracing::warn!("re-queueing job {} after shutdown", job_id);
+                    if status == Some(JobStatus::Active) {
+                        let _ = store
+                            .mark_job_pending(
+                                &job_id,
+                                Some("Job execution interrupted by worker shutdown. Re-queued."),
+                            )
+                            .await;
+                    }
+                    let _ = store
+                        .add_job_to_queue(
+                            &info.queue_name,
+                            &job_id,
+                            Utc::now().timestamp_millis() as f64,
+                        )
+                        .await;
+                }
+            }
+            let _ = store.remove_active_job(&self.worker_id, &job_id).await;
             let _ = store.release_job_lock(&job_id).await;
         }
 
@@ -519,9 +536,12 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
     .await;
 
     let outcome_result = match exec_result {
-        Ok(outcome_result) => {
-            let outcome = outcome_result?;
+        Ok(Ok(outcome)) => {
             handle_execution_outcome(&job, &queue_name, &settings, &mut job_store, outcome).await
+        }
+        Ok(Err(err)) => {
+            let message = format!("Executor transport error: {err}");
+            process_failure_job(&job, &queue_name, &settings, &mut job_store, &message).await
         }
         Err(_) => {
             let _ = executor.cancel(&job.id, Some(request_id.as_str())).await;
@@ -878,11 +898,28 @@ async fn recover_orphaned_jobs(
                     .queue_name
                     .clone()
                     .unwrap_or_else(|| settings.default_queue_name.clone());
+                let lock_timeout_ms = job
+                    .job_timeout_seconds
+                    .unwrap_or(settings.default_job_timeout_seconds)
+                    .checked_add(settings.default_lock_timeout_extension_seconds)
+                    .and_then(|sum| sum.checked_mul(1000))
+                    .ok_or_else(|| anyhow::anyhow!("lock_timeout_ms overflow"))?;
+                if lock_timeout_ms <= 0 {
+                    continue;
+                }
+                let lock_owner = format!("orphan-recovery-{worker_id}");
+                if !job_store
+                    .try_lock_job(&job.id, &lock_owner, lock_timeout_ms)
+                    .await?
+                {
+                    continue;
+                }
                 if job_store.is_job_queued(&queue_name, &job_id).await? {
                     if job.status == JobStatus::Active {
                         let _ = job_store.mark_job_pending(&job_id, None).await;
                     }
                     let _ = job_store.remove_active_job(worker_id, &job_id).await;
+                    let _ = job_store.release_job_lock(&job.id).await;
                     continue;
                 }
                 if matches!(
@@ -906,9 +943,11 @@ async fn recover_orphaned_jobs(
                         .update_job_next_scheduled_run_time(&job.id, requeue_time)
                         .await;
                     let _ = job_store.remove_active_job(worker_id, &job.id).await;
+                    let _ = job_store.release_job_lock(&job.id).await;
                     recovered += 1;
                 } else {
                     let _ = job_store.remove_active_job(worker_id, &job.id).await;
+                    let _ = job_store.release_job_lock(&job.id).await;
                 }
             }
         }
@@ -931,53 +970,90 @@ async fn cron_loop(
 ) {
     while !shutdown.load(Ordering::SeqCst) {
         let now = Utc::now();
-        let mut jobs = cron_jobs.lock().await;
-        for job in jobs.iter_mut() {
+        struct DueCronJob {
+            index: usize,
+            function_name: String,
+            args: Vec<Value>,
+            kwargs: serde_json::Map<String, Value>,
+            queue_name: Option<String>,
+            unique_key: Option<String>,
+        }
+
+        let due_jobs: Vec<DueCronJob> = {
+            let mut jobs = cron_jobs.lock().await;
+            let mut due = Vec::new();
+            for (index, job) in jobs.iter_mut().enumerate() {
+                if shutdown.load(Ordering::SeqCst) {
+                    return;
+                }
+                let due_now = match job.due(now) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        tracing::error!("cron job schedule error: {err}");
+                        continue;
+                    }
+                };
+                if !due_now {
+                    continue;
+                }
+                let unique_key = if job.unique {
+                    Some(format!("cron:{}", job.function_name))
+                } else {
+                    None
+                };
+                due.push(DueCronJob {
+                    index,
+                    function_name: job.function_name.clone(),
+                    args: job.args.clone(),
+                    kwargs: job.kwargs.clone(),
+                    queue_name: job.queue_name.clone(),
+                    unique_key,
+                });
+            }
+            due
+        };
+
+        for due in &due_jobs {
             if shutdown.load(Ordering::SeqCst) {
                 return;
             }
-            let due = match job.due(now) {
-                Ok(value) => value,
-                Err(err) => {
-                    tracing::error!("cron job schedule error: {err}");
-                    continue;
-                }
-            };
-            if !due {
-                continue;
-            }
-            let unique_key = if job.unique {
-                Some(format!("cron:{}", job.function_name))
-            } else {
-                None
-            };
-            if let Some(ref key) = unique_key
+            let mut should_enqueue = true;
+            if let Some(ref key) = due.unique_key
                 && let Ok(ttl) = job_store.get_lock_ttl(key).await
                 && ttl > 0
             {
-                let _ = job.schedule_next(now);
-                continue;
+                should_enqueue = false;
             }
-            let options = EnqueueOptions {
-                queue_name: job.queue_name.clone(),
-                unique_key: unique_key.clone(),
-                max_retries: None,
-                job_timeout_seconds: None,
-                defer_until: None,
-                defer_by: None,
-                result_ttl_seconds: None,
-                trace_context: None,
-                job_id: None,
-            };
-            let _ = client
-                .enqueue(
-                    &job.function_name,
-                    job.args.clone(),
-                    job.kwargs.clone(),
-                    options,
-                )
-                .await;
-            let _ = job.schedule_next(now);
+            if should_enqueue {
+                let options = EnqueueOptions {
+                    queue_name: due.queue_name.clone(),
+                    unique_key: due.unique_key.clone(),
+                    max_retries: None,
+                    job_timeout_seconds: None,
+                    defer_until: None,
+                    defer_by: None,
+                    result_ttl_seconds: None,
+                    trace_context: None,
+                    job_id: None,
+                };
+                let _ = client
+                    .enqueue(
+                        &due.function_name,
+                        due.args.clone(),
+                        due.kwargs.clone(),
+                        options,
+                    )
+                    .await;
+            }
+        }
+
+        if !due_jobs.is_empty() {
+            let mut jobs = cron_jobs.lock().await;
+            for due in due_jobs {
+                if let Some(job) = jobs.get_mut(due.index) {
+                    let _ = job.schedule_next(now);
+                }
+            }
         }
         let delay = Duration::from_secs(30);
         sleep_with_shutdown(&shutdown, delay).await;
@@ -1269,6 +1345,36 @@ mod tests {
         assert!(ctx.store.is_job_queued(&queue_name, &job.id).await.unwrap());
         let active = ctx.store.get_active_job_ids(&worker_id).await.unwrap();
         assert!(!active.contains(&job.id));
+    }
+
+    #[tokio::test]
+    async fn recover_orphaned_jobs_skips_locked_job() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+        let mut job = build_job(&queue_name, &dlq_name, None);
+        job.status = JobStatus::Active;
+        ctx.store.save_job_definition(&job).await.unwrap();
+        let worker_id = format!("worker-{}", Uuid::new_v4());
+        ctx.store
+            .track_active_job(&worker_id, &job.id, Utc::now())
+            .await
+            .unwrap();
+        let locked = ctx
+            .store
+            .try_lock_job(&job.id, "other-worker", 1000)
+            .await
+            .unwrap();
+        assert!(locked);
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        recover_orphaned_jobs(&mut ctx.store, &ctx.settings, &shutdown)
+            .await
+            .unwrap();
+
+        assert!(!ctx.store.is_job_queued(&queue_name, &job.id).await.unwrap());
+        let active = ctx.store.get_active_job_ids(&worker_id).await.unwrap();
+        assert!(active.contains(&job.id));
     }
     #[tokio::test]
     async fn calculate_backoff_respects_max_delay() {

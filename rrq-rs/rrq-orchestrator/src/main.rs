@@ -481,25 +481,28 @@ mod tests {
     use rrq::EnqueueOptions;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Arc, OnceLock};
     use tokio::fs as tokio_fs;
+    use tokio::sync::Mutex as TokioMutex;
     use uuid::Uuid;
 
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    static ENV_LOCK: OnceLock<Arc<TokioMutex<()>>> = OnceLock::new();
 
-    fn env_lock() -> &'static Mutex<()> {
-        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    fn env_lock() -> Arc<TokioMutex<()>> {
+        ENV_LOCK
+            .get_or_init(|| Arc::new(TokioMutex::new(())))
+            .clone()
     }
 
     struct EnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _lock: tokio::sync::OwnedMutexGuard<()>,
         key: &'static str,
         prev: Option<String>,
     }
 
     impl EnvGuard {
-        fn set(key: &'static str, value: String) -> Self {
-            let lock = env_lock().lock().unwrap();
+        async fn set(key: &'static str, value: String) -> Self {
+            let lock = env_lock().lock_owned().await;
             let prev = std::env::var(key).ok();
             unsafe {
                 std::env::set_var(key, value);
@@ -599,7 +602,8 @@ while True:
                 temp_dir.to_string_lossy(),
                 std::env::var("PATH").unwrap_or_default()
             ),
-        );
+        )
+        .await;
 
         let config = Some(config_path.to_string_lossy().to_string());
 

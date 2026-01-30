@@ -521,6 +521,24 @@ impl JobStore {
         Ok(())
     }
 
+    pub async fn try_lock_job(
+        &mut self,
+        job_id: &str,
+        worker_id: &str,
+        lock_timeout_ms: i64,
+    ) -> Result<bool> {
+        let lock_key = format!("{LOCK_KEY_PREFIX}{job_id}");
+        let result: Option<String> = redis::cmd("SET")
+            .arg(lock_key)
+            .arg(worker_id)
+            .arg("NX")
+            .arg("PX")
+            .arg(lock_timeout_ms)
+            .query_async(&mut self.conn)
+            .await?;
+        Ok(result.is_some())
+    }
+
     pub async fn get_job_lock_owner(&mut self, job_id: &str) -> Result<Option<String>> {
         let lock_key = format!("{LOCK_KEY_PREFIX}{job_id}");
         let owner: Option<String> = self.conn.get(lock_key).await?;
