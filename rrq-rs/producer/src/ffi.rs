@@ -15,11 +15,6 @@ const MAX_MILLIS: i64 = i64::MAX / 2;
 
 #[derive(Debug, Serialize)]
 struct ProducerConstantsPayload {
-    default_queue_name: &'static str,
-    default_max_retries: i64,
-    default_job_timeout_seconds: i64,
-    default_result_ttl_seconds: i64,
-    default_unique_job_lock_ttl_seconds: i64,
     job_key_prefix: &'static str,
     queue_key_prefix: &'static str,
     idempotency_key_prefix: &'static str,
@@ -255,11 +250,6 @@ pub extern "C" fn rrq_producer_free(handle: *mut ProducerHandle) {
 pub extern "C" fn rrq_producer_constants(error_out: *mut *mut c_char) -> *mut c_char {
     with_unwind(error_out, || {
         let payload = ProducerConstantsPayload {
-            default_queue_name: crate::DEFAULT_QUEUE_NAME,
-            default_max_retries: crate::DEFAULT_MAX_RETRIES,
-            default_job_timeout_seconds: crate::DEFAULT_JOB_TIMEOUT_SECONDS,
-            default_result_ttl_seconds: crate::DEFAULT_RESULT_TTL_SECONDS,
-            default_unique_job_lock_ttl_seconds: crate::DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
             job_key_prefix: crate::JOB_KEY_PREFIX,
             queue_key_prefix: crate::QUEUE_KEY_PREFIX,
             idempotency_key_prefix: crate::IDEMPOTENCY_KEY_PREFIX,
@@ -471,11 +461,6 @@ mod tests {
 
     #[derive(Debug, Deserialize)]
     struct ConstantsPayload {
-        default_queue_name: String,
-        default_max_retries: i64,
-        default_job_timeout_seconds: i64,
-        default_result_ttl_seconds: i64,
-        default_unique_job_lock_ttl_seconds: i64,
         job_key_prefix: String,
         queue_key_prefix: String,
         idempotency_key_prefix: String,
@@ -494,20 +479,6 @@ mod tests {
         let payload: ConstantsPayload = serde_json::from_str(json).expect("constants json parses");
         rrq_string_free(ptr);
 
-        assert_eq!(payload.default_queue_name, crate::DEFAULT_QUEUE_NAME);
-        assert_eq!(payload.default_max_retries, crate::DEFAULT_MAX_RETRIES);
-        assert_eq!(
-            payload.default_job_timeout_seconds,
-            crate::DEFAULT_JOB_TIMEOUT_SECONDS
-        );
-        assert_eq!(
-            payload.default_result_ttl_seconds,
-            crate::DEFAULT_RESULT_TTL_SECONDS
-        );
-        assert_eq!(
-            payload.default_unique_job_lock_ttl_seconds,
-            crate::DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS
-        );
         assert_eq!(payload.job_key_prefix, crate::JOB_KEY_PREFIX);
         assert_eq!(payload.queue_key_prefix, crate::QUEUE_KEY_PREFIX);
         assert_eq!(

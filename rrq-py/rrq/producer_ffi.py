@@ -79,11 +79,6 @@ class EnqueueResponseModel(BaseModel):
 class ProducerConstantsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    default_queue_name: str
-    default_max_retries: int
-    default_job_timeout_seconds: int
-    default_result_ttl_seconds: int
-    default_unique_job_lock_ttl_seconds: int
     job_key_prefix: str
     queue_key_prefix: str
     idempotency_key_prefix: str

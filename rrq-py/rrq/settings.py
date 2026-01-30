@@ -9,8 +9,8 @@ from pydantic import BaseModel, Field
 class RRQSettings(BaseModel):
     """Configuration settings for the RRQ (Reliable Redis Queue) system.
 
-    These settings cover the Python producer/client and executor runtime. Orchestrator
-    settings are intentionally omitted; unknown keys in rrq.toml are ignored.
+    These settings cover the Python producer/client. Orchestrator settings are
+    intentionally omitted; unknown keys in rrq.toml are ignored.
     """
 
     redis_dsn: str = Field(

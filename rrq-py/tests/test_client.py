@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Awaitable, cast
 
 import pytest
 import pytest_asyncio
@@ -14,9 +14,10 @@ from rrq.settings import RRQSettings
 from rrq.telemetry import EnqueueSpan, Telemetry, configure, disable
 
 _CONSTANTS = get_producer_constants()
-DEFAULT_QUEUE_NAME = _CONSTANTS.default_queue_name
 JOB_KEY_PREFIX = _CONSTANTS.job_key_prefix
+QUEUE_KEY_PREFIX = _CONSTANTS.queue_key_prefix
 IDEMPOTENCY_KEY_PREFIX = _CONSTANTS.idempotency_key_prefix
+TEST_QUEUE_NAME = f"{QUEUE_KEY_PREFIX}client_default"
 
 
 @pytest.fixture(scope="session")
@@ -27,7 +28,9 @@ def redis_url_for_client() -> str:
 @pytest_asyncio.fixture(scope="function")
 async def rrq_settings_for_client(redis_url_for_client: str) -> RRQSettings:
     return RRQSettings(
-        redis_dsn=redis_url_for_client, default_unique_job_lock_ttl_seconds=2
+        redis_dsn=redis_url_for_client,
+        default_queue_name=TEST_QUEUE_NAME,
+        default_unique_job_lock_ttl_seconds=2,
     )
 
 
@@ -57,17 +60,18 @@ async def test_enqueue_job_writes_job_and_queue(
 ) -> None:
     func_name = "test_function_client"
     args_ = [1, "hello"]
-    kwargs_ = {"world": True}
 
     job_id = await rrq_client.enqueue(func_name, *args_, world=True)
     assert job_id is not None
 
     job_key = f"{JOB_KEY_PREFIX}{job_id}"
-    job_data = await redis_for_client_tests.hgetall(job_key)
+    job_data = await cast(
+        Awaitable[dict[str, str]], redis_for_client_tests.hgetall(job_key)
+    )
     assert job_data["function_name"] == func_name
     assert job_data["status"] == "PENDING"
 
-    score = await redis_for_client_tests.zscore(DEFAULT_QUEUE_NAME, job_id)
+    score = await redis_for_client_tests.zscore(TEST_QUEUE_NAME, job_id)
     assert score is not None
 
 
@@ -84,7 +88,7 @@ async def test_enqueue_job_with_defer_by(
     )
     assert job_id is not None
 
-    score = await redis_for_client_tests.zscore(DEFAULT_QUEUE_NAME, job_id)
+    score = await redis_for_client_tests.zscore(TEST_QUEUE_NAME, job_id)
     assert score is not None
     min_score = start_ms + defer_seconds * 1000 - 1000
     assert score >= min_score
@@ -100,7 +104,7 @@ async def test_enqueue_job_with_defer_until(
     job_id = await rrq_client.enqueue(func_name, _defer_until=defer_until_dt)
     assert job_id is not None
 
-    score = await redis_for_client_tests.zscore(DEFAULT_QUEUE_NAME, job_id)
+    score = await redis_for_client_tests.zscore(TEST_QUEUE_NAME, job_id)
     assert score is not None
     expected_score_ms = int(defer_until_dt.timestamp() * 1000)
     assert score == pytest.approx(expected_score_ms, abs=100)
@@ -128,13 +132,13 @@ async def test_enqueue_unique_key_defer_extends_idempotency_ttl(
 async def test_enqueue_job_to_specific_queue(
     rrq_client: RRQClient, redis_for_client_tests: AsyncRedis
 ) -> None:
-    custom_queue_name = "rrq:queue:custom_test_queue"
+    custom_queue_name = f"{QUEUE_KEY_PREFIX}custom_test_queue"
     func_name = "custom_queue_func"
 
     job_id = await rrq_client.enqueue(func_name, _queue_name=custom_queue_name)
     assert job_id is not None
 
-    score_default = await redis_for_client_tests.zscore(DEFAULT_QUEUE_NAME, job_id)
+    score_default = await redis_for_client_tests.zscore(TEST_QUEUE_NAME, job_id)
     assert score_default is None
 
     score_custom = await redis_for_client_tests.zscore(custom_queue_name, job_id)
@@ -152,7 +156,9 @@ async def test_enqueue_with_user_specified_job_id(
     assert job_id == user_job_id
 
     job_key = f"{JOB_KEY_PREFIX}{user_job_id}"
-    stored_job = await redis_for_client_tests.hgetall(job_key)
+    stored_job = await cast(
+        Awaitable[dict[str, str]], redis_for_client_tests.hgetall(job_key)
+    )
     assert stored_job["id"] == user_job_id
 
     with pytest.raises(ValueError):
@@ -214,7 +220,7 @@ async def test_enqueue_with_rate_limit_returns_none_when_limited(
     )
     assert job2 is None
 
-    score = await redis_for_client_tests.zscore(DEFAULT_QUEUE_NAME, job1)
+    score = await redis_for_client_tests.zscore(TEST_QUEUE_NAME, job1)
     assert score is not None
 
 
@@ -266,7 +272,10 @@ async def test_enqueue_stores_trace_context(
         job_id = await rrq_client.enqueue("test_function_trace_context")
         assert job_id is not None
         job_key = f"{JOB_KEY_PREFIX}{job_id}"
-        raw = await redis_for_client_tests.hget(job_key, "trace_context")
+        raw = await cast(
+            Awaitable[str | None],
+            redis_for_client_tests.hget(job_key, "trace_context"),
+        )
         assert raw is not None
         assert json.loads(raw) == {"traceparent": "00-abc-123-01"}
     finally:

@@ -82,19 +82,21 @@ export class RRQClient {
       RustProducer.fromConfig({
         redis_dsn: this.settings.redisDsn,
         ...(this.settingsOverrides.defaultQueueName !== undefined
-          ? { queue_name: this.settings.defaultQueueName }
+          ? { queue_name: this.settingsOverrides.defaultQueueName }
           : {}),
         ...(this.settingsOverrides.defaultMaxRetries !== undefined
-          ? { max_retries: this.settings.defaultMaxRetries }
+          ? { max_retries: this.settingsOverrides.defaultMaxRetries }
           : {}),
         ...(this.settingsOverrides.defaultJobTimeoutSeconds !== undefined
-          ? { job_timeout_seconds: this.settings.defaultJobTimeoutSeconds }
+          ? { job_timeout_seconds: this.settingsOverrides.defaultJobTimeoutSeconds }
           : {}),
         ...(this.settingsOverrides.defaultResultTtlSeconds !== undefined
-          ? { result_ttl_seconds: this.settings.defaultResultTtlSeconds }
+          ? { result_ttl_seconds: this.settingsOverrides.defaultResultTtlSeconds }
           : {}),
         ...(this.settingsOverrides.defaultUniqueJobLockTtlSeconds !== undefined
-          ? { idempotency_ttl_seconds: this.settings.defaultUniqueJobLockTtlSeconds }
+          ? {
+              idempotency_ttl_seconds: this.settingsOverrides.defaultUniqueJobLockTtlSeconds,
+            }
           : {}),
       });
   }

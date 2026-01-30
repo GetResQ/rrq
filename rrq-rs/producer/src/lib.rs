@@ -44,7 +44,6 @@ const DEFAULT_MAX_RETRIES: i64 = 5;
 const DEFAULT_JOB_TIMEOUT_SECONDS: i64 = 300;
 const DEFAULT_RESULT_TTL_SECONDS: i64 = 60 * 60 * 24;
 const DEFAULT_IDEMPOTENCY_TTL_SECONDS: i64 = 6 * 60 * 60;
-const DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS: i64 = DEFAULT_IDEMPOTENCY_TTL_SECONDS;
 
 /// Job status as stored in Redis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
