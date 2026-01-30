@@ -639,7 +639,6 @@ impl Executor for SocketExecutor {
         let Some((request_id, info)) = target else {
             return Ok(());
         };
-        let mut stream = connect_stream(&info.socket).await?;
         let request_id_for_message = request_id.clone();
         let message = ExecutorMessage::Cancel {
             payload: CancelRequest {
@@ -649,10 +648,15 @@ impl Executor for SocketExecutor {
                 hard_kill: false,
             },
         };
-        write_message(&mut stream, &message).await?;
+        let result = async {
+            let mut stream = connect_stream(&info.socket).await?;
+            write_message(&mut stream, &message).await?;
+            Ok(())
+        }
+        .await;
         let mut in_flight = self.in_flight.lock().await;
         in_flight.remove(&request_id);
-        Ok(())
+        result
     }
 
     async fn close(&self) -> Result<()> {

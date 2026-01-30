@@ -42,6 +42,9 @@ Provide the library in one of these ways:
 - Set `RRQ_PRODUCER_LIB_PATH` to the absolute path of the shared library.
 - Place the library in `rrq-ts/bin` (e.g. `librrq_producer.dylib`, `librrq_producer.so`,
   or `rrq_producer.dll`).
+- For published packages, place the library in `rrq-ts/bin/<platform>-<arch>/`
+  (for example, `bin/linux-x64/librrq_producer.so` or
+  `bin/darwin-arm64/librrq_producer.dylib`).
 
 To build the library from this repo:
 

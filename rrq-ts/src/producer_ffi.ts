@@ -35,6 +35,19 @@ type NodeLibrary = {
   decode: (ptr: unknown, type: string) => string;
 };
 
+function platformLibraryName(): string | null {
+  switch (process.platform) {
+    case "linux":
+      return "librrq_producer.so";
+    case "darwin":
+      return "librrq_producer.dylib";
+    case "win32":
+      return "rrq_producer.dll";
+    default:
+      return null;
+  }
+}
+
 function findLibraryPath(): string {
   const override = process.env.RRQ_PRODUCER_LIB_PATH;
   if (override) {
@@ -45,11 +58,18 @@ function findLibraryPath(): string {
   }
 
   const baseDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "bin");
-  const candidates = [
+  const candidates: string[] = [];
+  const platformLib = platformLibraryName();
+  if (platformLib) {
+    const platformDir = path.join(baseDir, `${process.platform}-${process.arch}`);
+    candidates.push(path.join(platformDir, platformLib));
+    candidates.push(path.join(baseDir, platformLib));
+  }
+  candidates.push(
     path.join(baseDir, "librrq_producer.so"),
     path.join(baseDir, "librrq_producer.dylib"),
     path.join(baseDir, "rrq_producer.dll"),
-  ];
+  );
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) {
       return candidate;
