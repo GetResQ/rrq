@@ -8,7 +8,7 @@ A Rust runtime for building [RRQ](https://crates.io/crates/rrq) job executors. T
 
 ## Features
 
-- **Unix socket & TCP support** for orchestrator communication
+- **TCP socket support** for orchestrator communication
 - **Concurrent job execution** with configurable parallelism
 - **Graceful cancellation** of in-flight jobs
 - **OpenTelemetry integration** for distributed tracing (optional)
@@ -34,7 +34,7 @@ rrq-executor = { version = "0.9", features = ["otel"] }
 Create a simple executor with one handler:
 
 ```rust
-use rrq_executor::{run_socket, ExecutionOutcome, Registry};
+use rrq_executor::{parse_tcp_socket, run_tcp, ExecutionOutcome, Registry};
 use serde_json::json;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -54,9 +54,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     });
 
-    // Run the executor (reads socket path from RRQ_EXECUTOR_SOCKET env var)
-    let socket_path = std::env::var("RRQ_EXECUTOR_SOCKET")?;
-    run_socket(&registry, socket_path)
+    // Run the executor (reads address from RRQ_EXECUTOR_TCP_SOCKET)
+    let addr = std::env::var("RRQ_EXECUTOR_TCP_SOCKET")?;
+    let socket_addr = parse_tcp_socket(&addr)?;
+    run_tcp(&registry, socket_addr)
 }
 ```
 
@@ -120,27 +121,12 @@ ExecutionOutcome::timeout(job_id, request_id)
 ExecutionOutcome::cancelled(job_id, request_id)
 ```
 
-## TCP Socket Support
-
-Use TCP instead of Unix sockets (useful on Windows or for network isolation):
-
-```rust
-use rrq_executor::{run_tcp, parse_tcp_socket, Registry};
-
-let mut registry = Registry::new();
-// ... register handlers ...
-
-let addr = std::env::var("RRQ_EXECUTOR_TCP_SOCKET")?;
-let socket_addr = parse_tcp_socket(&addr)?;
-run_tcp(&registry, socket_addr)
-```
-
 ## Custom Runtime
 
 For more control, create your own `ExecutorRuntime`:
 
 ```rust
-use rrq_executor::{ExecutorRuntime, Registry, ENV_EXECUTOR_SOCKET};
+use rrq_executor::{ExecutorRuntime, Registry, ENV_EXECUTOR_TCP_SOCKET, parse_tcp_socket};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create runtime (initializes Tokio)
@@ -155,8 +141,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     });
 
-    let socket_path = std::env::var(ENV_EXECUTOR_SOCKET)?;
-    runtime.run_socket(&registry, socket_path)
+    let addr = std::env::var(ENV_EXECUTOR_TCP_SOCKET)?;
+    let socket_addr = parse_tcp_socket(&addr)?;
+    runtime.run_tcp(&registry, socket_addr)
 }
 ```
 
@@ -165,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Enable the `otel` feature for distributed tracing:
 
 ```rust
-use rrq_executor::{ExecutorRuntime, Registry, ENV_EXECUTOR_SOCKET};
+use rrq_executor::{ExecutorRuntime, Registry, ENV_EXECUTOR_TCP_SOCKET, parse_tcp_socket};
 use rrq_executor::telemetry::otel::{init_tracing, OtelTelemetry};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -189,8 +176,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     });
 
-    let socket_path = std::env::var(ENV_EXECUTOR_SOCKET)?;
-    runtime.run_socket_with(&registry, socket_path, &telemetry)
+    let addr = std::env::var(ENV_EXECUTOR_TCP_SOCKET)?;
+    let socket_addr = parse_tcp_socket(&addr)?;
+    runtime.run_tcp_with(&registry, socket_addr, &telemetry)
 }
 ```
 
@@ -201,16 +189,6 @@ Configure via standard OpenTelemetry environment variables:
 ## Configuration in rrq.toml
 
 Point the RRQ orchestrator to your executor:
-
-```toml
-[rrq.executors.rust]
-type = "socket"
-cmd = ["./target/release/my-executor"]
-pool_size = 4
-max_in_flight = 10
-```
-
-With TCP socket:
 
 ```toml
 [rrq.executors.rust]
@@ -227,8 +205,7 @@ Set by the orchestrator when spawning executors:
 
 | Variable | Description |
 |----------|-------------|
-| `RRQ_EXECUTOR_SOCKET` | Unix socket path for communication |
-| `RRQ_EXECUTOR_TCP_SOCKET` | TCP socket address (alternative to Unix) |
+| `RRQ_EXECUTOR_TCP_SOCKET` | TCP socket address for communication |
 
 ## Example Project Structure
 

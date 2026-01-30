@@ -108,11 +108,11 @@ const runtime = new ExecutorRuntime(registry);
 await runtime.runFromEnv();
 ```
 
-The orchestrator sets `RRQ_EXECUTOR_SOCKET` or `RRQ_EXECUTOR_TCP_SOCKET` when
-launching executors. You can also run the runtime directly:
+The orchestrator sets `RRQ_EXECUTOR_TCP_SOCKET` when launching executors. You
+can also run the runtime directly:
 
 ```bash
-RRQ_EXECUTOR_SOCKET=/tmp/rrq-executor.sock node dist/executor_runtime.js
+RRQ_EXECUTOR_TCP_SOCKET=127.0.0.1:9000 node dist/executor_runtime.js
 ```
 
 ## Build

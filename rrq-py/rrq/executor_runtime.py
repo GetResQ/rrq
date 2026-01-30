@@ -1,4 +1,4 @@
-"""Python socket executor runtime for RRQ."""
+"""Python TCP executor runtime for RRQ."""
 
 from __future__ import annotations
 
@@ -13,8 +13,6 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import datetime, timezone
 from ipaddress import ip_address
-from pathlib import Path
-
 from pydantic import BaseModel, Field
 
 from .executor import ExecutionError, ExecutionOutcome, ExecutionRequest, PythonExecutor
@@ -26,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 
 ENV_EXECUTOR_SETTINGS = "RRQ_EXECUTOR_SETTINGS"
-ENV_EXECUTOR_SOCKET = "RRQ_EXECUTOR_SOCKET"
 ENV_EXECUTOR_TCP_SOCKET = "RRQ_EXECUTOR_TCP_SOCKET"
 _LOCALHOST_ALIASES = {"localhost", "127.0.0.1", "::1"}
 MAX_IN_FLIGHT_PER_CONNECTION = 64
@@ -296,28 +293,14 @@ def _parse_tcp_socket(tcp_socket: str) -> tuple[str, int]:
     return host, port
 
 
-def resolve_executor_socket(
-    socket_path: str | None,
-    tcp_socket: str | None,
-) -> tuple[str, str | tuple[str, int]]:
-    if socket_path and tcp_socket:
-        raise ValueError("Provide only one of --socket or --tcp-socket")
-
+def resolve_tcp_socket(tcp_socket: str | None) -> tuple[str, int]:
     if tcp_socket is None:
         tcp_socket = os.getenv(ENV_EXECUTOR_TCP_SOCKET)
-    if socket_path is None:
-        socket_path = os.getenv(ENV_EXECUTOR_SOCKET)
-
-    if tcp_socket and socket_path:
-        raise ValueError("Provide only one of --socket or --tcp-socket")
-
     if tcp_socket:
-        return "tcp", _parse_tcp_socket(tcp_socket)
-    if socket_path:
-        return "unix", socket_path
+        return _parse_tcp_socket(tcp_socket)
     raise ValueError(
-        "Executor socket not provided. Use --socket/--tcp-socket or set "
-        f"{ENV_EXECUTOR_SOCKET}/{ENV_EXECUTOR_TCP_SOCKET}."
+        "Executor TCP socket not provided. Use --tcp-socket or set "
+        f"{ENV_EXECUTOR_TCP_SOCKET}."
     )
 
 
@@ -427,11 +410,10 @@ async def _handle_connection(
 
 async def run_python_executor(
     settings_object_path: str | None,
-    socket_path: str | None = None,
     tcp_socket: str | None = None,
 ) -> None:
     executor_settings = load_executor_settings(settings_object_path)
-    transport, target = resolve_executor_socket(socket_path, tcp_socket)
+    host, port = resolve_tcp_socket(tcp_socket)
     job_registry = executor_settings.job_registry
     if not isinstance(job_registry, JobRegistry):
         raise RuntimeError(
@@ -449,22 +431,11 @@ async def run_python_executor(
 
     try:
         await tracker.start()
-        if transport == "unix":
-            path = Path(str(target))
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if path.exists():
-                path.unlink()
-            server = await asyncio.start_unix_server(
-                lambda r, w: _handle_connection(r, w, executor, ready_event, tracker),
-                path=str(path),
-            )
-        else:
-            host, port = target
-            server = await asyncio.start_server(
-                lambda r, w: _handle_connection(r, w, executor, ready_event, tracker),
-                host=host,
-                port=port,
-            )
+        server = await asyncio.start_server(
+            lambda r, w: _handle_connection(r, w, executor, ready_event, tracker),
+            host=host,
+            port=port,
+        )
         await _call_hook(executor_settings.on_startup)
         startup_completed = True
         ready_event.set()
@@ -483,7 +454,7 @@ async def run_python_executor(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="RRQ Python executor runtime (Unix or TCP socket)"
+        description="RRQ Python executor runtime (TCP socket)"
     )
     parser.add_argument(
         "--settings",
@@ -495,11 +466,6 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--socket",
-        dest="socket_path",
-        help=f"Unix socket path. Defaults to {ENV_EXECUTOR_SOCKET} if unset.",
-    )
-    parser.add_argument(
         "--tcp-socket",
         dest="tcp_socket",
         help=(
@@ -508,11 +474,7 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
-    asyncio.run(
-        run_python_executor(
-            args.settings_object_path, args.socket_path, args.tcp_socket
-        )
-    )
+    asyncio.run(run_python_executor(args.settings_object_path, args.tcp_socket))
 
 
 __all__ = ["run_python_executor", "load_executor_settings", "main"]

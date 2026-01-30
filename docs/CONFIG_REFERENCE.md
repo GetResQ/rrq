@@ -57,8 +57,8 @@ Notes:
 
 ## [rrq.executors.<name>]
 
-Executor configuration for Unix or localhost TCP socket runtimes (Python, Rust,
-or other).
+Executor configuration for localhost TCP socket runtimes (Python, Rust, or
+other).
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -68,24 +68,17 @@ or other).
 | `max_in_flight` | int | `1` | Max concurrent requests per executor process. |
 | `env` | table | — | Extra environment variables for the executor process. |
 | `cwd` | string | — | Working directory for the executor process. |
-| `socket_dir` | string | temp dir | Directory where executor sockets are created. |
-| `tcp_socket` | string | — | Localhost TCP socket in `host:port` or `[host]:port` form. |
+| `tcp_socket` | string | required | Localhost TCP socket in `host:port` or `[host]:port` form. |
 | `response_timeout_seconds` | float | — | Max wait for an executor response. |
 
 Notes:
 - `cmd` must be present for socket executors; RRQ will start one process per
-  pool slot and pass `RRQ_EXECUTOR_SOCKET` (or `RRQ_EXECUTOR_TCP_SOCKET` when
-  `tcp_socket` is configured) for each process.
-- `tcp_socket` is mutually exclusive with `socket_dir` and must point to a
-  localhost address. When `pool_size > 1`, RRQ assigns one port per executor
-  process starting at the configured port (for example, `9000`, `9001`, ...).
+  pool slot and pass `RRQ_EXECUTOR_TCP_SOCKET` for each process.
+- `tcp_socket` must point to a localhost address. When `pool_size > 1`, RRQ
+  assigns one port per executor process starting at the configured port (for
+  example, `9000`, `9001`, ...).
 - `response_timeout_seconds` is separate from job timeouts. If it is hit, the
   executor process is discarded and the job is treated as failed.
-- Relative `socket_dir` values are resolved against `cwd` if provided; otherwise
-  they are resolved against the current working directory.
-- On macOS, Unix socket paths have a short length limit. Use a short absolute
-  `socket_dir` (for example, `/tmp/rrq`) if you see “socket path too long”
-  errors.
 
 ## [rrq.executor_routes]
 

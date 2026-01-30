@@ -22,7 +22,7 @@ You can run the example binary from crates.io:
 
 ```
 cargo install rrq-executor --example socket_executor
-RRQ_EXECUTOR_SOCKET=/tmp/rrq-executor.sock socket_executor
+RRQ_EXECUTOR_TCP_SOCKET=127.0.0.1:9000 socket_executor
 ```
 
 Then point your worker config to the binary:
@@ -31,4 +31,5 @@ Then point your worker config to the binary:
 [rrq.executors.rust]
 type = "socket"
 cmd = ["/path/to/socket_executor"]
+tcp_socket = "127.0.0.1:9000"
 ```

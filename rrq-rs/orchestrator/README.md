@@ -168,11 +168,8 @@ pool_size = 2
 # Max concurrent jobs per executor process
 max_in_flight = 10
 
-# Optional: Use TCP instead of Unix sockets
+# TCP socket address (required)
 tcp_socket = "127.0.0.1:9000"
-
-# Optional: Custom socket directory
-socket_dir = "/tmp/rrq"
 
 # Optional: Working directory for executor
 cwd = "/app"
@@ -245,7 +242,6 @@ RRQ is designed to be compatible with the Python RRQ implementation:
 | `RRQ_CONFIG` | Path to configuration file |
 | `RRQ_REDIS_DSN` | Redis connection string (overrides config) |
 | `RRQ_LOG_LEVEL` | Log level: trace, debug, info, warn, error |
-| `RRQ_EXECUTOR_SOCKET` | Unix socket path (set by orchestrator for executors) |
 | `RRQ_EXECUTOR_TCP_SOCKET` | TCP socket address (set by orchestrator for executors) |
 
 ## License

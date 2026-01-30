@@ -25,7 +25,6 @@ pub struct ExecutorConfig {
     pub max_in_flight: Option<usize>,
     pub env: Option<HashMap<String, String>>,
     pub cwd: Option<String>,
-    pub socket_dir: Option<String>,
     pub tcp_socket: Option<String>,
     pub response_timeout_seconds: Option<f64>,
 }

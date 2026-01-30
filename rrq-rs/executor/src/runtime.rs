@@ -5,17 +5,15 @@ use chrono::{DateTime, Utc};
 use rrq_protocol::{CancelRequest, ExecutorMessage, OutcomeStatus, PROTOCOL_VERSION, encode_frame};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::Path;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, timeout};
 
-pub const ENV_EXECUTOR_SOCKET: &str = "RRQ_EXECUTOR_SOCKET";
 pub const ENV_EXECUTOR_TCP_SOCKET: &str = "RRQ_EXECUTOR_TCP_SOCKET";
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 const RESPONSE_CHANNEL_CAPACITY: usize = 64;
@@ -86,24 +84,6 @@ impl ExecutorRuntime {
         self.runtime.enter()
     }
 
-    pub fn run_socket(
-        &self,
-        registry: &Registry,
-        socket_path: impl AsRef<Path>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let telemetry = NoopTelemetry;
-        self.run_socket_with(registry, socket_path, &telemetry)
-    }
-
-    pub fn run_socket_with<T: Telemetry + ?Sized>(
-        &self,
-        registry: &Registry,
-        socket_path: impl AsRef<Path>,
-        telemetry: &T,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        run_socket_loop(&self.runtime, registry, socket_path.as_ref(), telemetry)
-    }
-
     pub fn run_tcp(
         &self,
         registry: &Registry,
@@ -123,21 +103,6 @@ impl ExecutorRuntime {
     }
 }
 
-pub fn run_socket(
-    registry: &Registry,
-    socket_path: impl AsRef<Path>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    ExecutorRuntime::new()?.run_socket(registry, socket_path)
-}
-
-pub fn run_socket_with<T: Telemetry + ?Sized>(
-    registry: &Registry,
-    socket_path: impl AsRef<Path>,
-    telemetry: &T,
-) -> Result<(), Box<dyn std::error::Error>> {
-    ExecutorRuntime::new()?.run_socket_with(registry, socket_path, telemetry)
-}
-
 pub fn run_tcp(registry: &Registry, addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
     ExecutorRuntime::new()?.run_tcp(registry, addr)
 }
@@ -148,43 +113,6 @@ pub fn run_tcp_with<T: Telemetry + ?Sized>(
     telemetry: &T,
 ) -> Result<(), Box<dyn std::error::Error>> {
     ExecutorRuntime::new()?.run_tcp_with(registry, addr, telemetry)
-}
-
-fn run_socket_loop<T: Telemetry + ?Sized>(
-    runtime: &tokio::runtime::Runtime,
-    registry: &Registry,
-    socket_path: &Path,
-    telemetry: &T,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let registry = registry.clone();
-    let in_flight: Arc<Mutex<HashMap<String, InFlightTask>>> = Arc::new(Mutex::new(HashMap::new()));
-    let job_index: Arc<Mutex<HashMap<String, HashSet<String>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let telemetry = telemetry.clone_box();
-    runtime.block_on(async move {
-        if let Some(parent) = socket_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        if socket_path.exists() {
-            let _ = tokio::fs::remove_file(socket_path).await;
-        }
-        let listener = UnixListener::bind(socket_path)?;
-        loop {
-            let (stream, _) = listener.accept().await?;
-            let registry = registry.clone();
-            let telemetry = telemetry.clone();
-            let in_flight = in_flight.clone();
-            let job_index = job_index.clone();
-            tokio::spawn(async move {
-                if let Err(err) =
-                    handle_connection(stream, &registry, telemetry.as_ref(), in_flight, job_index)
-                        .await
-                {
-                    tracing::error!("executor connection error: {err}");
-                }
-            });
-        }
-    })
 }
 
 fn run_tcp_loop<T: Telemetry + ?Sized>(
@@ -549,7 +477,7 @@ mod tests {
     use chrono::Utc;
     use rrq_protocol::{ExecutionContext, ExecutionRequest, OutcomeStatus};
     use serde_json::json;
-    use tokio::net::UnixStream;
+    use tokio::net::{TcpListener, TcpStream};
     use tokio::time::{Duration, timeout};
 
     fn build_request(function_name: &str) -> ExecutionRequest {
@@ -572,6 +500,14 @@ mod tests {
         }
     }
 
+    async fn tcp_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        (client, server)
+    }
+
     #[tokio::test]
     async fn handle_connection_executes_request() {
         let mut registry = Registry::new();
@@ -582,7 +518,7 @@ mod tests {
                 json!({"ok": true}),
             )
         });
-        let (client, server) = UnixStream::pair().unwrap();
+        let (client, server) = tcp_pair().await;
         let in_flight = Arc::new(Mutex::new(HashMap::new()));
         let job_index = Arc::new(Mutex::new(HashMap::new()));
         let server_task = tokio::spawn(async move {
@@ -609,7 +545,7 @@ mod tests {
     #[tokio::test]
     async fn handle_connection_rejects_bad_protocol() {
         let registry = Registry::new();
-        let (client, server) = UnixStream::pair().unwrap();
+        let (client, server) = tcp_pair().await;
         let in_flight = Arc::new(Mutex::new(HashMap::new()));
         let job_index = Arc::new(Mutex::new(HashMap::new()));
         let server_task = tokio::spawn(async move {
@@ -644,7 +580,7 @@ mod tests {
                 json!({"ok": true}),
             )
         });
-        let (client, server) = UnixStream::pair().unwrap();
+        let (client, server) = tcp_pair().await;
         let in_flight = Arc::new(Mutex::new(HashMap::new()));
         let job_index = Arc::new(Mutex::new(HashMap::new()));
         let server_task = tokio::spawn(async move {
@@ -715,7 +651,7 @@ mod tests {
                 )
             }
         });
-        let (client, server) = UnixStream::pair().unwrap();
+        let (client, server) = tcp_pair().await;
         let in_flight = Arc::new(Mutex::new(HashMap::new()));
         let job_index = Arc::new(Mutex::new(HashMap::new()));
         let server_task = tokio::spawn(async move {
@@ -835,7 +771,7 @@ mod tests {
     #[tokio::test]
     async fn handle_connection_handles_unexpected_response_message() {
         let registry = Registry::new();
-        let (client, server) = UnixStream::pair().unwrap();
+        let (client, server) = tcp_pair().await;
         let in_flight = Arc::new(Mutex::new(HashMap::new()));
         let job_index = Arc::new(Mutex::new(HashMap::new()));
         let server_task = tokio::spawn(async move {
@@ -878,7 +814,7 @@ mod tests {
                 json!({"ok": true}),
             )
         });
-        let (client, server) = UnixStream::pair().unwrap();
+        let (client, server) = tcp_pair().await;
         let in_flight = Arc::new(Mutex::new(HashMap::new()));
         let job_index = Arc::new(Mutex::new(HashMap::new()));
         let server_task = tokio::spawn(async move {
@@ -928,7 +864,7 @@ mod tests {
                 json!({"ok": true}),
             )
         });
-        let (client, server) = UnixStream::pair().unwrap();
+        let (client, server) = tcp_pair().await;
         let in_flight = Arc::new(Mutex::new(HashMap::new()));
         let job_index = Arc::new(Mutex::new(HashMap::new()));
         let server_task = tokio::spawn(async move {
@@ -995,7 +931,7 @@ mod tests {
                 json!({"ok": true}),
             )
         });
-        let (client, server) = UnixStream::pair().unwrap();
+        let (client, server) = tcp_pair().await;
         let in_flight = Arc::new(Mutex::new(HashMap::new()));
         let job_index = Arc::new(Mutex::new(HashMap::new()));
         let in_flight_for_server = in_flight.clone();

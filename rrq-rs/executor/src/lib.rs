@@ -5,8 +5,7 @@ pub mod types;
 
 pub use registry::Registry;
 pub use runtime::{
-    ENV_EXECUTOR_SOCKET, ENV_EXECUTOR_TCP_SOCKET, ExecutorRuntime, parse_tcp_socket, run_socket,
-    run_socket_with, run_tcp, run_tcp_with,
+    ENV_EXECUTOR_TCP_SOCKET, ExecutorRuntime, parse_tcp_socket, run_tcp, run_tcp_with,
 };
 pub use telemetry::{NoopTelemetry, Telemetry};
 pub use types::{

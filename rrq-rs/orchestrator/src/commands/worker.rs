@@ -416,6 +416,7 @@ mod tests {
     use notify::EventKind;
     use notify::event::{AccessKind, DataChange, ModifyKind};
     use std::fs;
+    use std::net::TcpListener as StdTcpListener;
     use std::os::unix::fs::PermissionsExt;
     use tokio::fs as tokio_fs;
     use uuid::Uuid;
@@ -521,16 +522,17 @@ import os
 import socket
 import time
 
-sock_path = os.environ.get("RRQ_EXECUTOR_SOCKET")
-if not sock_path:
+tcp_socket = os.environ.get("RRQ_EXECUTOR_TCP_SOCKET")
+if not tcp_socket:
     raise SystemExit(1)
-try:
-    os.unlink(sock_path)
-except FileNotFoundError:
-    pass
+host, _, port_str = tcp_socket.rpartition(":")
+if not host:
+    raise SystemExit(1)
+port = int(port_str)
 
-sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-sock.bind(sock_path)
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind((host, port))
 sock.listen(1)
 try:
     conn, _ = sock.accept()
@@ -552,12 +554,14 @@ while True:
         script_path: &Path,
     ) -> Result<PathBuf> {
         let path = std::env::temp_dir().join(format!("rrq-worker-{}.toml", Uuid::new_v4()));
+        let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let payload = format!(
-            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_executor_name = \"python\"\n\n[rrq.executors.python]\ncmd = [\"python3\", \"{}\"]\npool_size = 1\nmax_in_flight = 1\n",
+            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_executor_name = \"python\"\n\n[rrq.executors.python]\ncmd = [\"python3\", \"{}\"]\ntcp_socket = \"127.0.0.1:{}\"\npool_size = 1\nmax_in_flight = 1\n",
             settings.redis_dsn,
             settings.default_queue_name,
             settings.default_dlq_name,
-            script_path.to_string_lossy()
+            script_path.to_string_lossy(),
+            port,
         );
         tokio_fs::write(&path, payload).await?;
         Ok(path)

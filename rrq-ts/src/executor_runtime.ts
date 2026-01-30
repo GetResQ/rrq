@@ -1,9 +1,6 @@
-import fs from "node:fs";
 import net from "node:net";
-import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const ENV_EXECUTOR_SOCKET = "RRQ_EXECUTOR_SOCKET";
 export const ENV_EXECUTOR_TCP_SOCKET = "RRQ_EXECUTOR_TCP_SOCKET";
 export const PROTOCOL_VERSION = "1";
 const MAX_FRAME_LEN = 16 * 1024 * 1024;
@@ -115,28 +112,13 @@ export class ExecutorRuntime {
   }
 
   async runFromEnv(): Promise<void> {
-    const socketPath = process.env[ENV_EXECUTOR_SOCKET];
     const tcpSocket = process.env[ENV_EXECUTOR_TCP_SOCKET];
-    if (socketPath && tcpSocket) {
-      throw new Error("Provide only one of RRQ_EXECUTOR_SOCKET or RRQ_EXECUTOR_TCP_SOCKET");
-    }
     if (tcpSocket) {
       const address = parseTcpSocket(tcpSocket);
       await this.runTcp(address.host, address.port);
       return;
     }
-    if (!socketPath) {
-      throw new Error(`${ENV_EXECUTOR_SOCKET} or ${ENV_EXECUTOR_TCP_SOCKET} must be set`);
-    }
-    await this.runSocket(socketPath);
-  }
-
-  async runSocket(socketPath: string): Promise<void> {
-    await fs.promises.mkdir(path.dirname(socketPath), { recursive: true });
-    if (fs.existsSync(socketPath)) {
-      await fs.promises.unlink(socketPath);
-    }
-    await this.runServer({ path: socketPath });
+    throw new Error(`${ENV_EXECUTOR_TCP_SOCKET} must be set`);
   }
 
   async runTcp(host: string, port: number): Promise<void> {

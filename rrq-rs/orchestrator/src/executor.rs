@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{
     Arc,
@@ -15,14 +14,12 @@ use rrq_protocol::{
     PROTOCOL_VERSION, encode_frame,
 };
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::net::{TcpStream, UnixStream};
+use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, timeout};
-use uuid::Uuid;
 
-const ENV_EXECUTOR_SOCKET: &str = "RRQ_EXECUTOR_SOCKET";
 const ENV_EXECUTOR_TCP_SOCKET: &str = "RRQ_EXECUTOR_TCP_SOCKET";
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 
@@ -92,58 +89,6 @@ fn connect_timeout_from_settings(timeout_ms: i64) -> Duration {
     Duration::from_millis(ms as u64)
 }
 
-fn socket_path_max_len() -> Option<usize> {
-    if cfg!(target_os = "macos") {
-        Some(104)
-    } else if cfg!(target_os = "linux") {
-        Some(108)
-    } else {
-        None
-    }
-}
-
-fn default_socket_base_dir() -> PathBuf {
-    let tmp = PathBuf::from("/tmp");
-    if tmp.is_dir() {
-        return tmp;
-    }
-    std::env::temp_dir()
-}
-
-fn resolve_base_dir(cwd: &Option<String>) -> Result<PathBuf> {
-    if let Some(cwd) = cwd {
-        let path = PathBuf::from(cwd);
-        if path.is_absolute() {
-            return Ok(path);
-        }
-        return Ok(std::env::current_dir()?.join(path));
-    }
-    Ok(std::env::current_dir()?)
-}
-
-async fn resolve_socket_dir(
-    socket_dir: Option<String>,
-    cwd: &Option<String>,
-) -> Result<(PathBuf, Option<PathBuf>)> {
-    match socket_dir {
-        Some(path) => {
-            let mut path = PathBuf::from(path);
-            if !path.is_absolute() {
-                let base = resolve_base_dir(cwd)?;
-                path = base.join(path);
-            }
-            tokio::fs::create_dir_all(&path).await?;
-            Ok((path, None))
-        }
-        None => {
-            let base = default_socket_base_dir();
-            let path = base.join(format!("rrq-executor-{}", Uuid::new_v4()));
-            tokio::fs::create_dir_all(&path).await?;
-            Ok((path.clone(), Some(path)))
-        }
-    }
-}
-
 #[async_trait]
 pub trait Executor: Send + Sync {
     async fn execute(&self, request: ExecutionRequest) -> Result<ExecutionOutcome>;
@@ -161,22 +106,7 @@ impl<T: AsyncRead + AsyncWrite + ?Sized> ExecutorIo for T {}
 
 type ExecutorStream = Box<dyn ExecutorIo + Unpin + Send>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ExecutorSocketTarget {
-    Unix(PathBuf),
-    Tcp(SocketAddr),
-}
-
-impl ExecutorSocketTarget {
-    fn env(&self) -> (&'static str, String) {
-        match self {
-            ExecutorSocketTarget::Unix(path) => {
-                (ENV_EXECUTOR_SOCKET, path.to_string_lossy().to_string())
-            }
-            ExecutorSocketTarget::Tcp(addr) => (ENV_EXECUTOR_TCP_SOCKET, addr.to_string()),
-        }
-    }
-}
+type ExecutorSocketTarget = SocketAddr;
 
 struct SocketProcess {
     child: Child,
@@ -192,9 +122,7 @@ pub struct SocketExecutorPool {
     max_in_flight: usize,
     env: Option<HashMap<String, String>>,
     cwd: Option<String>,
-    socket_dir: Option<PathBuf>,
-    owned_socket_dir: Option<PathBuf>,
-    tcp_socket: Option<TcpSocketSpec>,
+    tcp_socket: TcpSocketSpec,
     tcp_port_cursor: AtomicUsize,
     processes: Mutex<Vec<Arc<Mutex<SocketProcess>>>>,
     cursor: AtomicUsize,
@@ -224,7 +152,6 @@ impl SocketExecutorPool {
         max_in_flight: usize,
         env: Option<HashMap<String, String>>,
         cwd: Option<String>,
-        socket_dir: Option<String>,
         tcp_socket: Option<String>,
         response_timeout: Option<Duration>,
         connect_timeout: Duration,
@@ -239,25 +166,16 @@ impl SocketExecutorPool {
             return Err(anyhow::anyhow!("cmd must not be empty"));
         }
 
-        if socket_dir.is_some() && tcp_socket.is_some() {
-            return Err(anyhow::anyhow!("tcp_socket cannot be used with socket_dir"));
+        let tcp_socket = tcp_socket.ok_or_else(|| {
+            anyhow::anyhow!("executor tcp_socket is required (unix sockets are not supported)")
+        })?;
+        let tcp_socket = parse_tcp_socket(&tcp_socket)?;
+        let max_port = tcp_socket.port as u32 + (pool_size as u32).saturating_sub(1);
+        if max_port > u16::MAX as u32 {
+            return Err(anyhow::anyhow!(
+                "executor tcp_socket range too small for pool_size"
+            ));
         }
-        let tcp_socket = tcp_socket.map(|raw| parse_tcp_socket(&raw)).transpose()?;
-        if let Some(spec) = &tcp_socket {
-            let max_port = spec.port as u32 + (pool_size as u32).saturating_sub(1);
-            if max_port > u16::MAX as u32 {
-                return Err(anyhow::anyhow!(
-                    "executor tcp_socket range too small for pool_size"
-                ));
-            }
-        }
-
-        let (socket_dir, owned_socket_dir) = if tcp_socket.is_some() {
-            (None, None)
-        } else {
-            let (socket_dir, owned_socket_dir) = resolve_socket_dir(socket_dir, &cwd).await?;
-            (Some(socket_dir), owned_socket_dir)
-        };
 
         let pool = Self {
             cmd,
@@ -265,8 +183,6 @@ impl SocketExecutorPool {
             max_in_flight,
             env,
             cwd,
-            socket_dir,
-            owned_socket_dir,
             tcp_socket,
             tcp_port_cursor: AtomicUsize::new(0),
             processes: Mutex::new(Vec::new()),
@@ -306,19 +222,8 @@ impl SocketExecutorPool {
         Ok(())
     }
 
-    fn next_socket_path(&self) -> Result<PathBuf> {
-        let socket_dir = self
-            .socket_dir
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("socket_dir is required for unix sockets"))?;
-        Ok(socket_dir.join(format!("exec-{}.sock", Uuid::new_v4())))
-    }
-
     fn next_tcp_socket(&self) -> Result<SocketAddr> {
-        let spec = self
-            .tcp_socket
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("tcp_socket is required for TCP sockets"))?;
+        let spec = &self.tcp_socket;
         let offset = self.tcp_port_cursor.fetch_add(1, Ordering::Relaxed);
         let port = spec.port as u32 + offset as u32;
         if port > u16::MAX as u32 {
@@ -337,46 +242,21 @@ impl SocketExecutorPool {
         if let Some(spawn_override) = &self.spawn_override {
             return Ok((spawn_override)());
         }
-        let reuse_socket = reuse_socket.clone();
-        let max_attempts = if reuse_socket.is_none() && self.tcp_socket.is_some() {
+        let max_attempts = if reuse_socket.is_none() {
             self.pool_size.max(1)
         } else {
             1
         };
         let mut attempts = 0;
         loop {
-            let socket = match reuse_socket.clone() {
-                Some(target) => {
-                    // Reuse the existing socket target (for respawns)
-                    match &target {
-                        ExecutorSocketTarget::Tcp(_) => {}
-                        ExecutorSocketTarget::Unix(path) => {
-                            self.validate_socket_path(path)?;
-                            if path.exists() {
-                                let _ = tokio::fs::remove_file(path).await;
-                            }
-                        }
-                    }
-                    target
-                }
+            let socket = match reuse_socket {
+                Some(target) => target,
                 None => {
                     // Allocate a new socket target
-                    if self.tcp_socket.is_some() {
-                        let addr = self.next_tcp_socket()?;
-                        ExecutorSocketTarget::Tcp(addr)
-                    } else {
-                        let socket_path = self.next_socket_path()?;
-                        self.validate_socket_path(&socket_path)?;
-                        if socket_path.exists() {
-                            let _ = tokio::fs::remove_file(&socket_path).await;
-                        }
-                        ExecutorSocketTarget::Unix(socket_path)
-                    }
+                    self.next_tcp_socket()?
                 }
             };
-            if let ExecutorSocketTarget::Tcp(addr) = &socket
-                && let Err(err) = self.ensure_tcp_port_available(*addr)
-            {
+            if let Err(err) = self.ensure_tcp_port_available(socket) {
                 attempts += 1;
                 if reuse_socket.is_some() || attempts >= max_attempts {
                     return Err(err);
@@ -395,14 +275,7 @@ impl SocketExecutorPool {
             if let Some(env) = &self.env {
                 command.envs(env);
             }
-            // Clear the conflicting env var to avoid confusion in the child process
-            let (env_key, env_value) = socket.env();
-            let conflicting_env_key = match &socket {
-                ExecutorSocketTarget::Unix(_) => ENV_EXECUTOR_TCP_SOCKET,
-                ExecutorSocketTarget::Tcp(_) => ENV_EXECUTOR_SOCKET,
-            };
-            command.env_remove(conflicting_env_key);
-            command.env(env_key, env_value);
+            command.env(ENV_EXECUTOR_TCP_SOCKET, socket.to_string());
             if let Some(cwd) = &self.cwd {
                 command.current_dir(cwd);
             }
@@ -444,30 +317,12 @@ impl SocketExecutorPool {
                     let _ = child.kill().await;
                     let _ = child.wait().await;
                     attempts += 1;
-                    if reuse_socket.is_some()
-                        || self.tcp_socket.is_none()
-                        || attempts >= max_attempts
-                    {
+                    if reuse_socket.is_some() || attempts >= max_attempts {
                         return Err(err);
                     }
                 }
             };
         }
-    }
-
-    fn validate_socket_path(&self, socket_path: &Path) -> Result<()> {
-        if let Some(max_len) = socket_path_max_len() {
-            let len = socket_path.to_string_lossy().len();
-            if len > max_len {
-                return Err(anyhow::anyhow!(
-                    "executor socket path is too long ({} > {} bytes). \
-set socket_dir to a shorter absolute path (e.g. /tmp/rrq).",
-                    len,
-                    max_len
-                ));
-            }
-        }
-        Ok(())
     }
 
     fn ensure_tcp_port_available(&self, addr: SocketAddr) -> Result<()> {
@@ -584,7 +439,7 @@ set socket_dir to a shorter absolute path (e.g. /tmp/rrq).",
     async fn respawn(&self, proc: &Arc<Mutex<SocketProcess>>) -> Result<()> {
         let mut guard = proc.lock().await;
         // Capture the old socket target to reuse (prevents port exhaustion on TCP)
-        let old_socket = guard.socket.clone();
+        let old_socket = guard.socket;
         let _ = self.terminate(&mut guard).await;
         *guard = self.spawn_process(Some(old_socket)).await?;
         self.availability.notify_waiters();
@@ -600,9 +455,6 @@ set socket_dir to a shorter absolute path (e.g. /tmp/rrq).",
         }
         let _ = proc.child.kill().await;
         let _ = proc.child.wait().await;
-        if let ExecutorSocketTarget::Unix(path) = &proc.socket {
-            let _ = tokio::fs::remove_file(path).await;
-        }
         Ok(())
     }
 
@@ -613,9 +465,6 @@ set socket_dir to a shorter absolute path (e.g. /tmp/rrq).",
             let _ = self.terminate(&mut guard).await;
         }
         processes.clear();
-        if let Some(path) = &self.owned_socket_dir {
-            let _ = tokio::fs::remove_dir_all(path).await;
-        }
         Ok(())
     }
 }
@@ -633,7 +482,6 @@ impl SocketExecutor {
         max_in_flight: usize,
         env: Option<HashMap<String, String>>,
         cwd: Option<String>,
-        socket_dir: Option<String>,
         tcp_socket: Option<String>,
         response_timeout_seconds: Option<f64>,
         connect_timeout: Duration,
@@ -645,7 +493,6 @@ impl SocketExecutor {
             max_in_flight,
             env,
             cwd,
-            socket_dir,
             tcp_socket,
             response_timeout,
             connect_timeout,
@@ -664,14 +511,14 @@ impl SocketExecutor {
     ) -> Result<ExecutionOutcome> {
         let mut socket = {
             let guard = proc.lock().await;
-            guard.socket.clone()
+            guard.socket
         };
         let mut stream = match connect_stream(&socket).await {
             Ok(stream) => stream,
             Err(err) => {
                 let refreshed = {
                     let guard = proc.lock().await;
-                    guard.socket.clone()
+                    guard.socket
                 };
                 if refreshed != socket {
                     socket = refreshed;
@@ -687,7 +534,7 @@ impl SocketExecutor {
                 request.request_id.clone(),
                 InFlightRequest {
                     job_id: request.job_id.clone(),
-                    socket: socket.clone(),
+                    socket,
                 },
             );
         }
@@ -902,7 +749,6 @@ pub async fn build_executors_from_settings(
             max_in_flight,
             config.env.clone(),
             config.cwd.clone(),
-            config.socket_dir.clone(),
             config.tcp_socket.clone(),
             config.response_timeout_seconds,
             connect_timeout,
@@ -914,16 +760,8 @@ pub async fn build_executors_from_settings(
 }
 
 async fn connect_stream(target: &ExecutorSocketTarget) -> std::io::Result<ExecutorStream> {
-    match target {
-        ExecutorSocketTarget::Unix(path) => {
-            let stream = UnixStream::connect(path).await?;
-            Ok(Box::new(stream))
-        }
-        ExecutorSocketTarget::Tcp(addr) => {
-            let stream = TcpStream::connect(addr).await?;
-            Ok(Box::new(stream))
-        }
-    }
+    let stream = TcpStream::connect(target).await?;
+    Ok(Box::new(stream))
 }
 
 async fn read_message<R>(stream: &mut R) -> Result<Option<ExecutorMessage>>
@@ -963,7 +801,8 @@ where
 mod tests {
     use super::*;
     use crate::settings::{ExecutorConfig, ExecutorType, RRQSettings};
-    use std::net::TcpListener;
+    use std::net::TcpListener as StdTcpListener;
+    use tokio::net::TcpListener as TokioTcpListener;
     use tokio::process::Command;
     use tokio::time::sleep;
 
@@ -1007,10 +846,10 @@ mod tests {
             .arg("60")
             .spawn()
             .expect("spawn sleep");
-        let socket_path = std::env::temp_dir().join(format!("rrq-test-{}.sock", Uuid::new_v4()));
+        let (spec, socket_addr) = allocate_tcp_spec();
         let process = SocketProcess {
             child,
-            socket: ExecutorSocketTarget::Unix(socket_path),
+            socket: socket_addr,
             stdout_task: None,
             stderr_task: None,
             permits: Arc::new(Semaphore::new(max_in_flight)),
@@ -1021,9 +860,7 @@ mod tests {
             max_in_flight,
             env: None,
             cwd: None,
-            socket_dir: Some(std::env::temp_dir()),
-            owned_socket_dir: None,
-            tcp_socket: None,
+            tcp_socket: spec,
             tcp_port_cursor: AtomicUsize::new(0),
             processes: Mutex::new(vec![Arc::new(Mutex::new(process))]),
             cursor: AtomicUsize::new(0),
@@ -1032,6 +869,25 @@ mod tests {
             connect_timeout: Duration::from_millis(DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS as u64),
             spawn_override: None,
         }
+    }
+
+    fn allocate_tcp_spec() -> (TcpSocketSpec, SocketAddr) {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind temp port");
+        let addr = listener.local_addr().expect("local addr");
+        drop(listener);
+        let spec = TcpSocketSpec {
+            host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port: addr.port(),
+        };
+        (spec, addr)
+    }
+
+    async fn bind_tcp_listener() -> (TokioTcpListener, SocketAddr) {
+        let listener = TokioTcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind tcp listener");
+        let addr = listener.local_addr().expect("local addr");
+        (listener, addr)
     }
 
     #[tokio::test]
@@ -1054,26 +910,24 @@ mod tests {
     #[tokio::test]
     async fn ensure_process_respawns_exited_child() {
         let spawn_override = Arc::new(|| {
-            let socket_path =
-                std::env::temp_dir().join(format!("rrq-test-{}.sock", Uuid::new_v4()));
+            let (_spec, socket_addr) = allocate_tcp_spec();
             let child = Command::new("sleep").arg("60").spawn().unwrap();
             SocketProcess {
                 child,
-                socket: ExecutorSocketTarget::Unix(socket_path),
+                socket: socket_addr,
                 stdout_task: None,
                 stderr_task: None,
                 permits: Arc::new(Semaphore::new(1)),
             }
         });
+        let (spec, _socket_addr) = allocate_tcp_spec();
         let pool = SocketExecutorPool {
             cmd: vec!["sleep".to_string(), "60".to_string()],
             pool_size: 1,
             max_in_flight: 1,
             env: None,
             cwd: None,
-            socket_dir: Some(std::env::temp_dir()),
-            owned_socket_dir: None,
-            tcp_socket: None,
+            tcp_socket: spec,
             tcp_port_cursor: AtomicUsize::new(0),
             processes: Mutex::new(Vec::new()),
             cursor: AtomicUsize::new(0),
@@ -1087,7 +941,7 @@ mod tests {
             let processes = pool.processes.lock().await;
             processes.first().cloned().unwrap()
         };
-        let old_socket = { proc.lock().await.socket.clone() };
+        let old_socket = { proc.lock().await.socket };
         {
             let mut guard = proc.lock().await;
             let _ = guard.child.kill().await;
@@ -1095,22 +949,21 @@ mod tests {
         }
         sleep(Duration::from_millis(50)).await;
         pool.ensure_process(&proc).await.unwrap();
-        let new_socket = { proc.lock().await.socket.clone() };
+        let new_socket = { proc.lock().await.socket };
         assert_ne!(old_socket, new_socket);
         pool.close().await.unwrap();
     }
 
     #[tokio::test]
     async fn connect_socket_errors_when_child_exits() {
+        let (spec, socket_addr) = allocate_tcp_spec();
         let pool = SocketExecutorPool {
             cmd: vec!["true".to_string()],
             pool_size: 1,
             max_in_flight: 1,
             env: None,
             cwd: None,
-            socket_dir: Some(std::env::temp_dir()),
-            owned_socket_dir: None,
-            tcp_socket: None,
+            tcp_socket: spec,
             tcp_port_cursor: AtomicUsize::new(0),
             processes: Mutex::new(Vec::new()),
             cursor: AtomicUsize::new(0),
@@ -1119,10 +972,9 @@ mod tests {
             connect_timeout: Duration::from_millis(50),
             spawn_override: None,
         };
-        let socket_path = std::env::temp_dir().join(format!("rrq-missing-{}.sock", Uuid::new_v4()));
         let mut child = Command::new("true").spawn().unwrap();
         let err = pool
-            .connect_socket(&ExecutorSocketTarget::Unix(socket_path), &mut child)
+            .connect_socket(&socket_addr, &mut child)
             .await
             .unwrap_err();
         assert!(
@@ -1144,8 +996,7 @@ mod tests {
                 max_in_flight: Some(5),
                 env: None,
                 cwd: None,
-                socket_dir: None,
-                tcp_socket: None,
+                tcp_socket: Some("127.0.0.1:9000".to_string()),
                 response_timeout_seconds: None,
             },
         );
@@ -1170,8 +1021,7 @@ mod tests {
                 max_in_flight: Some(0),
                 env: None,
                 cwd: None,
-                socket_dir: None,
-                tcp_socket: None,
+                tcp_socket: Some("127.0.0.1:9000".to_string()),
                 response_timeout_seconds: None,
             },
         );
@@ -1217,7 +1067,6 @@ mod tests {
             1,
             None,
             None,
-            None,
             Some("127.0.0.1:65535".to_string()),
             None,
             Duration::from_millis(DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS as u64),
@@ -1237,12 +1086,10 @@ mod tests {
             max_in_flight: 1,
             env: None,
             cwd: None,
-            socket_dir: None,
-            owned_socket_dir: None,
-            tcp_socket: Some(TcpSocketSpec {
+            tcp_socket: TcpSocketSpec {
                 host: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: 9000,
-            }),
+            },
             tcp_port_cursor: AtomicUsize::new(0),
             processes: Mutex::new(Vec::new()),
             cursor: AtomicUsize::new(0),
@@ -1272,7 +1119,7 @@ mod tests {
 
     #[test]
     fn tcp_port_collision_is_detected() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let pool = SocketExecutorPool {
             cmd: vec!["true".to_string()],
@@ -1280,12 +1127,10 @@ mod tests {
             max_in_flight: 1,
             env: None,
             cwd: None,
-            socket_dir: None,
-            owned_socket_dir: None,
-            tcp_socket: Some(TcpSocketSpec {
+            tcp_socket: TcpSocketSpec {
                 host: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: addr.port(),
-            }),
+            },
             tcp_port_cursor: AtomicUsize::new(0),
             processes: Mutex::new(Vec::new()),
             cursor: AtomicUsize::new(0),
@@ -1304,9 +1149,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_sends_cancel_message() {
-        let socket_path = std::env::temp_dir().join(format!("rrq-cancel-{}.sock", Uuid::new_v4()));
-        let _ = tokio::fs::remove_file(&socket_path).await;
-        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let (listener, socket_addr) = bind_tcp_listener().await;
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let message = read_message(&mut stream).await.unwrap().unwrap();
@@ -1330,7 +1173,7 @@ mod tests {
                 "req-1".to_string(),
                 InFlightRequest {
                     job_id: "job-1".to_string(),
-                    socket: ExecutorSocketTarget::Unix(socket_path.clone()),
+                    socket: socket_addr,
                 },
             );
         }
@@ -1339,11 +1182,11 @@ mod tests {
 
         let in_flight = executor.in_flight.lock().await;
         assert!(in_flight.is_empty());
-        let _ = tokio::fs::remove_file(&socket_path).await;
     }
 
     #[tokio::test]
     async fn cancel_failure_preserves_in_flight() {
+        let (_spec, socket_addr) = allocate_tcp_spec();
         let pool = build_test_pool(1);
         let executor = SocketExecutor {
             pool: Arc::new(pool),
@@ -1355,9 +1198,7 @@ mod tests {
                 "req-1".to_string(),
                 InFlightRequest {
                     job_id: "job-1".to_string(),
-                    socket: ExecutorSocketTarget::Unix(
-                        std::env::temp_dir().join(format!("rrq-missing-{}.sock", Uuid::new_v4())),
-                    ),
+                    socket: socket_addr,
                 },
             );
         }
@@ -1369,9 +1210,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_timeout_triggers_cancel() {
-        let socket_path = std::env::temp_dir().join(format!("rrq-timeout-{}.sock", Uuid::new_v4()));
-        let _ = tokio::fs::remove_file(&socket_path).await;
-        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let (listener, socket_addr) = bind_tcp_listener().await;
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let _ = read_message(&mut stream).await.unwrap().unwrap();
@@ -1392,20 +1231,19 @@ mod tests {
             .expect("spawn sleep");
         let process = SocketProcess {
             child,
-            socket: ExecutorSocketTarget::Unix(socket_path.clone()),
+            socket: socket_addr,
             stdout_task: None,
             stderr_task: None,
             permits: Arc::new(Semaphore::new(1)),
         };
+        let (spec, _addr) = allocate_tcp_spec();
         let pool = SocketExecutorPool {
             cmd: vec!["sleep".to_string(), "60".to_string()],
             pool_size: 1,
             max_in_flight: 1,
             env: None,
             cwd: None,
-            socket_dir: Some(std::env::temp_dir()),
-            owned_socket_dir: None,
-            tcp_socket: None,
+            tcp_socket: spec,
             tcp_port_cursor: AtomicUsize::new(0),
             processes: Mutex::new(vec![Arc::new(Mutex::new(process))]),
             cursor: AtomicUsize::new(0),
@@ -1438,15 +1276,11 @@ mod tests {
         let err = executor.execute(request).await.unwrap_err();
         assert!(err.to_string().contains("executor response timeout"));
         server.await.unwrap();
-        let _ = tokio::fs::remove_file(&socket_path).await;
     }
 
     #[tokio::test]
     async fn execute_with_process_rejects_mismatched_request_id() {
-        let socket_path =
-            std::env::temp_dir().join(format!("rrq-mismatch-{}.sock", Uuid::new_v4()));
-        let _ = tokio::fs::remove_file(&socket_path).await;
-        let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
+        let (listener, socket_addr) = bind_tcp_listener().await;
 
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -1471,7 +1305,7 @@ mod tests {
         let child = Command::new("sleep").arg("60").spawn().unwrap();
         let process = SocketProcess {
             child,
-            socket: ExecutorSocketTarget::Unix(socket_path.clone()),
+            socket: socket_addr,
             stdout_task: None,
             stderr_task: None,
             permits: Arc::new(Semaphore::new(1)),
@@ -1506,7 +1340,6 @@ mod tests {
         assert!(err.to_string().contains("request_id mismatch"));
 
         server.await.unwrap();
-        let _ = tokio::fs::remove_file(&socket_path).await;
         let mut guard = proc.lock().await;
         let _ = guard.child.kill().await;
         let _ = guard.child.wait().await;
@@ -1521,12 +1354,10 @@ mod tests {
             max_in_flight: 1,
             env: None,
             cwd: None,
-            socket_dir: None,
-            owned_socket_dir: None,
-            tcp_socket: Some(TcpSocketSpec {
+            tcp_socket: TcpSocketSpec {
                 host: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: 9000,
-            }),
+            },
             tcp_port_cursor: AtomicUsize::new(0),
             processes: Mutex::new(Vec::new()),
             cursor: AtomicUsize::new(0),
@@ -1556,27 +1387,25 @@ mod tests {
     async fn respawn_preserves_socket_target() {
         // Verify that respawn() captures the old socket and passes it to spawn_process
         let spawn_override = Arc::new(|| {
-            let socket_path =
-                std::env::temp_dir().join(format!("rrq-test-{}.sock", Uuid::new_v4()));
+            let (_spec, socket_addr) = allocate_tcp_spec();
             let child = Command::new("sleep").arg("60").spawn().unwrap();
             SocketProcess {
                 child,
-                socket: ExecutorSocketTarget::Unix(socket_path),
+                socket: socket_addr,
                 stdout_task: None,
                 stderr_task: None,
                 permits: Arc::new(Semaphore::new(1)),
             }
         });
 
+        let (spec, _addr) = allocate_tcp_spec();
         let pool = SocketExecutorPool {
             cmd: vec!["sleep".to_string(), "60".to_string()],
             pool_size: 1,
             max_in_flight: 1,
             env: None,
             cwd: None,
-            socket_dir: Some(std::env::temp_dir()),
-            owned_socket_dir: None,
-            tcp_socket: None,
+            tcp_socket: spec,
             tcp_port_cursor: AtomicUsize::new(0),
             processes: Mutex::new(Vec::new()),
             cursor: AtomicUsize::new(0),
@@ -1593,7 +1422,7 @@ mod tests {
         };
 
         // Initial socket
-        let initial_socket = { proc.lock().await.socket.clone() };
+        let initial_socket = { proc.lock().await.socket };
 
         // Kill process
         {
@@ -1603,7 +1432,7 @@ mod tests {
         }
         sleep(Duration::from_millis(50)).await;
 
-        // Respawn - the spawn_override will generate a new socket path,
+        // Respawn - the spawn_override will generate a new tcp socket address,
         // but in real usage (without spawn_override), respawn() passes
         // the old socket to spawn_process(Some(old_socket))
         pool.respawn(&proc).await.unwrap();
@@ -1613,7 +1442,7 @@ mod tests {
         // The spawn_process_with_reuse_socket_does_not_increment_cursor test above
         // verifies the cursor logic.
 
-        let new_socket = { proc.lock().await.socket.clone() };
+        let new_socket = { proc.lock().await.socket };
         // With spawn_override, socket will be different (new UUID)
         assert_ne!(initial_socket, new_socket);
 

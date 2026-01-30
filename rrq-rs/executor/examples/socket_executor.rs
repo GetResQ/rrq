@@ -1,6 +1,5 @@
 use rrq_executor::{
-    ENV_EXECUTOR_SOCKET, ENV_EXECUTOR_TCP_SOCKET, ExecutionOutcome, ExecutorRuntime, Registry,
-    parse_tcp_socket,
+    ENV_EXECUTOR_TCP_SOCKET, ExecutionOutcome, ExecutorRuntime, Registry, parse_tcp_socket,
 };
 
 #[cfg(not(feature = "otel"))]
@@ -36,22 +35,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     });
 
-    let tcp_socket = std::env::var(ENV_EXECUTOR_TCP_SOCKET).ok();
-    let socket_path = std::env::var(ENV_EXECUTOR_SOCKET).ok();
-
-    match (tcp_socket, socket_path) {
-        (Some(tcp_socket), None) => {
-            let addr = parse_tcp_socket(&tcp_socket)?;
-            runtime.run_tcp_with(&registry, addr, &telemetry)
-        }
-        (None, Some(socket_path)) => runtime.run_socket_with(&registry, socket_path, &telemetry),
-        (Some(_), Some(_)) => Err(Box::new(std::io::Error::new(
+    let tcp_socket = std::env::var(ENV_EXECUTOR_TCP_SOCKET).map_err(|_| {
+        std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "Provide only one of RRQ_EXECUTOR_TCP_SOCKET or RRQ_EXECUTOR_SOCKET",
-        ))),
-        (None, None) => Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "RRQ_EXECUTOR_TCP_SOCKET or RRQ_EXECUTOR_SOCKET must be set",
-        ))),
-    }
+            "RRQ_EXECUTOR_TCP_SOCKET must be set",
+        )
+    })?;
+    let addr = parse_tcp_socket(&tcp_socket)?;
+    runtime.run_tcp_with(&registry, addr, &telemetry)
 }

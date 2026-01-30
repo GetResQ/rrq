@@ -12,7 +12,7 @@ This crate defines the wire protocol used for socket communication between:
 - **RRQ Orchestrator** - dispatches jobs to executor processes
 - **RRQ Executor** - receives and executes job handlers
 
-The protocol uses length-prefixed JSON frames over Unix sockets or TCP connections.
+The protocol uses length-prefixed JSON frames over TCP connections.
 
 ## Installation
 

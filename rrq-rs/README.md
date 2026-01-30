@@ -19,12 +19,6 @@ rrq-producer = { git = "https://github.com/getresq/rrq", package = "rrq-producer
 
 ```
 cd rrq-rs/executor
-RRQ_EXECUTOR_SOCKET=/tmp/rrq-executor.sock cargo run --example socket_executor
-```
-
-Localhost TCP variant:
-
-```
 RRQ_EXECUTOR_TCP_SOCKET=127.0.0.1:9000 cargo run --example socket_executor
 ```
 

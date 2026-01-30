@@ -13,7 +13,8 @@ from rrq.executor_runtime import (
     _execute_with_deadline,
     _handle_connection,
     _parse_tcp_socket,
-    resolve_executor_socket,
+    ENV_EXECUTOR_TCP_SOCKET,
+    resolve_tcp_socket,
 )
 from rrq.protocol import read_message, write_message
 from rrq.registry import JobRegistry
@@ -420,6 +421,7 @@ def test_parse_tcp_socket_rejects_non_localhost() -> None:
         _parse_tcp_socket("example.com:1234")
 
 
-def test_resolve_executor_socket_conflict() -> None:
+def test_resolve_tcp_socket_requires_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(ENV_EXECUTOR_TCP_SOCKET, raising=False)
     with pytest.raises(ValueError):
-        resolve_executor_socket("/tmp/rrq.sock", "127.0.0.1:1234")
+        resolve_tcp_socket(None)

@@ -42,7 +42,7 @@ run the orchestrator or build native producers/executors.
       │ - queue routing              │
       │ - cron jobs                  │
       └──────────┬───────────────────┘
-                 │ Unix socket protocol
+                 │ TCP socket protocol
                  │ (request <-> outcome)
                  ▼
    ┌─────────────────────┬─────────────────────┐
@@ -90,10 +90,8 @@ default_executor_name = "python"
 [rrq.executors.python]
 type = "socket"
 cmd = ["rrq-executor", "--settings", "myapp.executor_config.python_executor_settings"]
-# Optional: override the directory used for executor sockets.
-# socket_dir = "/tmp/rrq-executor"
-# Optional: use a localhost TCP socket instead of Unix sockets (pool_size must be 1).
-# tcp_socket = "127.0.0.1:9000"
+# Required: localhost TCP socket (host:port). For pool_size > 1, ports increment.
+tcp_socket = "127.0.0.1:9000"
 ```
 
 ### 3) Register Python handlers
