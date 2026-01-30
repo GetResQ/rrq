@@ -41,6 +41,7 @@ understand (for example, `cron_jobs` and `watch`).
 | `executors` | table | `{}` | — | Map of executor configs. See below. |
 | `executor_routes` | table | `{}` | — | Map of `queue_name = "executor"`. |
 | `worker_health_check_interval_seconds` | float | `60` | `RRQ_WORKER_HEALTH_CHECK_INTERVAL_SECONDS` | Heartbeat interval. |
+| `worker_health_check_ttl_buffer_seconds` | float | `10` | `RRQ_WORKER_HEALTH_CHECK_TTL_BUFFER_SECONDS` | Extra TTL buffer added to worker health records. |
 | `base_retry_delay_seconds` | float | `5.0` | `RRQ_BASE_RETRY_DELAY_SECONDS` | Initial retry delay for backoff. |
 | `max_retry_delay_seconds` | float | `3600` | `RRQ_MAX_RETRY_DELAY_SECONDS` | Max retry delay. |
 | `worker_shutdown_grace_period_seconds` | float | `10.0` | `RRQ_WORKER_SHUTDOWN_GRACE_PERIOD_SECONDS` | Grace period before forced shutdown. |

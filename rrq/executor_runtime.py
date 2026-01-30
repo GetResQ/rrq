@@ -58,8 +58,11 @@ async def _execute_and_respond(
     writer: asyncio.StreamWriter,
     write_lock: asyncio.Lock,
     in_flight: dict[str, asyncio.Task],
-    job_index: dict[str, str],
+    job_index: dict[str, set[str]],
     inflight_lock: asyncio.Lock,
+    connection_requests: set[str],
+    connection_jobs: dict[str, str],
+    connection_lock: asyncio.Lock,
 ) -> None:
     try:
         try:
@@ -99,7 +102,14 @@ async def _execute_and_respond(
     finally:
         async with inflight_lock:
             in_flight.pop(request.request_id, None)
-            job_index.pop(request.job_id, None)
+            request_ids = job_index.get(request.job_id)
+            if request_ids is not None:
+                request_ids.discard(request.request_id)
+                if not request_ids:
+                    job_index.pop(request.job_id, None)
+        async with connection_lock:
+            connection_requests.discard(request.request_id)
+            connection_jobs.pop(request.request_id, None)
 
 
 async def _execute_with_deadline(
@@ -160,15 +170,16 @@ def _parse_tcp_socket(tcp_socket: str) -> tuple[str, int]:
         if not host:
             raise ValueError("TCP socket host cannot be empty")
 
-    if host not in _LOCALHOST_ALIASES:
-    try:
-        ip = ip_address(host)
-    except ValueError as exc:
-        raise ValueError(f"Invalid TCP socket host: {host}") from exc
-    if not ip.is_loopback:
-        raise ValueError("TCP socket must bind to loopback-only interfaces")
+    if host in _LOCALHOST_ALIASES:
+        if host == "localhost":
+            host = "127.0.0.1"
+    else:
+        try:
+            ip = ip_address(host)
+        except ValueError as exc:
+            raise ValueError(f"Invalid TCP socket host: {host}") from exc
         if not ip.is_loopback:
-            raise ValueError(f"TCP socket host must be localhost; got {host}")
+            raise ValueError("TCP socket must bind to loopback-only interfaces")
         host = str(ip)
 
     try:
@@ -178,8 +189,6 @@ def _parse_tcp_socket(tcp_socket: str) -> tuple[str, int]:
     if port <= 0 or port > 65535:
         raise ValueError(f"TCP socket port out of range: {port}")
 
-    if host == "localhost":
-        host = "127.0.0.1"
     return host, port
 
 
@@ -224,12 +233,13 @@ async def _handle_connection(
     executor: PythonExecutor,
     ready_event: asyncio.Event,
     in_flight: dict[str, asyncio.Task],
-    job_index: dict[str, str],
+    job_index: dict[str, set[str]],
     inflight_lock: asyncio.Lock,
 ) -> None:
     write_lock = asyncio.Lock()
     connection_requests: set[str] = set()
     connection_jobs: dict[str, str] = {}
+    connection_lock = asyncio.Lock()
     try:
         while True:
             message = await read_message(reader)
@@ -261,14 +271,18 @@ async def _handle_connection(
                         in_flight,
                         job_index,
                         inflight_lock,
+                        connection_requests,
+                        connection_jobs,
+                        connection_lock,
                     ),
                     name=f"rrq-executor-{request.request_id}",
                 )
                 async with inflight_lock:
                     in_flight[request.request_id] = task
-                    job_index[request.job_id] = request.request_id
-                connection_requests.add(request.request_id)
-                connection_jobs[request.request_id] = request.job_id
+                    job_index.setdefault(request.job_id, set()).add(request.request_id)
+                async with connection_lock:
+                    connection_requests.add(request.request_id)
+                    connection_jobs[request.request_id] = request.job_id
                 continue
 
             if message_type == "cancel":
@@ -278,8 +292,13 @@ async def _handle_connection(
                 request_id = cancel_request.request_id
                 if request_id is None:
                     async with inflight_lock:
-                        request_id = job_index.get(cancel_request.job_id)
-                if request_id is not None:
+                        request_ids = job_index.get(cancel_request.job_id, set()).copy()
+                    for active_request_id in request_ids:
+                        async with inflight_lock:
+                            task = in_flight.get(active_request_id)
+                        if task is not None:
+                            task.cancel()
+                else:
                     async with inflight_lock:
                         task = in_flight.get(request_id)
                     if task is not None:
@@ -289,14 +308,21 @@ async def _handle_connection(
             raise ValueError(f"Unexpected message type: {message_type}")
     finally:
         if connection_requests:
-            async with inflight_lock:
+            async with connection_lock:
                 pending = list(connection_requests)
             for request_id in pending:
                 async with inflight_lock:
                     task = in_flight.pop(request_id, None)
-                    job_id = connection_jobs.get(request_id)
-                    if job_id is not None:
-                        job_index.pop(job_id, None)
+                async with connection_lock:
+                    job_id = connection_jobs.pop(request_id, None)
+                    connection_requests.discard(request_id)
+                if job_id is not None:
+                    async with inflight_lock:
+                        request_ids = job_index.get(job_id)
+                        if request_ids is not None:
+                            request_ids.discard(request_id)
+                            if not request_ids:
+                                job_index.pop(job_id, None)
                 if task is not None:
                     task.cancel()
         writer.close()
@@ -329,7 +355,7 @@ async def run_python_executor(
     startup_completed = False
     ready_event = asyncio.Event()
     in_flight: dict[str, asyncio.Task] = {}
-    job_index: dict[str, str] = {}
+    job_index: dict[str, set[str]] = {}
     inflight_lock = asyncio.Lock()
     server: asyncio.AbstractServer | None = None
 

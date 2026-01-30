@@ -79,6 +79,55 @@ class JobStore:
         return new_retry_count
         """
 
+        self._atomic_create_job_script = """
+        -- KEYS: [1] = job_key
+        -- ARGV: field/value pairs
+        if redis.call('EXISTS', KEYS[1]) == 1 then
+            return 0
+        end
+        redis.call('HSET', KEYS[1], unpack(ARGV))
+        return 1
+        """
+
+        self._atomic_enqueue_job_script = """
+        -- KEYS: [1] = job_key, [2] = queue_key
+        -- ARGV: field/value pairs..., score, job_id
+        if redis.call('EXISTS', KEYS[1]) == 1 then
+            return 0
+        end
+        redis.call('HSET', KEYS[1], unpack(ARGV, 1, #ARGV - 2))
+        redis.call('ZADD', KEYS[2], ARGV[#ARGV - 1], ARGV[#ARGV])
+        return 1
+        """
+
+    def _serialize_job(self, job: Job) -> dict[str, str]:
+        job_data_dict = job.model_dump(
+            mode="json", exclude={"job_args", "job_kwargs", "result", "trace_context"}
+        )
+
+        job_args_json = json.dumps(job.job_args if job.job_args is not None else None)
+        job_kwargs_json = json.dumps(
+            job.job_kwargs if job.job_kwargs is not None else None
+        )
+        result_json = json.dumps(job.result if job.result is not None else None)
+        trace_context_json = None
+        if job.trace_context is not None:
+            trace_context_json = json.dumps(job.trace_context)
+
+        final_mapping_for_hset = {
+            str(k): str(v) for k, v in job_data_dict.items() if v is not None
+        }
+        final_mapping_for_hset["job_args"] = job_args_json
+        final_mapping_for_hset["job_kwargs"] = job_kwargs_json
+        final_mapping_for_hset["result"] = result_json
+        if trace_context_json is not None:
+            final_mapping_for_hset["trace_context"] = trace_context_json
+
+        if "id" not in final_mapping_for_hset:
+            final_mapping_for_hset["id"] = job.id
+
+        return final_mapping_for_hset
+
     def _format_queue_key(self, queue_name: str) -> str:
         """Normalize a queue name or key into a Redis key for ZSET queues."""
 
@@ -109,39 +158,46 @@ class JobStore:
             job: The Job object to save.
         """
         job_key = f"{JOB_KEY_PREFIX}{job.id}"
-
-        # Dump model excluding fields handled manually
-        job_data_dict = job.model_dump(
-            mode="json", exclude={"job_args", "job_kwargs", "result", "trace_context"}
-        )
-
-        # Manually serialize potentially complex fields to JSON strings
-        job_args_json = json.dumps(job.job_args if job.job_args is not None else None)
-        job_kwargs_json = json.dumps(
-            job.job_kwargs if job.job_kwargs is not None else None
-        )
-        result_json = json.dumps(job.result if job.result is not None else None)
-        trace_context_json = None
-        if job.trace_context is not None:
-            trace_context_json = json.dumps(job.trace_context)
-
-        # Combine base fields (converted to string) with manually serialized ones
-        final_mapping_for_hset = {
-            str(k): str(v) for k, v in job_data_dict.items() if v is not None
-        }
-        final_mapping_for_hset["job_args"] = job_args_json
-        final_mapping_for_hset["job_kwargs"] = job_kwargs_json
-        final_mapping_for_hset["result"] = result_json
-        if trace_context_json is not None:
-            final_mapping_for_hset["trace_context"] = trace_context_json
-
-        # Ensure ID is present
-        if "id" not in final_mapping_for_hset:
-            final_mapping_for_hset["id"] = job.id
+        final_mapping_for_hset = self._serialize_job(job)
 
         if final_mapping_for_hset:  # Avoid HSET with empty mapping
             await self.redis.hset(job_key, mapping=final_mapping_for_hset)
             logger.debug(f"Saved job definition for {job.id} to Redis hash {job_key}.")
+
+    async def save_job_definition_if_absent(self, job: Job) -> bool:
+        """Save a job definition only if the job key does not already exist."""
+        job_key = f"{JOB_KEY_PREFIX}{job.id}"
+        final_mapping_for_hset = self._serialize_job(job)
+        if not final_mapping_for_hset:
+            return True
+        args: list[str] = []
+        for key, value in final_mapping_for_hset.items():
+            args.append(key)
+            args.append(value)
+        created = await self.redis.eval(
+            self._atomic_create_job_script, 1, job_key, *args
+        )
+        return int(created) == 1
+
+    async def atomic_enqueue_job(
+        self, job: Job, queue_name: str, score_ms: float
+    ) -> bool:
+        """Atomically save a job definition and enqueue it if the job ID is new."""
+        job_key = f"{JOB_KEY_PREFIX}{job.id}"
+        queue_key = self._format_queue_key(queue_name)
+        final_mapping_for_hset = self._serialize_job(job)
+        if not final_mapping_for_hset:
+            return True
+        args: list[str] = []
+        for key, value in final_mapping_for_hset.items():
+            args.append(key)
+            args.append(value)
+        args.append(str(score_ms))
+        args.append(job.id)
+        created = await self.redis.eval(
+            self._atomic_enqueue_job_script, 2, job_key, queue_key, *args
+        )
+        return int(created) == 1
 
     async def get_job_definition(self, job_id: str) -> Optional[Job]:
         """Retrieves a job definition from Redis and reconstructs the Job object.

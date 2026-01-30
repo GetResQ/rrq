@@ -99,6 +99,28 @@ async def test_add_job_to_queue_and_get(job_store: JobStore):
 
 
 @pytest.mark.asyncio
+async def test_atomic_enqueue_job_saves_and_queues(job_store: JobStore):
+    queue_name = "atomic_queue"
+    job = Job(function_name="atomic_func")
+
+    created = await job_store.atomic_enqueue_job(job, queue_name, 123.0)
+    assert created is True
+
+    queued = await job_store.get_queued_job_ids(queue_name)
+    assert queued == [job.id]
+
+    loaded = await job_store.get_job_definition(job.id)
+    assert loaded is not None
+    assert loaded.id == job.id
+
+    created_again = await job_store.atomic_enqueue_job(job, queue_name, 456.0)
+    assert created_again is False
+
+    queued_again = await job_store.get_queued_job_ids(queue_name)
+    assert queued_again == [job.id]
+
+
+@pytest.mark.asyncio
 async def test_acquire_and_release_job_lock(job_store: JobStore):
     job_id = f"lock_test_job_{uuid.uuid4()}"
     worker_id_1 = "worker_1"

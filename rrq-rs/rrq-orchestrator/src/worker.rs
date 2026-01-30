@@ -393,8 +393,12 @@ impl RRQWorker {
                         .await;
                 }
             }
-            let _ = store.remove_active_job(&self.worker_id, &job_id).await;
-            let _ = store.release_job_lock(&job_id).await;
+            if let Err(err) = store.remove_active_job(&self.worker_id, &job_id).await {
+                tracing::warn!("failed to remove active job {job_id}: {err}");
+            }
+            if let Err(err) = store.release_job_lock(&job_id).await {
+                tracing::warn!("failed to release job lock {job_id}: {err}");
+            }
         }
 
         Ok(())
@@ -449,6 +453,19 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
     let job_timeout = job
         .job_timeout_seconds
         .unwrap_or(settings.default_job_timeout_seconds);
+    if job_timeout <= 0 {
+        let message = format!("Invalid job timeout: {job_timeout}. Must be positive.");
+        handle_fatal_job_error(&job, &queue_name, &message, &mut job_store).await?;
+        cleanup_running(
+            &job.id,
+            &mut job_store,
+            &worker_id,
+            running_jobs,
+            running_aborts,
+        )
+        .await?;
+        return Ok(());
+    }
     let attempt = job.current_retries + 1;
     let deadline = Utc::now() + chrono::Duration::seconds(job_timeout);
 
@@ -844,7 +861,8 @@ async fn heartbeat_loop(
             "queues".to_string(),
             Value::Array(queues.iter().map(|q| Value::String(q.clone())).collect()),
         );
-        let ttl = settings.worker_health_check_interval_seconds + 10.0;
+        let ttl = settings.worker_health_check_interval_seconds
+            + settings.worker_health_check_ttl_buffer_seconds;
         if let Err(err) = job_store
             .set_worker_health(&worker_id, &health_data, ttl as i64)
             .await
@@ -1036,14 +1054,17 @@ async fn cron_loop(
                     trace_context: None,
                     job_id: None,
                 };
-                let _ = client
+                if let Err(err) = client
                     .enqueue(
                         &due.function_name,
                         due.args.clone(),
                         due.kwargs.clone(),
                         options,
                     )
-                    .await;
+                    .await
+                {
+                    tracing::error!("cron enqueue failed for {}: {err}", due.function_name);
+                }
             }
         }
 
@@ -1481,7 +1502,7 @@ mod tests {
         ctx.settings.default_executor_name = "test".to_string();
         let executor = Arc::new(StaticExecutor::new(
             TestOutcome::Success(json!({"ok": true})),
-            Duration::from_millis(50),
+            Duration::from_millis(1500),
         ));
         let last_request_id = executor.last_request_id.clone();
         let cancelled = executor.cancelled.clone();
@@ -1489,7 +1510,7 @@ mod tests {
         executors.insert("test".to_string(), executor);
         let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
         let options = EnqueueOptions {
-            job_timeout_seconds: Some(0),
+            job_timeout_seconds: Some(1),
             ..Default::default()
         };
         let job = client

@@ -77,6 +77,9 @@ class RRQClient:
         Returns:
             The created Job object if successfully enqueued, or None if enqueueing was denied
             (e.g., due to a unique key conflict).
+
+        Raises:
+            ValueError: If the job timeout is not positive or the job ID already exists.
         """
         # Determine job ID and queue name early for telemetry.
         job_id_to_use = _job_id or str(uuid.uuid4())
@@ -133,6 +136,14 @@ class RRQClient:
                             + timedelta(seconds=max(0, int(remaining))),
                         )
 
+            job_timeout_seconds = (
+                _job_timeout_seconds
+                if _job_timeout_seconds is not None
+                else self.settings.default_job_timeout_seconds
+            )
+            if job_timeout_seconds <= 0:
+                raise ValueError("job_timeout_seconds must be positive")
+
             # Create the Job instance with all provided details and defaults
             job = Job(
                 id=job_id_to_use,
@@ -147,11 +158,7 @@ class RRQClient:
                     if _max_retries is not None
                     else self.settings.default_max_retries
                 ),
-                job_timeout_seconds=(
-                    _job_timeout_seconds
-                    if _job_timeout_seconds is not None
-                    else self.settings.default_job_timeout_seconds
-                ),
+                job_timeout_seconds=job_timeout_seconds,
                 result_ttl_seconds=(
                     _result_ttl_seconds
                     if _result_ttl_seconds is not None
@@ -179,12 +186,11 @@ class RRQClient:
 
             # Save the full job definition and add to queue (ensure unique lock is released on error)
             try:
-                await self.job_store.save_job_definition(job)
-                await self.job_store.add_job_to_queue(
-                    queue_name_to_use,
-                    job.id,
-                    float(score_timestamp_ms),
+                created = await self.job_store.atomic_enqueue_job(
+                    job, queue_name_to_use, float(score_timestamp_ms)
                 )
+                if not created:
+                    raise ValueError("job_id already exists")
             except Exception:
                 if unique_acquired and _unique_key is not None:
                     await self.job_store.release_unique_job_lock(_unique_key)

@@ -177,6 +177,9 @@ impl Producer {
         let job_timeout_seconds = options
             .job_timeout_seconds
             .unwrap_or(self.default_job_timeout_seconds);
+        if job_timeout_seconds <= 0 {
+            anyhow::bail!("job_timeout_seconds must be positive");
+        }
         let result_ttl_seconds = options
             .result_ttl_seconds
             .unwrap_or(self.default_result_ttl_seconds);
@@ -583,6 +586,30 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("function_name cannot be empty"));
+    }
+
+    #[tokio::test]
+    async fn producer_rejects_non_positive_job_timeout() {
+        let _guard = redis_lock().lock().await;
+        let dsn = std::env::var("RRQ_TEST_REDIS_DSN")
+            .unwrap_or_else(|_| "redis://localhost:6379/15".to_string());
+        let client = redis::Client::open(dsn.as_str()).unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let _: () = redis::cmd("FLUSHDB").query_async(&mut conn).await.unwrap();
+
+        let producer = Producer::new(&dsn).await.unwrap();
+        let options = EnqueueOptions {
+            job_timeout_seconds: Some(0),
+            ..Default::default()
+        };
+        let err = producer
+            .enqueue("work", vec![], serde_json::Map::new(), options)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("job_timeout_seconds must be positive")
+        );
     }
 
     #[tokio::test]

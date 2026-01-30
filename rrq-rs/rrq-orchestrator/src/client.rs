@@ -94,6 +94,13 @@ impl RRQClient {
             }
         }
 
+        let job_timeout_seconds = options
+            .job_timeout_seconds
+            .unwrap_or(self.settings.default_job_timeout_seconds);
+        if job_timeout_seconds <= 0 {
+            anyhow::bail!("job_timeout_seconds must be positive");
+        }
+
         let job = Job {
             id: job_id.clone(),
             function_name: function_name.to_string(),
@@ -107,11 +114,7 @@ impl RRQClient {
             max_retries: options
                 .max_retries
                 .unwrap_or(self.settings.default_max_retries),
-            job_timeout_seconds: Some(
-                options
-                    .job_timeout_seconds
-                    .unwrap_or(self.settings.default_job_timeout_seconds),
-            ),
+            job_timeout_seconds: Some(job_timeout_seconds),
             result_ttl_seconds: Some(
                 options
                     .result_ttl_seconds
@@ -253,5 +256,23 @@ mod tests {
         assert!(delta <= 1);
         let ttl = ctx.store.get_lock_ttl("no-ttl").await.unwrap();
         assert_eq!(ttl, 0);
+    }
+
+    #[tokio::test]
+    async fn enqueue_rejects_non_positive_timeout() {
+        let ctx = RedisTestContext::new().await.unwrap();
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let options = EnqueueOptions {
+            job_timeout_seconds: Some(0),
+            ..Default::default()
+        };
+        let err = client
+            .enqueue("task", Vec::new(), serde_json::Map::new(), options)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("job_timeout_seconds must be positive")
+        );
     }
 }

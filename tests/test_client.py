@@ -159,20 +159,20 @@ async def test_enqueue_with_user_specified_job_id(
     assert stored_job is not None
     assert stored_job.id == user_job_id
 
-    # Try to enqueue again with same ID - current design allows this, overwriting definition
-    # and adding to queue again. JobStore doesn't prevent duplicate job definitions by ID alone.
-    # Uniqueness is handled by _unique_key or by job processing logic (e.g. if job already complete).
-    enqueued_job_again = await rrq_client.enqueue(
-        func_name, "new_arg", _job_id=user_job_id
-    )
-    assert enqueued_job_again is not None
-    assert enqueued_job_again.id == user_job_id
-    assert enqueued_job_again.job_args == ["new_arg"]
-    assert enqueued_job_again.job_kwargs == {}
+    # Try to enqueue again with same ID - should be rejected to avoid overwriting.
+    with pytest.raises(ValueError):
+        await rrq_client.enqueue(func_name, "new_arg", _job_id=user_job_id)
 
-    stored_job_again = await job_store_for_client_tests.get_job_definition(user_job_id)
-    assert stored_job_again is not None
-    assert stored_job_again.id == user_job_id
+
+@pytest.mark.asyncio
+async def test_enqueue_rejects_non_positive_timeout():
+    settings = RRQSettings()
+    store = DummyStore()
+    client = RRQClient(settings, job_store=cast(JobStore, store))
+    with pytest.raises(ValueError):
+        await client.enqueue("func", _job_timeout_seconds=0)
+    with pytest.raises(ValueError):
+        await client.enqueue("func", _job_timeout_seconds=-5)
 
 
 @pytest.mark.asyncio
@@ -234,6 +234,15 @@ class DummyStore:
 
     async def add_job_to_queue(self, queue_name, job_id, score):
         self.queued.append((queue_name, job_id, score))
+
+    async def atomic_enqueue_job(
+        self, job: Job, queue_name: str, score_ms: float
+    ) -> bool:
+        if any(saved.id == job.id for saved in self.saved):
+            return False
+        self.saved.append(job)
+        self.queued.append((queue_name, job.id, score_ms))
+        return True
 
 
 class _TestEnqueueSpan(EnqueueSpan):

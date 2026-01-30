@@ -126,6 +126,11 @@ fn env_overrides() -> Result<Value> {
     )?;
     set_env_float(
         &mut payload,
+        "worker_health_check_ttl_buffer_seconds",
+        "RRQ_WORKER_HEALTH_CHECK_TTL_BUFFER_SECONDS",
+    )?;
+    set_env_float(
+        &mut payload,
         "base_retry_delay_seconds",
         "RRQ_BASE_RETRY_DELAY_SECONDS",
     )?;
@@ -216,34 +221,34 @@ mod tests {
 
     struct EnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
-        key: &'static str,
-        prev: Option<String>,
+        prev: Vec<(&'static str, Option<String>)>,
     }
 
     impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
+        fn set_many(pairs: &[(&'static str, &str)]) -> Self {
             let lock = env_lock().lock().unwrap();
-            let prev = std::env::var(key).ok();
-            unsafe {
-                std::env::set_var(key, value);
+            let mut prev = Vec::with_capacity(pairs.len());
+            for (key, value) in pairs {
+                prev.push((*key, std::env::var(key).ok()));
+                unsafe {
+                    std::env::set_var(key, value);
+                }
             }
-            Self {
-                _lock: lock,
-                key,
-                prev,
-            }
+            Self { _lock: lock, prev }
         }
     }
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            if let Some(prev) = self.prev.take() {
-                unsafe {
-                    std::env::set_var(self.key, prev);
-                }
-            } else {
-                unsafe {
-                    std::env::remove_var(self.key);
+            for (key, prev) in self.prev.drain(..) {
+                if let Some(value) = prev {
+                    unsafe {
+                        std::env::set_var(key, value);
+                    }
+                } else {
+                    unsafe {
+                        std::env::remove_var(key);
+                    }
                 }
             }
         }
@@ -268,7 +273,10 @@ worker_concurrency = 2
 alpha = "beta"
 "#;
         fs::write(&tmp_path, payload).unwrap();
-        let _queue_guard = EnvGuard::set("RRQ_DEFAULT_QUEUE_NAME", "from_env");
+        let _guard = EnvGuard::set_many(&[
+            ("RRQ_DEFAULT_QUEUE_NAME", "from_env"),
+            ("RRQ_WORKER_HEALTH_CHECK_TTL_BUFFER_SECONDS", "12.5"),
+        ]);
         let settings = load_toml_settings(Some(tmp_path.to_str().unwrap())).unwrap();
         assert_eq!(settings.default_queue_name, "from_env");
         assert_eq!(
@@ -279,6 +287,7 @@ alpha = "beta"
             settings.worker_concurrency,
             RRQSettings::default().worker_concurrency
         );
+        assert_eq!(settings.worker_health_check_ttl_buffer_seconds, 12.5);
         let _ = fs::remove_file(&tmp_path);
     }
 }
