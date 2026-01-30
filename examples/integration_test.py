@@ -10,6 +10,7 @@ import argparse
 import os
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -59,6 +60,8 @@ def _write_config(
     default_executor: str,
     python_cmd: list[str] | None = None,
     rust_cmd: list[str] | None = None,
+    python_tcp_socket: str | None = None,
+    rust_tcp_socket: str | None = None,
     max_in_flight: int = 4,
     executor_routes: dict[str, str] | None = None,
     default_max_retries: int | None = None,
@@ -86,9 +89,11 @@ def _write_config(
                 f"cmd = {_toml_list(python_cmd)}",
                 "pool_size = 1",
                 f"max_in_flight = {max_in_flight}",
-                "",
             ]
         )
+        if python_tcp_socket is not None:
+            lines.append(f'tcp_socket = "{python_tcp_socket}"')
+        lines.append("")
 
     if rust_cmd is not None:
         lines.extend(
@@ -98,9 +103,11 @@ def _write_config(
                 f"cmd = {_toml_list(rust_cmd)}",
                 "pool_size = 1",
                 f"max_in_flight = {max_in_flight}",
-                "",
             ]
         )
+        if rust_tcp_socket is not None:
+            lines.append(f'tcp_socket = "{rust_tcp_socket}"')
+        lines.append("")
 
     if executor_routes:
         lines.append("[rrq.executor_routes]")
@@ -122,6 +129,16 @@ def _resolve_rrq_cmd() -> list[str]:
     rrq_path = shutil.which("rrq")
     if rrq_path:
         return [rrq_path]
+
+    repo_root = Path(__file__).resolve().parents[1]
+    repo_candidates = [
+        repo_root / "rrq-py" / "rrq" / "bin" / "rrq",
+        repo_root / "rrq-rs" / "target" / "release" / "rrq",
+        repo_root / "rrq-rs" / "target" / "debug" / "rrq",
+    ]
+    for candidate in repo_candidates:
+        if candidate.exists():
+            return [str(candidate)]
 
     raise SystemExit(
         "rrq CLI not found on PATH. Install it via `pip install rrq` or "
@@ -228,11 +245,25 @@ def _resolve_rust_executor_cmd(override: str | None) -> list[str]:
     if executor_path:
         return [executor_path]
 
+    repo_root = Path(__file__).resolve().parents[1]
+    repo_candidate = (
+        repo_root / "rrq-rs" / "target" / "debug" / "examples" / "socket_executor"
+    )
+    if repo_candidate.exists():
+        return [str(repo_candidate)]
+
     raise SystemExit(
         "socket_executor not found on PATH. Install it via "
         "`cargo install rrq-executor --example socket_executor` or provide "
         "--rust-executor-cmd."
     )
+
+
+def _pick_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        return int(sock.getsockname()[1])
 
 
 def main() -> int:
@@ -315,12 +346,15 @@ def main() -> int:
         python_config = temp_path / "rrq_python.toml"
         rust_config = temp_path / "rrq_rust.toml"
         mixed_config = temp_path / "rrq_mixed.toml"
+        python_tcp_socket = f"127.0.0.1:{_pick_free_port()}"
+        rust_tcp_socket = f"127.0.0.1:{_pick_free_port()}"
 
         _write_config(
             python_config,
             redis_dsn=args.redis_dsn,
             default_executor="python",
             python_cmd=python_executor_cmd,
+            python_tcp_socket=python_tcp_socket,
             max_in_flight=args.max_in_flight,
             default_max_retries=3,
             base_retry_delay_seconds=1.0,
@@ -331,6 +365,7 @@ def main() -> int:
             redis_dsn=args.redis_dsn,
             default_executor="rust",
             rust_cmd=rust_executor_cmd,
+            rust_tcp_socket=rust_tcp_socket,
             max_in_flight=args.max_in_flight,
             default_max_retries=3,
             base_retry_delay_seconds=1.0,
@@ -342,6 +377,8 @@ def main() -> int:
             default_executor="python",
             python_cmd=python_executor_cmd,
             rust_cmd=rust_executor_cmd,
+            python_tcp_socket=python_tcp_socket,
+            rust_tcp_socket=rust_tcp_socket,
             max_in_flight=args.max_in_flight,
             executor_routes={"rust_queue": "rust"},
             default_max_retries=3,
