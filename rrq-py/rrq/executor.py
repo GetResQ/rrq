@@ -10,10 +10,8 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
-from .client import RRQClient
 from .exc import RetryJob
 from .registry import JobRegistry
-from .settings import RRQSettings
 from .telemetry import get_telemetry
 
 logger = logging.getLogger(__name__)
@@ -81,13 +79,9 @@ class PythonExecutor:
         self,
         *,
         job_registry: JobRegistry,
-        settings: RRQSettings,
-        client: RRQClient,
         worker_id: str | None,
     ) -> None:
         self.job_registry = job_registry
-        self.settings = settings
-        self.client = client
         self.worker_id = worker_id
 
     async def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
@@ -108,10 +102,8 @@ class PythonExecutor:
             "job_id": request.context.job_id,
             "job_try": request.context.attempt,
             "enqueue_time": request.context.enqueue_time,
-            "settings": self.settings,
             "worker_id": worker_id,
             "queue_name": request.context.queue_name,
-            "rrq_client": self.client,
             "deadline": request.context.deadline,
             "trace_context": request.context.trace_context,
         }

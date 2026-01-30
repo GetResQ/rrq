@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 import os
 from datetime import datetime, timezone
@@ -26,24 +27,6 @@ class ProducerConfigModel(BaseModel):
     result_ttl_seconds: int | None = None
     idempotency_ttl_seconds: int | None = None
 
-    @field_validator("job_timeout_seconds", "idempotency_ttl_seconds")
-    @classmethod
-    def _validate_positive_int(cls, value: int | None) -> int | None:
-        if value is None:
-            return value
-        if value <= 0:
-            raise ValueError("must be positive")
-        return value
-
-    @field_validator("max_retries", "result_ttl_seconds")
-    @classmethod
-    def _validate_non_negative_int(cls, value: int | None) -> int | None:
-        if value is None:
-            return value
-        if value < 0:
-            raise ValueError("must be non-negative")
-        return value
-
 
 class EnqueueOptionsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -63,46 +46,6 @@ class EnqueueOptionsModel(BaseModel):
     rate_limit_seconds: float | None = None
     debounce_key: str | None = None
     debounce_seconds: float | None = None
-
-    @field_validator("unique_ttl_seconds", "job_timeout_seconds")
-    @classmethod
-    def _validate_positive_int(cls, value: int | None) -> int | None:
-        if value is None:
-            return value
-        if value <= 0:
-            raise ValueError("must be positive")
-        return value
-
-    @field_validator("max_retries", "result_ttl_seconds")
-    @classmethod
-    def _validate_non_negative_int(cls, value: int | None) -> int | None:
-        if value is None:
-            return value
-        if value < 0:
-            raise ValueError("must be non-negative")
-        return value
-
-    @field_validator("defer_by_seconds")
-    @classmethod
-    def _validate_non_negative_float(cls, value: float | None) -> float | None:
-        if value is None:
-            return value
-        if not float("-inf") < value < float("inf"):
-            raise ValueError("must be finite")
-        if value < 0:
-            raise ValueError("must be non-negative")
-        return value
-
-    @field_validator("rate_limit_seconds", "debounce_seconds")
-    @classmethod
-    def _validate_positive_float(cls, value: float | None) -> float | None:
-        if value is None:
-            return value
-        if not float("-inf") < value < float("inf"):
-            raise ValueError("must be finite")
-        if value <= 0:
-            raise ValueError("must be positive")
-        return value
 
     @field_validator("defer_until", "enqueue_time")
     @classmethod
@@ -131,6 +74,19 @@ class EnqueueResponseModel(BaseModel):
 
     status: Literal["enqueued", "rate_limited"]
     job_id: str | None = None
+
+
+class ProducerConstantsModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    default_queue_name: str
+    default_max_retries: int
+    default_job_timeout_seconds: int
+    default_result_ttl_seconds: int
+    default_unique_job_lock_ttl_seconds: int
+    job_key_prefix: str
+    queue_key_prefix: str
+    idempotency_key_prefix: str
 
 
 def _find_library() -> Path:
@@ -165,6 +121,8 @@ def _configure_library(lib: ctypes.CDLL) -> None:
     lib.rrq_producer_new.restype = ctypes.c_void_p
     lib.rrq_producer_free.argtypes = [ctypes.c_void_p]
     lib.rrq_producer_free.restype = None
+    lib.rrq_producer_constants.argtypes = [ctypes.POINTER(ctypes.c_char_p)]
+    lib.rrq_producer_constants.restype = ctypes.c_void_p
     lib.rrq_producer_enqueue.argtypes = [
         ctypes.c_void_p,
         ctypes.c_char_p,
@@ -199,6 +157,26 @@ def _take_error(err_ptr: ctypes.c_char_p | None) -> None:
     finally:
         _get_library().rrq_string_free(err_ptr)
     raise RustProducerError(message)
+
+
+@functools.lru_cache(maxsize=1)
+def get_producer_constants() -> ProducerConstantsModel:
+    lib = _get_library()
+    err = ctypes.c_char_p()
+    result_ptr = lib.rrq_producer_constants(ctypes.byref(err))
+    if not result_ptr:
+        _take_error(err)
+        raise RustProducerError("Failed to load producer constants")
+    try:
+        result_json = ctypes.string_at(result_ptr).decode("utf-8", errors="replace")
+    finally:
+        _get_library().rrq_string_free(result_ptr)
+    try:
+        return ProducerConstantsModel.model_validate_json(result_json)
+    except json.JSONDecodeError as exc:
+        raise RustProducerError(f"Invalid response from producer: {exc}") from exc
+    except ValidationError as exc:
+        raise RustProducerError(f"Invalid response from producer: {exc}") from exc
 
 
 class RustProducer:

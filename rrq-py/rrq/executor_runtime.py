@@ -17,12 +17,10 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from .client import RRQClient
 from .executor import ExecutionError, ExecutionOutcome, ExecutionRequest, PythonExecutor
 from .executor_settings import PythonExecutorSettings
 from .protocol import read_message, write_message
 from .registry import JobRegistry
-from .store import JobStore
 
 logger = logging.getLogger(__name__)
 
@@ -434,19 +432,14 @@ async def run_python_executor(
 ) -> None:
     executor_settings = load_executor_settings(settings_object_path)
     transport, target = resolve_executor_socket(socket_path, tcp_socket)
-    settings = executor_settings.rrq_settings
     job_registry = executor_settings.job_registry
     if not isinstance(job_registry, JobRegistry):
         raise RuntimeError(
             "PythonExecutorSettings.job_registry must be a JobRegistry instance"
         )
 
-    job_store = JobStore(settings=settings)
-    client = RRQClient(settings=settings, job_store=job_store)
     executor = PythonExecutor(
         job_registry=job_registry,
-        settings=settings,
-        client=client,
         worker_id=None,
     )
     startup_completed = False
@@ -486,8 +479,6 @@ async def run_python_executor(
         if startup_completed:
             await _call_hook(executor_settings.on_shutdown)
         await executor.close()
-        await client.close()
-        await job_store.aclose()
 
 
 def main() -> None:

@@ -18,6 +18,7 @@ type BunLibrary = {
   symbols: {
     rrq_producer_new: (config: unknown, errorOut: number) => number;
     rrq_producer_free: (handle: number) => void;
+    rrq_producer_constants: (errorOut: number) => number;
     rrq_producer_enqueue: (handle: number, request: unknown, errorOut: number) => number;
     rrq_string_free: (ptr: number) => void;
   };
@@ -28,6 +29,7 @@ type BunLibrary = {
 type NodeLibrary = {
   rrq_producer_new: (config: string, errorOut: Array<unknown>) => unknown;
   rrq_producer_free: (handle: unknown) => void;
+  rrq_producer_constants: (errorOut: Array<unknown>) => unknown;
   rrq_producer_enqueue: (handle: unknown, request: string, errorOut: Array<unknown>) => unknown;
   rrq_string_free: (ptr: unknown) => void;
   decode: (ptr: unknown, type: string) => string;
@@ -83,6 +85,7 @@ function loadNodeLibrary(): NodeLibrary {
     "void * rrq_producer_new(const char *config_json, _Out_ void **error_out)",
   );
   const rrq_producer_free = lib.func("void rrq_producer_free(void *handle)");
+  const rrq_producer_constants = lib.func("void * rrq_producer_constants(_Out_ void **error_out)");
   const rrq_producer_enqueue = lib.func(
     "void * rrq_producer_enqueue(void *handle, const char *request_json, _Out_ void **error_out)",
   );
@@ -91,6 +94,7 @@ function loadNodeLibrary(): NodeLibrary {
   return {
     rrq_producer_new,
     rrq_producer_free,
+    rrq_producer_constants,
     rrq_producer_enqueue,
     rrq_string_free,
     decode: koffi.decode,
@@ -126,6 +130,7 @@ function loadBunLibrary(): BunLibrary {
   const lib = dlopen(libPath, {
     rrq_producer_new: { args: [FFIType.cstring, FFIType.ptr], returns: FFIType.ptr },
     rrq_producer_free: { args: [FFIType.ptr], returns: FFIType.void },
+    rrq_producer_constants: { args: [FFIType.ptr], returns: FFIType.ptr },
     rrq_producer_enqueue: {
       args: [FFIType.ptr, FFIType.cstring, FFIType.ptr],
       returns: FFIType.ptr,
@@ -166,6 +171,60 @@ function bunTakeError(lib: BunLibrary, errOut: BigUint64Array): string | null {
 function encodeCString(value: string): Uint8Array {
   const bytes = new TextEncoder().encode(`${value}\0`);
   return bytes;
+}
+
+let cachedConstants: Record<string, unknown> | null = null;
+
+export function getProducerConstants(): Record<string, unknown> {
+  if (cachedConstants) {
+    return cachedConstants;
+  }
+
+  if (isBunRuntime()) {
+    const lib = getBunLibrary();
+    const errOut = bunAllocErrorOut();
+    const resultPtr = lib.symbols.rrq_producer_constants(lib.ptr(errOut));
+    if (!resultPtr) {
+      const message = bunTakeError(lib, errOut);
+      throw new RustProducerError(message ?? "Failed to load producer constants");
+    }
+    let json: string;
+    try {
+      json = new lib.CString(resultPtr).toString();
+    } finally {
+      lib.symbols.rrq_string_free(resultPtr);
+    }
+    try {
+      cachedConstants = JSON.parse(json) as Record<string, unknown>;
+      return cachedConstants;
+    } catch (error) {
+      throw new RustProducerError(`Invalid response from producer: ${String(error)}`);
+    }
+  }
+
+  const lib = getLibrary();
+  const errOut: Array<unknown> = [null];
+  const resultPtr = lib.rrq_producer_constants(errOut);
+  if (!resultPtr) {
+    const errPtr = errOut[0];
+    const message = errPtr ? lib.decode(errPtr, "char *") : null;
+    if (errPtr) {
+      lib.rrq_string_free(errPtr);
+    }
+    throw new RustProducerError(message ?? "Failed to load producer constants");
+  }
+  let json: string;
+  try {
+    json = lib.decode(resultPtr, "char *");
+  } finally {
+    lib.rrq_string_free(resultPtr);
+  }
+  try {
+    cachedConstants = JSON.parse(json) as Record<string, unknown>;
+    return cachedConstants;
+  } catch (error) {
+    throw new RustProducerError(`Invalid response from producer: ${String(error)}`);
+  }
 }
 
 export class RustProducer {

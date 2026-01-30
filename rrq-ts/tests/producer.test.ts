@@ -21,13 +21,13 @@ class StubProducer {
 }
 
 describe("RRQClient producer requests", () => {
-  it("uses unique mode when uniqueKey is provided", async () => {
+  it("omits mode when uniqueKey is provided", async () => {
     const stub = new StubProducer({ job_id: "job-1" });
     const client = new RRQClient(DEFAULT_SETTINGS, stub as unknown as RustProducer);
 
     await client.enqueue("handler", { uniqueKey: "user-1" });
 
-    expect(stub.lastRequest?.mode).toBe("unique");
+    expect(stub.lastRequest?.mode).toBeUndefined();
     expect((stub.lastRequest?.options as any)?.unique_key).toBe("user-1");
   });
 
@@ -41,10 +41,12 @@ describe("RRQClient producer requests", () => {
     });
 
     expect(result).toBeNull();
-    expect(stub.lastRequest?.mode).toBe("rate_limit");
+    const options = (stub.lastRequest?.options as any) ?? {};
+    expect(options.rate_limit_key).toBe("user-1");
+    expect(options.rate_limit_seconds).toBe(5);
   });
 
-  it("sends debounce fields with debounce mode", async () => {
+  it("sends debounce fields without client-side deferral pruning", async () => {
     const stub = new StubProducer({ job_id: "job-2" });
     const client = new RRQClient(DEFAULT_SETTINGS, stub as unknown as RustProducer);
 
@@ -54,11 +56,11 @@ describe("RRQClient producer requests", () => {
       deferBySeconds: 10,
     });
 
-    expect(stub.lastRequest?.mode).toBe("debounce");
+    expect(stub.lastRequest?.mode).toBeUndefined();
     const options = (stub.lastRequest?.options as any) ?? {};
     expect(options.debounce_key).toBe("user-2");
     expect(options.debounce_seconds).toBe(3);
-    expect(options.defer_by_seconds).toBeUndefined();
+    expect(options.defer_by_seconds).toBe(10);
   });
 
   it("throws if producer returns no job_id", async () => {

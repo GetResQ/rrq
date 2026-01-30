@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 
 import { createClient, type RedisClientType } from "redis";
 
-import { DEFAULT_QUEUE_NAME, IDEMPOTENCY_KEY_PREFIX, JOB_KEY_PREFIX } from "../src/constants.js";
+import { getProducerConstants } from "../src/producer_ffi.js";
 import { RRQClient } from "../src/producer.js";
 
 const redisUrl = process.env.RRQ_TEST_REDIS_DSN ?? "redis://localhost:6379/4";
+const CONSTANTS = getProducerConstants();
 
 let redis: RedisClientType;
 let client: RRQClient;
@@ -30,11 +31,11 @@ describe("RRQClient producer integration", () => {
       kwargs: { ok: true },
     });
 
-    const jobKey = `${JOB_KEY_PREFIX}${jobId}`;
+    const jobKey = `${CONSTANTS.job_key_prefix}${jobId}`;
     const status = await redis.hGet(jobKey, "status");
     expect(status).toBe("PENDING");
 
-    const score = await redis.zScore(DEFAULT_QUEUE_NAME, jobId);
+    const score = await redis.zScore(CONSTANTS.default_queue_name, jobId);
     expect(score).not.toBeNull();
   });
 
@@ -43,7 +44,7 @@ describe("RRQClient producer integration", () => {
     const startMs = Date.now();
     const jobId = await client.enqueueDeferred("handler", { deferBySeconds: delaySeconds });
 
-    const score = await redis.zScore(DEFAULT_QUEUE_NAME, jobId);
+    const score = await redis.zScore(CONSTANTS.default_queue_name, jobId);
     expect(score).not.toBeNull();
     const minScore = startMs + delaySeconds * 1000 - 1000;
     expect(score as number).toBeGreaterThanOrEqual(minScore);
@@ -55,7 +56,7 @@ describe("RRQClient producer integration", () => {
     const job2 = await client.enqueue("handler", { uniqueKey });
     expect(job2).toBe(job1);
 
-    const idemValue = await redis.get(`${IDEMPOTENCY_KEY_PREFIX}${uniqueKey}`);
+    const idemValue = await redis.get(`${CONSTANTS.idempotency_key_prefix}${uniqueKey}`);
     expect(idemValue).not.toBeNull();
   });
 

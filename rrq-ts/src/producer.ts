@@ -38,23 +38,23 @@ const ProducerOptionsSchema = z
     queue_name: z.string().optional(),
     job_id: z.string().optional(),
     unique_key: z.string().optional(),
-    unique_ttl_seconds: z.number().int().positive().optional(),
-    max_retries: z.number().int().nonnegative().optional(),
-    job_timeout_seconds: z.number().int().positive().optional(),
-    result_ttl_seconds: z.number().int().nonnegative().optional(),
+    unique_ttl_seconds: z.number().int().optional(),
+    max_retries: z.number().int().optional(),
+    job_timeout_seconds: z.number().int().optional(),
+    result_ttl_seconds: z.number().int().optional(),
     trace_context: z.record(z.string()).optional(),
     defer_until: z.string().optional(),
-    defer_by_seconds: z.number().finite().min(0).optional(),
+    defer_by_seconds: z.number().optional(),
     rate_limit_key: z.string().optional(),
-    rate_limit_seconds: z.number().finite().positive().optional(),
+    rate_limit_seconds: z.number().optional(),
     debounce_key: z.string().optional(),
-    debounce_seconds: z.number().finite().positive().optional(),
+    debounce_seconds: z.number().optional(),
   })
   .strict();
 
 const ProducerRequestSchema = z
   .object({
-    mode: z.string(),
+    mode: z.string().optional(),
     function_name: z.string().min(1),
     args: z.array(z.any()),
     kwargs: z.record(z.any()),
@@ -104,9 +104,7 @@ export class RRQClient {
   }
 
   async enqueue(functionName: string, options: EnqueueOptions = {}): Promise<string> {
-    const mode =
-      options.uniqueKey !== undefined && options.uniqueKey !== null ? "unique" : "enqueue";
-    const response = await this.callProducer(mode, functionName, options);
+    const response = await this.callProducer(functionName, options);
     return this.expectJobId(response);
   }
 
@@ -122,14 +120,12 @@ export class RRQClient {
     functionName: string,
     options: RateLimitOptions,
   ): Promise<string | null> {
-    const response = await this.callProducer("rate_limit", functionName, options);
+    const response = await this.callProducer(functionName, options);
     return response.job_id ?? null;
   }
 
   async enqueueWithDebounce(functionName: string, options: DebounceOptions): Promise<string> {
-    const response = await this.callProducer("debounce", functionName, options, {
-      includeDefers: false,
-    });
+    const response = await this.callProducer(functionName, options);
     return this.expectJobId(response);
   }
 
@@ -138,18 +134,19 @@ export class RRQClient {
   }
 
   private async callProducer(
-    mode: string,
     functionName: string,
     options: EnqueueOptions,
-    config: { includeDefers?: boolean } = {},
+    mode?: string,
   ): Promise<ProducerResponse> {
-    const request = {
-      mode,
+    const request: Record<string, unknown> = {
       function_name: functionName,
       args: options.args ?? [],
       kwargs: options.kwargs ?? {},
-      options: this.buildOptions(options, config),
+      options: this.buildOptions(options),
     };
+    if (mode) {
+      request.mode = mode;
+    }
 
     try {
       ProducerRequestSchema.parse(request);
@@ -167,11 +164,7 @@ export class RRQClient {
     }
   }
 
-  private buildOptions(
-    options: EnqueueOptions,
-    config: { includeDefers?: boolean },
-  ): Record<string, unknown> {
-    const includeDefers = config.includeDefers ?? true;
+  private buildOptions(options: EnqueueOptions): Record<string, unknown> {
     const payload: Record<string, unknown> = {
       queue_name: options.queueName,
       job_id: options.jobId,
@@ -183,30 +176,19 @@ export class RRQClient {
       trace_context: options.traceContext ?? undefined,
     };
 
-    if (includeDefers) {
-      if (options.deferUntil) {
-        payload.defer_until = formatDeferUntil(options.deferUntil);
-      }
-      if (options.deferBySeconds !== undefined) {
-        if (!Number.isFinite(options.deferBySeconds)) {
-          throw new RustProducerError("deferBySeconds must be finite");
-        }
-        payload.defer_by_seconds = Math.max(0, options.deferBySeconds);
-      }
+    if (options.deferUntil) {
+      payload.defer_until = formatDeferUntil(options.deferUntil);
+    }
+    if (options.deferBySeconds !== undefined) {
+      payload.defer_by_seconds = options.deferBySeconds;
     }
 
     if ("rateLimitKey" in options) {
-      if (!Number.isFinite((options as RateLimitOptions).rateLimitSeconds)) {
-        throw new RustProducerError("rateLimitSeconds must be finite");
-      }
       payload.rate_limit_key = (options as RateLimitOptions).rateLimitKey;
       payload.rate_limit_seconds = (options as RateLimitOptions).rateLimitSeconds;
     }
 
     if ("debounceKey" in options) {
-      if (!Number.isFinite((options as DebounceOptions).debounceSeconds)) {
-        throw new RustProducerError("debounceSeconds must be finite");
-      }
       payload.debounce_key = (options as DebounceOptions).debounceKey;
       payload.debounce_seconds = (options as DebounceOptions).debounceSeconds;
     }

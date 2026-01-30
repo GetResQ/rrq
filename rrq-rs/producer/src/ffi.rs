@@ -1,6 +1,6 @@
 use crate::{EnqueueOptions, Producer, ProducerConfig};
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::any::Any;
 use std::collections::HashMap;
@@ -12,6 +12,18 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 const MAX_MILLIS: i64 = i64::MAX / 2;
+
+#[derive(Debug, Serialize)]
+struct ProducerConstantsPayload {
+    default_queue_name: &'static str,
+    default_max_retries: i64,
+    default_job_timeout_seconds: i64,
+    default_result_ttl_seconds: i64,
+    default_unique_job_lock_ttl_seconds: i64,
+    job_key_prefix: &'static str,
+    queue_key_prefix: &'static str,
+    idempotency_key_prefix: &'static str,
+}
 
 pub struct ProducerHandle {
     runtime: tokio::runtime::Runtime,
@@ -70,6 +82,21 @@ struct EnqueueRequestPayload {
 struct EnqueueResponsePayload {
     status: String,
     job_id: Option<String>,
+}
+
+fn infer_mode(options: &EnqueueOptionsPayload) -> Result<EnqueueMode, String> {
+    let has_rate_limit = options.rate_limit_key.is_some() || options.rate_limit_seconds.is_some();
+    let has_debounce = options.debounce_key.is_some() || options.debounce_seconds.is_some();
+    if has_rate_limit && has_debounce {
+        return Err("rate_limit and debounce options are mutually exclusive".to_string());
+    }
+    if has_rate_limit {
+        return Ok(EnqueueMode::RateLimit);
+    }
+    if has_debounce {
+        return Ok(EnqueueMode::Debounce);
+    }
+    Ok(EnqueueMode::Enqueue)
 }
 
 fn set_error(error_out: *mut *mut c_char, message: impl AsRef<str>) {
@@ -225,6 +252,27 @@ pub extern "C" fn rrq_producer_free(handle: *mut ProducerHandle) {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn rrq_producer_constants(error_out: *mut *mut c_char) -> *mut c_char {
+    with_unwind(error_out, || {
+        let payload = ProducerConstantsPayload {
+            default_queue_name: crate::DEFAULT_QUEUE_NAME,
+            default_max_retries: crate::DEFAULT_MAX_RETRIES,
+            default_job_timeout_seconds: crate::DEFAULT_JOB_TIMEOUT_SECONDS,
+            default_result_ttl_seconds: crate::DEFAULT_RESULT_TTL_SECONDS,
+            default_unique_job_lock_ttl_seconds: crate::DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
+            job_key_prefix: crate::JOB_KEY_PREFIX,
+            queue_key_prefix: crate::QUEUE_KEY_PREFIX,
+            idempotency_key_prefix: crate::IDEMPOTENCY_KEY_PREFIX,
+        };
+
+        let json = serde_json::to_string(&payload).map_err(|err| err.to_string())?;
+        let cstr = CString::new(json).map_err(|err| err.to_string())?;
+        Ok(cstr.into_raw())
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn rrq_producer_enqueue(
     handle: *mut ProducerHandle,
     request_json: *const c_char,
@@ -241,7 +289,6 @@ pub extern "C" fn rrq_producer_enqueue(
 
         let args = request.args.unwrap_or_default();
         let kwargs = request.kwargs.unwrap_or_default();
-        let mode = request.mode.unwrap_or(EnqueueMode::Enqueue);
         let options_payload = request.options.unwrap_or(EnqueueOptionsPayload {
             queue_name: None,
             job_id: None,
@@ -259,6 +306,11 @@ pub extern "C" fn rrq_producer_enqueue(
             debounce_key: None,
             debounce_seconds: None,
         });
+        let mode = match request.mode {
+            Some(EnqueueMode::Unique) | Some(EnqueueMode::Deferred) => EnqueueMode::Enqueue,
+            Some(mode) => mode,
+            None => infer_mode(&options_payload)?,
+        };
         let EnqueueOptionsPayload {
             queue_name,
             job_id,
@@ -277,10 +329,10 @@ pub extern "C" fn rrq_producer_enqueue(
             debounce_seconds,
         } = options_payload;
 
-        if let Some(ttl) = unique_ttl_seconds {
-            if ttl <= 0 {
-                return Err("unique_ttl_seconds must be positive".to_string());
-            }
+        if let Some(ttl) = unique_ttl_seconds
+            && ttl <= 0
+        {
+            return Err("unique_ttl_seconds must be positive".to_string());
         }
 
         let enqueue_time = match enqueue_time_raw {
@@ -409,4 +461,58 @@ pub extern "C" fn rrq_string_free(ptr: *mut c_char) {
             drop(CString::from_raw(ptr));
         }
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+    use std::ffi::CStr;
+
+    #[derive(Debug, Deserialize)]
+    struct ConstantsPayload {
+        default_queue_name: String,
+        default_max_retries: i64,
+        default_job_timeout_seconds: i64,
+        default_result_ttl_seconds: i64,
+        default_unique_job_lock_ttl_seconds: i64,
+        job_key_prefix: String,
+        queue_key_prefix: String,
+        idempotency_key_prefix: String,
+    }
+
+    #[test]
+    fn producer_constants_payload_matches_defaults() {
+        let mut err: *mut c_char = ptr::null_mut();
+        let ptr = rrq_producer_constants(&mut err);
+        assert!(err.is_null());
+        assert!(!ptr.is_null());
+
+        let json = unsafe { CStr::from_ptr(ptr) }
+            .to_str()
+            .expect("constants json utf-8");
+        let payload: ConstantsPayload = serde_json::from_str(json).expect("constants json parses");
+        rrq_string_free(ptr);
+
+        assert_eq!(payload.default_queue_name, crate::DEFAULT_QUEUE_NAME);
+        assert_eq!(payload.default_max_retries, crate::DEFAULT_MAX_RETRIES);
+        assert_eq!(
+            payload.default_job_timeout_seconds,
+            crate::DEFAULT_JOB_TIMEOUT_SECONDS
+        );
+        assert_eq!(
+            payload.default_result_ttl_seconds,
+            crate::DEFAULT_RESULT_TTL_SECONDS
+        );
+        assert_eq!(
+            payload.default_unique_job_lock_ttl_seconds,
+            crate::DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS
+        );
+        assert_eq!(payload.job_key_prefix, crate::JOB_KEY_PREFIX);
+        assert_eq!(payload.queue_key_prefix, crate::QUEUE_KEY_PREFIX);
+        assert_eq!(
+            payload.idempotency_key_prefix,
+            crate::IDEMPOTENCY_KEY_PREFIX
+        );
+    }
 }

@@ -37,12 +37,6 @@ class HandlerNotFound(RRQError):
     pass
 
 
-class JobNotFound(RRQError):
-    """Exception raised when a job definition cannot be found in the JobStore."""
-
-    pass
-
-
 class MaxRetriesExceeded(Exception):
     """Raised when a job fails after reaching its maximum retry limit."""
 

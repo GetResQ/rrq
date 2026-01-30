@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import cast
-
 import pytest
 
-from rrq.client import RRQClient
 from rrq.executor import ExecutionContext, ExecutionRequest, PythonExecutor
 from rrq.registry import JobRegistry
-from rrq.settings import RRQSettings
 
 
 @pytest.mark.asyncio
@@ -23,8 +19,6 @@ async def test_python_executor_context_includes_trace_and_deadline() -> None:
     registry.register("echo", handler)
     executor = PythonExecutor(
         job_registry=registry,
-        settings=RRQSettings(),
-        client=cast(RRQClient, object()),
         worker_id="worker-orchestrator",
     )
     deadline = datetime.now(timezone.utc)

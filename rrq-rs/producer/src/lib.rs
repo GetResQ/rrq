@@ -38,7 +38,13 @@ const QUEUE_KEY_PREFIX: &str = "rrq:queue:";
 const IDEMPOTENCY_KEY_PREFIX: &str = "rrq:idempotency:";
 const RATE_LIMIT_KEY_PREFIX: &str = "rrq:rate_limit:";
 const DEBOUNCE_KEY_PREFIX: &str = "rrq:debounce:";
+
+const DEFAULT_QUEUE_NAME: &str = "rrq:queue:default";
+const DEFAULT_MAX_RETRIES: i64 = 5;
+const DEFAULT_JOB_TIMEOUT_SECONDS: i64 = 300;
+const DEFAULT_RESULT_TTL_SECONDS: i64 = 60 * 60 * 24;
 const DEFAULT_IDEMPOTENCY_TTL_SECONDS: i64 = 6 * 60 * 60;
+const DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS: i64 = DEFAULT_IDEMPOTENCY_TTL_SECONDS;
 
 /// Job status as stored in Redis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,10 +141,10 @@ pub struct ProducerConfig {
 impl Default for ProducerConfig {
     fn default() -> Self {
         Self {
-            queue_name: "rrq:queue:default".to_string(),
-            max_retries: 5,
-            job_timeout_seconds: 300,
-            result_ttl_seconds: 3600 * 24,
+            queue_name: DEFAULT_QUEUE_NAME.to_string(),
+            max_retries: DEFAULT_MAX_RETRIES,
+            job_timeout_seconds: DEFAULT_JOB_TIMEOUT_SECONDS,
+            result_ttl_seconds: DEFAULT_RESULT_TTL_SECONDS,
             idempotency_ttl_seconds: DEFAULT_IDEMPOTENCY_TTL_SECONDS,
         }
     }
@@ -967,10 +973,7 @@ mod tests {
             .await
             .unwrap();
 
-        let ttl: i64 = conn
-            .ttl(format_idempotency_key("defer-ttl"))
-            .await
-            .unwrap();
+        let ttl: i64 = conn.ttl(format_idempotency_key("defer-ttl")).await.unwrap();
         assert!(ttl >= 4);
     }
 

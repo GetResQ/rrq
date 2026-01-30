@@ -96,16 +96,10 @@ def _env_overrides() -> dict[str, Any]:
         _parse_int,
     )
     set_value(
-        "default_lock_timeout_extension_seconds",
-        "RRQ_DEFAULT_LOCK_TIMEOUT_EXTENSION_SECONDS",
-        _parse_int,
-    )
-    set_value(
         "default_unique_job_lock_ttl_seconds",
         "RRQ_DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS",
         _parse_int,
     )
-    set_value("expected_job_ttl", "RRQ_EXPECTED_JOB_TTL", _parse_int)
 
     return payload
 

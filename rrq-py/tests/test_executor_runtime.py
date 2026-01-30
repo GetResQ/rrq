@@ -6,7 +6,6 @@ from typing import cast
 
 import pytest
 
-from rrq.client import RRQClient
 from rrq.executor import ExecutionContext, ExecutionRequest, PythonExecutor
 from rrq.executor_runtime import (
     _InflightTracker,
@@ -18,7 +17,6 @@ from rrq.executor_runtime import (
 )
 from rrq.protocol import read_message, write_message
 from rrq.registry import JobRegistry
-from rrq.settings import RRQSettings
 
 
 @pytest.mark.asyncio
@@ -32,8 +30,6 @@ async def test_execute_with_deadline_allows_future_deadline() -> None:
     registry.register("echo", handler)
     executor = PythonExecutor(
         job_registry=registry,
-        settings=RRQSettings(),
-        client=cast(RRQClient, object()),
         worker_id=None,
     )
     request = ExecutionRequest(
@@ -67,8 +63,6 @@ async def test_execute_with_deadline_raises_for_past_deadline() -> None:
     registry.register("echo", handler)
     executor = PythonExecutor(
         job_registry=registry,
-        settings=RRQSettings(),
-        client=cast(RRQClient, object()),
         worker_id=None,
     )
     request = ExecutionRequest(
@@ -100,8 +94,6 @@ async def test_handle_connection_waits_for_ready_event() -> None:
     registry.register("echo", handler)
     executor = PythonExecutor(
         job_registry=registry,
-        settings=RRQSettings(),
-        client=cast(RRQClient, object()),
         worker_id=None,
     )
     ready_event = asyncio.Event()
@@ -163,8 +155,6 @@ async def test_handle_connection_returns_busy_when_inflight_limit_reached(
     registry.register("block", handler)
     executor = PythonExecutor(
         job_registry=registry,
-        settings=RRQSettings(),
-        client=cast(RRQClient, object()),
         worker_id=None,
     )
     ready_event = asyncio.Event()
@@ -250,8 +240,6 @@ async def test_cancel_by_job_id_cancels_all_requests() -> None:
     registry.register("block", handler)
     executor = PythonExecutor(
         job_registry=registry,
-        settings=RRQSettings(),
-        client=cast(RRQClient, object()),
         worker_id=None,
     )
     ready_event = asyncio.Event()
@@ -356,8 +344,6 @@ async def test_execute_and_respond_cleans_inflight_on_write_error(
     registry.register("echo", handler)
     executor = PythonExecutor(
         job_registry=registry,
-        settings=RRQSettings(),
-        client=cast(RRQClient, object()),
         worker_id=None,
     )
     request = ExecutionRequest(

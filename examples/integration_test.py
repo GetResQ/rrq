@@ -20,7 +20,11 @@ from pathlib import Path
 from typing import Iterable
 
 import redis
-from rrq.constants import JOB_KEY_PREFIX, QUEUE_KEY_PREFIX
+from rrq.producer_ffi import get_producer_constants
+
+_CONSTANTS = get_producer_constants()
+JOB_KEY_PREFIX = _CONSTANTS.job_key_prefix
+QUEUE_KEY_PREFIX = _CONSTANTS.queue_key_prefix
 
 
 @dataclass
