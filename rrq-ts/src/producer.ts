@@ -72,17 +72,30 @@ const ProducerResponseSchema = z
 export class RRQClient {
   private settings: RRQSettings;
   private producer: RustProducer;
+  private settingsOverrides: Partial<RRQSettings>;
 
   constructor(settings?: Partial<RRQSettings>, producer?: RustProducer) {
-    this.settings = resolveSettings(settings);
+    this.settingsOverrides = settings ?? {};
+    this.settings = resolveSettings(this.settingsOverrides);
     this.producer =
       producer ??
       RustProducer.fromConfig({
         redis_dsn: this.settings.redisDsn,
-        queue_name: this.settings.defaultQueueName,
-        max_retries: this.settings.defaultMaxRetries,
-        job_timeout_seconds: this.settings.defaultJobTimeoutSeconds,
-        result_ttl_seconds: this.settings.defaultResultTtlSeconds,
+        ...(this.settingsOverrides.defaultQueueName !== undefined
+          ? { queue_name: this.settings.defaultQueueName }
+          : {}),
+        ...(this.settingsOverrides.defaultMaxRetries !== undefined
+          ? { max_retries: this.settings.defaultMaxRetries }
+          : {}),
+        ...(this.settingsOverrides.defaultJobTimeoutSeconds !== undefined
+          ? { job_timeout_seconds: this.settings.defaultJobTimeoutSeconds }
+          : {}),
+        ...(this.settingsOverrides.defaultResultTtlSeconds !== undefined
+          ? { result_ttl_seconds: this.settings.defaultResultTtlSeconds }
+          : {}),
+        ...(this.settingsOverrides.defaultUniqueJobLockTtlSeconds !== undefined
+          ? { idempotency_ttl_seconds: this.settings.defaultUniqueJobLockTtlSeconds }
+          : {}),
       });
   }
 
@@ -92,11 +105,7 @@ export class RRQClient {
 
   async enqueue(functionName: string, options: EnqueueOptions = {}): Promise<string> {
     const mode =
-      options.uniqueKey !== undefined && options.uniqueKey !== null
-        ? "unique"
-        : options.deferUntil || options.deferBySeconds !== undefined
-          ? "deferred"
-          : "enqueue";
+      options.uniqueKey !== undefined && options.uniqueKey !== null ? "unique" : "enqueue";
     const response = await this.callProducer(mode, functionName, options);
     return this.expectJobId(response);
   }
@@ -125,8 +134,7 @@ export class RRQClient {
   }
 
   async enqueueDeferred(functionName: string, options: EnqueueOptions): Promise<string> {
-    const response = await this.callProducer("deferred", functionName, options);
-    return this.expectJobId(response);
+    return this.enqueue(functionName, options);
   }
 
   private async callProducer(
@@ -168,9 +176,7 @@ export class RRQClient {
       queue_name: options.queueName,
       job_id: options.jobId,
       unique_key: options.uniqueKey,
-      unique_ttl_seconds: options.uniqueKey
-        ? (options.uniqueTtlSeconds ?? this.settings.defaultUniqueJobLockTtlSeconds)
-        : undefined,
+      unique_ttl_seconds: options.uniqueTtlSeconds,
       max_retries: options.maxRetries,
       job_timeout_seconds: options.jobTimeoutSeconds,
       result_ttl_seconds: options.resultTtlSeconds,

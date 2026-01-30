@@ -116,6 +116,7 @@ pub struct Producer {
     default_max_retries: i64,
     default_job_timeout_seconds: i64,
     default_result_ttl_seconds: i64,
+    default_idempotency_ttl_seconds: i64,
     enqueue_script: Script,
     rate_limit_script: Script,
     debounce_script: Script,
@@ -128,6 +129,7 @@ pub struct ProducerConfig {
     pub max_retries: i64,
     pub job_timeout_seconds: i64,
     pub result_ttl_seconds: i64,
+    pub idempotency_ttl_seconds: i64,
 }
 
 impl Default for ProducerConfig {
@@ -137,6 +139,7 @@ impl Default for ProducerConfig {
             max_retries: 5,
             job_timeout_seconds: 300,
             result_ttl_seconds: 3600 * 24,
+            idempotency_ttl_seconds: DEFAULT_IDEMPOTENCY_TTL_SECONDS,
         }
     }
 }
@@ -163,6 +166,7 @@ impl Producer {
             default_max_retries: config.max_retries,
             default_job_timeout_seconds: config.job_timeout_seconds,
             default_result_ttl_seconds: config.result_ttl_seconds,
+            default_idempotency_ttl_seconds: config.idempotency_ttl_seconds,
             enqueue_script: build_enqueue_script(),
             rate_limit_script: build_rate_limit_script(),
             debounce_script: build_debounce_script(),
@@ -177,6 +181,7 @@ impl Producer {
             default_max_retries: config.max_retries,
             default_job_timeout_seconds: config.job_timeout_seconds,
             default_result_ttl_seconds: config.result_ttl_seconds,
+            default_idempotency_ttl_seconds: config.idempotency_ttl_seconds,
             enqueue_script: build_enqueue_script(),
             rate_limit_script: build_rate_limit_script(),
             debounce_script: build_debounce_script(),
@@ -219,11 +224,22 @@ impl Producer {
         } else {
             String::new()
         };
-        let idempotency_ttl_seconds = options
+        let mut idempotency_ttl_seconds = options
             .idempotency_ttl_seconds
-            .unwrap_or(DEFAULT_IDEMPOTENCY_TTL_SECONDS);
-        if !idempotency_key.is_empty() && idempotency_ttl_seconds <= 0 {
-            anyhow::bail!("idempotency_ttl_seconds must be positive");
+            .unwrap_or(self.default_idempotency_ttl_seconds);
+        if !idempotency_key.is_empty() {
+            if idempotency_ttl_seconds <= 0 {
+                anyhow::bail!("idempotency_ttl_seconds must be positive");
+            }
+            let deferral_ms = scheduled_time
+                .signed_duration_since(enqueue_time)
+                .num_milliseconds();
+            if deferral_ms > 0 {
+                let deferral_seconds = deferral_ms.saturating_add(999) / 1000;
+                if deferral_seconds > idempotency_ttl_seconds {
+                    idempotency_ttl_seconds = deferral_seconds;
+                }
+            }
         }
 
         let job_args_json = serde_json::to_string(&args)?;
@@ -846,6 +862,7 @@ mod tests {
             max_retries: 5,
             job_timeout_seconds: 600,
             result_ttl_seconds: 7200,
+            idempotency_ttl_seconds: 1200,
         };
         let producer = Producer::with_config(&dsn, config).await.unwrap();
         let job_id = producer
@@ -918,6 +935,43 @@ mod tests {
         let queue_key = format_queue_key("default");
         let count: i64 = conn.zcard(queue_key).await.unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn producer_extends_idempotency_ttl_for_deferrals() {
+        let _guard = redis_lock().lock().await;
+        let dsn = std::env::var("RRQ_TEST_REDIS_DSN")
+            .unwrap_or_else(|_| "redis://localhost:6379/15".to_string());
+        let client = redis::Client::open(dsn.as_str()).unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let _: () = redis::cmd("FLUSHDB").query_async(&mut conn).await.unwrap();
+
+        let config = ProducerConfig {
+            queue_name: "rrq:queue:default".to_string(),
+            max_retries: 5,
+            job_timeout_seconds: 300,
+            result_ttl_seconds: 3600 * 24,
+            idempotency_ttl_seconds: 2,
+        };
+        let producer = Producer::with_config(&dsn, config).await.unwrap();
+        let enqueue_time = Utc::now();
+        let scheduled_time = enqueue_time + chrono::Duration::seconds(5);
+        let options = EnqueueOptions {
+            idempotency_key: Some("defer-ttl".to_string()),
+            enqueue_time: Some(enqueue_time),
+            scheduled_time: Some(scheduled_time),
+            ..Default::default()
+        };
+        producer
+            .enqueue("work", vec![], serde_json::Map::new(), options)
+            .await
+            .unwrap();
+
+        let ttl: i64 = conn
+            .ttl(format_idempotency_key("defer-ttl"))
+            .await
+            .unwrap();
+        assert!(ttl >= 4);
     }
 
     #[tokio::test]

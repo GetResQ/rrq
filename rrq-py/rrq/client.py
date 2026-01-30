@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -40,15 +39,24 @@ class RRQClient:
             self.job_store = JobStore(settings=self.settings)
             self._created_store_internally = True
 
-        self._producer = RustProducer.from_config(
-            {
-                "redis_dsn": self.settings.redis_dsn,
-                "queue_name": self.settings.default_queue_name,
-                "max_retries": self.settings.default_max_retries,
-                "job_timeout_seconds": self.settings.default_job_timeout_seconds,
-                "result_ttl_seconds": self.settings.default_result_ttl_seconds,
-            }
-        )
+        fields_set = self.settings.model_fields_set
+        producer_config: dict[str, Any] = {"redis_dsn": self.settings.redis_dsn}
+        if "default_queue_name" in fields_set:
+            producer_config["queue_name"] = self.settings.default_queue_name
+        if "default_max_retries" in fields_set:
+            producer_config["max_retries"] = self.settings.default_max_retries
+        if "default_job_timeout_seconds" in fields_set:
+            producer_config["job_timeout_seconds"] = (
+                self.settings.default_job_timeout_seconds
+            )
+        if "default_result_ttl_seconds" in fields_set:
+            producer_config["result_ttl_seconds"] = self.settings.default_result_ttl_seconds
+        if "default_unique_job_lock_ttl_seconds" in fields_set:
+            producer_config["idempotency_ttl_seconds"] = (
+                self.settings.default_unique_job_lock_ttl_seconds
+            )
+
+        self._producer = RustProducer.from_config(producer_config)
 
     async def close(self) -> None:
         """Closes the underlying JobStore's Redis connection if it was created internally by this client."""
@@ -99,40 +107,24 @@ class RRQClient:
             queue_name=queue_name_to_use,
         ) as trace_context:
             defer_until = None
-            defer_until_dt = None
             if _defer_until is not None:
                 dt = _defer_until
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
                 else:
                     dt = dt.astimezone(timezone.utc)
-                defer_until_dt = dt
                 defer_until = dt.isoformat()
 
             defer_by_seconds = None
             if _defer_by is not None:
                 defer_by_seconds = max(0.0, _defer_by.total_seconds())
 
-            unique_ttl_seconds = None
-            if _unique_key is not None:
-                unique_ttl_seconds = self.settings.default_unique_job_lock_ttl_seconds
-                deferral_seconds = 0.0
-                if defer_until_dt is not None:
-                    deferral_seconds = max(
-                        0.0,
-                        (defer_until_dt - datetime.now(timezone.utc)).total_seconds(),
-                    )
-                elif defer_by_seconds is not None:
-                    deferral_seconds = max(0.0, defer_by_seconds)
-                if deferral_seconds > unique_ttl_seconds:
-                    unique_ttl_seconds = int(math.ceil(deferral_seconds))
-
             mode = "unique" if _unique_key else "enqueue"
             options: dict[str, Any] = {
                 "queue_name": _queue_name,
                 "job_id": _job_id,
                 "unique_key": _unique_key,
-                "unique_ttl_seconds": unique_ttl_seconds,
+                "unique_ttl_seconds": None,
                 "max_retries": _max_retries,
                 "job_timeout_seconds": _job_timeout_seconds,
                 "result_ttl_seconds": _result_ttl_seconds,

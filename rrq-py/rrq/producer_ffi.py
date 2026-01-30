@@ -24,8 +24,9 @@ class ProducerConfigModel(BaseModel):
     max_retries: int | None = None
     job_timeout_seconds: int | None = None
     result_ttl_seconds: int | None = None
+    idempotency_ttl_seconds: int | None = None
 
-    @field_validator("job_timeout_seconds")
+    @field_validator("job_timeout_seconds", "idempotency_ttl_seconds")
     @classmethod
     def _validate_positive_int(cls, value: int | None) -> int | None:
         if value is None:

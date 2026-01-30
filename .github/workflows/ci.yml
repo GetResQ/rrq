@@ -49,13 +49,8 @@ jobs:
         run: uv run ty check
         working-directory: rrq-py
 
-      - name: Build Rust producer library
-        run: cargo build -p rrq-producer --release
-        working-directory: rrq-rs
-
       - name: Run tests
-        run: RRQ_PRODUCER_LIB_PATH=../rrq-rs/target/release/librrq_producer.so uv run pytest --disable-warnings -q --maxfail=1
-        working-directory: rrq-py
+        run: scripts/with-producer-lib.sh -- sh -c "cd rrq-py && uv run pytest --disable-warnings -q --maxfail=1"
 
   rust:
     runs-on: ubuntu-latest
@@ -134,10 +129,6 @@ jobs:
         run: bun install
         working-directory: rrq-ts
 
-      - name: Build Rust producer library
-        run: cargo build -p rrq-producer --release
-        working-directory: rrq-rs
-
       - name: TypeScript lint
         run: bun run lint
         working-directory: rrq-ts
@@ -155,5 +146,4 @@ jobs:
         working-directory: rrq-ts
 
       - name: TypeScript tests
-        run: RRQ_PRODUCER_LIB_PATH=../rrq-rs/target/release/librrq_producer.so bun test
-        working-directory: rrq-ts
+        run: scripts/with-producer-lib.sh -- sh -c "cd rrq-ts && bun test"

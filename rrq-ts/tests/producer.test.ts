@@ -76,4 +76,14 @@ describe("RRQClient producer requests", () => {
       client.enqueue("handler", { deferUntil: new Date("invalid") }),
     ).rejects.toBeInstanceOf(RustProducerError);
   });
+
+  it("omits unique_ttl_seconds unless provided", async () => {
+    const stub = new StubProducer({ job_id: "job-4" });
+    const client = new RRQClient(DEFAULT_SETTINGS, stub as unknown as RustProducer);
+
+    await client.enqueue("handler", { uniqueKey: "user-ttl" });
+
+    const options = (stub.lastRequest?.options as any) ?? {};
+    expect(options.unique_ttl_seconds).toBeUndefined();
+  });
 });

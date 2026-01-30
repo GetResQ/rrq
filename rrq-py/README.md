@@ -62,6 +62,16 @@ state/results back to Redis.
 
 If you ship the Rust binary separately, set `RRQ_RUST_BIN` to its path.
 
+### FFI producer library (local dev/tests)
+
+The Python producer uses the Rust `rrq-producer` shared library. For local
+tests from the repo, use the helper script to build the library and set
+`RRQ_PRODUCER_LIB_PATH` automatically:
+
+```bash
+sh scripts/with-producer-lib.sh -- sh -c "cd rrq-py && uv run pytest"
+```
+
 ## Quickstart
 
 ### 1) Install

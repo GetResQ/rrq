@@ -127,6 +127,12 @@ bun run build
 bun test
 ```
 
+If you need the Rust FFI library built automatically:
+
+```bash
+sh ../scripts/with-producer-lib.sh -- sh -c "cd rrq-ts && bun test"
+```
+
 ## Notes
 
 - Producer uses the Rust FFI library for enqueue semantics consistent with RRQ's

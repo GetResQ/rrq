@@ -25,6 +25,7 @@ struct ProducerConfigPayload {
     max_retries: Option<i64>,
     job_timeout_seconds: Option<i64>,
     result_ttl_seconds: Option<i64>,
+    idempotency_ttl_seconds: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,6 +193,9 @@ pub extern "C" fn rrq_producer_new(
             result_ttl_seconds: config_payload
                 .result_ttl_seconds
                 .unwrap_or(default_config.result_ttl_seconds),
+            idempotency_ttl_seconds: config_payload
+                .idempotency_ttl_seconds
+                .unwrap_or(default_config.idempotency_ttl_seconds),
         };
 
         let producer = block_on_runtime(

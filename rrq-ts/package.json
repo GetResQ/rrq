@@ -37,6 +37,7 @@
     "oxfmt:check": "oxfmt --check src tests",
     "tsgo": "tsgo --project tsconfig.json --noEmit",
     "test": "bun test",
+    "test:ffi": "sh ../scripts/with-producer-lib.sh -- sh -c \"cd rrq-ts && bun test\"",
     "test:watch": "bun test --watch"
   },
   "dependencies": {

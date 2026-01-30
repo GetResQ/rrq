@@ -57,7 +57,7 @@ repos:
         stages: [pre-push]
       - id: ts-test
         name: typescript test
-        entry: sh -c 'cd rrq-ts && bun test'
+        entry: sh -c 'sh scripts/with-producer-lib.sh -- sh -c "cd rrq-ts && bun test"'
         language: system
         pass_filenames: false
         stages: [pre-push]

@@ -293,6 +293,35 @@ class DummyStore:
         return True
 
 
+def test_client_producer_config_uses_explicit_overrides(monkeypatch):
+    captured: list[dict[str, object]] = []
+
+    class _DummyProducer:
+        def close(self):
+            return None
+
+    def _fake_from_config(config: dict[str, object]):
+        captured.append(config)
+        return _DummyProducer()
+
+    monkeypatch.setattr("rrq.client.RustProducer.from_config", _fake_from_config)
+
+    default_settings = RRQSettings()
+    RRQClient(default_settings, job_store=cast(JobStore, DummyStore()))
+    assert captured[0] == {"redis_dsn": default_settings.redis_dsn}
+
+    override_settings = RRQSettings(
+        default_job_timeout_seconds=123,
+        default_unique_job_lock_ttl_seconds=321,
+    )
+    RRQClient(override_settings, job_store=cast(JobStore, DummyStore()))
+    assert captured[1] == {
+        "redis_dsn": override_settings.redis_dsn,
+        "job_timeout_seconds": override_settings.default_job_timeout_seconds,
+        "idempotency_ttl_seconds": override_settings.default_unique_job_lock_ttl_seconds,
+    }
+
+
 class _TestEnqueueSpan(EnqueueSpan):
     def __enter__(self):
         return {"traceparent": "00-abc-123-01"}
