@@ -11,7 +11,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, Field
 
 from .client import RRQClient
-from .exc import HandlerNotFound, RetryJob
+from .exc import RetryJob
 from .registry import JobRegistry
 from .settings import RRQSettings
 from .telemetry import get_telemetry
@@ -93,8 +93,14 @@ class PythonExecutor:
     async def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
         handler = self.job_registry.get_handler(request.function_name)
         if not handler:
-            raise HandlerNotFound(
-                f"No handler registered for function '{request.function_name}'"
+            return ExecutionOutcome(
+                job_id=request.job_id,
+                request_id=request.request_id,
+                status="error",
+                error=ExecutionError(
+                    message=f"No handler registered for function '{request.function_name}'",
+                    type="handler_not_found",
+                ),
             )
 
         worker_id = request.context.worker_id or self.worker_id

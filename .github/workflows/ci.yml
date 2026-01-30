@@ -98,3 +98,38 @@ jobs:
       - name: Rust coverage
         run: cargo llvm-cov --workspace --fail-under-lines 80
         working-directory: rrq-rs
+
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.1.29"
+
+      - name: Install dependencies
+        run: bun install
+        working-directory: rrq-ts
+
+      - name: TypeScript lint
+        run: bun run lint
+        working-directory: rrq-ts
+
+      - name: TypeScript oxlint
+        run: bun run oxlint
+        working-directory: rrq-ts
+
+      - name: TypeScript oxfmt
+        run: bun run oxfmt:check
+        working-directory: rrq-ts
+
+      - name: TypeScript tsgo
+        run: bun run tsgo
+        working-directory: rrq-ts
+
+      - name: TypeScript tests
+        run: bun test
+        working-directory: rrq-ts

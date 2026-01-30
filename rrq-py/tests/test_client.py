@@ -5,7 +5,7 @@ import pytest
 import pytest_asyncio
 
 from rrq.client import RRQClient
-from rrq.constants import DEFAULT_QUEUE_NAME, UNIQUE_JOB_LOCK_PREFIX
+from rrq.constants import DEFAULT_QUEUE_NAME, IDEMPOTENCY_KEY_PREFIX
 from rrq.job import Job, JobStatus
 from rrq.settings import RRQSettings
 from rrq.store import JobStore
@@ -176,17 +176,19 @@ async def test_enqueue_rejects_non_positive_timeout():
 
 
 @pytest.mark.asyncio
-async def test_enqueue_invalid_timeout_releases_unique_lock(
+async def test_enqueue_invalid_timeout_does_not_set_idempotency_key(
     rrq_settings_for_client: RRQSettings, job_store_for_client_tests: JobStore
 ):
     client = RRQClient(
         settings=rrq_settings_for_client, job_store=job_store_for_client_tests
     )
-    unique_key = "bad-timeout-lock"
+    unique_key = "bad-timeout-idem"
     with pytest.raises(ValueError):
         await client.enqueue("func", _unique_key=unique_key, _job_timeout_seconds=0)
-    ttl = await job_store_for_client_tests.get_lock_ttl(unique_key)
-    assert ttl == 0
+    stored = await job_store_for_client_tests.redis.get(
+        f"{IDEMPOTENCY_KEY_PREFIX}{unique_key}"
+    )
+    assert stored is None
 
 
 @pytest.mark.asyncio
@@ -198,30 +200,19 @@ async def test_enqueue_with_unique_key(
     unique_key = "idempotent-op-user-555"
     func_name = "unique_func"
 
-    # First enqueue should succeed and acquire unique lock
+    # First enqueue should succeed and set idempotency key
     job1 = await rrq_client.enqueue(func_name, _unique_key=unique_key)
     assert job1 is not None
-    assert job1.job_unique_key == unique_key
 
-    # Second enqueue with same unique key should defer instead of failing
+    idempotency_value = await job_store_for_client_tests.redis.get(
+        f"{IDEMPOTENCY_KEY_PREFIX}{unique_key}"
+    )
+    assert idempotency_value is not None
+
+    # Second enqueue with same unique key should return the same job id
     job2 = await rrq_client.enqueue(func_name, "different_arg", _unique_key=unique_key)
     assert job2 is not None
-    # Check that it's scheduled no earlier than the remaining lock TTL
-    score = await job_store_for_client_tests.redis.zscore(
-        rrq_client.settings.default_queue_name, job2.id.encode("utf-8")
-    )
-    assert score is not None
-    # remaining TTL from Redis
-    remaining = await job_store_for_client_tests.redis.ttl(
-        f"{UNIQUE_JOB_LOCK_PREFIX}{unique_key}"
-    )
-    min_expected_ms = int(
-        (
-            datetime.now(timezone.utc) + timedelta(seconds=max(0, remaining - 1))
-        ).timestamp()
-        * 1000
-    )
-    assert score >= min_expected_ms
+    assert job2.id == job1.id
 
 
 class DummyStore:
@@ -308,144 +299,12 @@ async def test_close_external_store():
 
 
 @pytest.mark.asyncio
-async def test_enqueue_without_unique_key_and_defaults():
-    settings = RRQSettings()
-    store = DummyStore()
-    client = RRQClient(settings, job_store=cast(JobStore, store))
-    # enqueue simple job
-    job = await client.enqueue("myfunc", 1, 2, key="value")
-    # job returned and saved
-    assert isinstance(job, Job)
-    assert store.saved and store.queued
-    qname, jid, score = store.queued[0]
-    # default queue used
-    assert qname == settings.default_queue_name
-    # job id matches
-    assert jid == job.id
-    # score is a float timestamp
-    assert isinstance(score, float)
-
-
-@pytest.mark.asyncio
-async def test_enqueue_with_unique_key_defers_when_locked():
-    settings = RRQSettings()
-    store = DummyStore()
-    client = RRQClient(settings, job_store=cast(JobStore, store))
-    # attempt enqueue with unique key when lock is denied
-    # Simulate existing lock TTL so client defers
-    store._lock_ttl = 10
-    result = await client.enqueue("f", _unique_key="X")
-    assert isinstance(result, Job)
-    # ensure not acquiring lock when already locked
-    assert not store.locks or store.locks[-1][0] != "X"
-
-
-@pytest.mark.asyncio
-async def test_enqueue_with_defer_by_and_until():
-    settings = RRQSettings()
-    store = DummyStore()
-    client = RRQClient(settings, job_store=cast(JobStore, store))
-    # test defer_by
-    d = timedelta(seconds=5)
-    job1 = await client.enqueue("f1", _defer_by=d)
-    assert job1 is not None
-    _, _, score1 = store.queued[-1]
-    # score >= now + defer_by seconds
-    now_ms = datetime.now(timezone.utc).timestamp() * 1000
-    assert score1 >= now_ms + 5000 - 10
-    # test defer_until with naive datetime
-    future = datetime.now(timezone.utc) + timedelta(seconds=10)
-    await client.enqueue("f2", _defer_until=future)
-    _, _, score2 = store.queued[-1]
-    # score around future
-    assert abs(score2 - future.replace(tzinfo=timezone.utc).timestamp() * 1000) < 100
-
-
-@pytest.mark.asyncio
-async def test_unique_lock_ttl_respects_defer_by_override():
-    # Override default unique TTL to small value for testing
-    settings = RRQSettings(default_unique_job_lock_ttl_seconds=2)
-    store = DummyStore()
-    client = RRQClient(settings=settings, job_store=cast(JobStore, store))
-    defer = timedelta(seconds=5)
-    # Enqueue with defer_by greater than default TTL
-    await client.enqueue("func", _unique_key="key1", _defer_by=defer)
-    # acquire_unique_job_lock should have been called once
-    assert store.locks, "Unique lock was not acquired"
-    key, job_id, ttl = store.locks[-1]
-    assert key == "key1"
-    expected = max(
-        settings.default_unique_job_lock_ttl_seconds,
-        int(defer.total_seconds()) + 1,
-        settings.default_job_timeout_seconds
-        + settings.default_lock_timeout_extension_seconds
-        + 1,
-    )
-    assert ttl == expected, f"Expected TTL {expected}, got {ttl}"
-
-
-@pytest.mark.asyncio
-async def test_unique_lock_ttl_default_no_defer():
-    # When no defer, TTL should respect default/job timeout floor
-    settings = RRQSettings(default_unique_job_lock_ttl_seconds=3)
-    store = DummyStore()
-    client = RRQClient(settings=settings, job_store=cast(JobStore, store))
-    await client.enqueue("func", _unique_key="key2")
-    assert store.locks, "Unique lock was not acquired"
-    _, _, ttl = store.locks[-1]
-    expected = max(
-        settings.default_unique_job_lock_ttl_seconds,
-        settings.default_job_timeout_seconds
-        + settings.default_lock_timeout_extension_seconds
-        + 1,
-    )
-    assert ttl == expected, f"Expected TTL {expected}, got {ttl}"
-
-
-@pytest.mark.asyncio
-async def test_next_scheduled_run_time_set_correctly():
-    settings = RRQSettings()
-    store = DummyStore()
-    client = RRQClient(settings=settings, job_store=cast(JobStore, store))
-    # Immediate enqueue: next_scheduled_run_time == enqueue_time
-    job = await client.enqueue("f0")
-    assert job is not None
-    assert job.next_scheduled_run_time == job.enqueue_time
-    # Defer_by enqueue: next_scheduled_run_time == enqueue_time + defer_by
-    d = timedelta(seconds=10)
-    job2 = await client.enqueue("f1", _defer_by=d)
-    assert job2 is not None
-    expected = job2.enqueue_time + d
-    assert job2.next_scheduled_run_time == expected
-    # Defer_until enqueue: next_scheduled_run_time == provided datetime (timezone.utc)
-    dt = datetime.now(timezone.utc) + timedelta(seconds=15)
-    job3 = await client.enqueue("f2", _defer_until=dt)
-    assert job3 is not None
-    assert job3.next_scheduled_run_time == dt
-
-
-@pytest.mark.asyncio
-async def test_enqueue_with_unique_key_deferral(
+async def test_enqueue_with_unique_key_idempotent(
     rrq_client: RRQClient, job_store_for_client_tests: JobStore
 ):
     unique_key = "deferral_test_key"
-    # First enqueue acquires lock
     job1 = await rrq_client.enqueue("test_func", _unique_key=unique_key)
     assert job1 is not None
-    # Second enqueue should defer
     job2 = await rrq_client.enqueue("test_func", _unique_key=unique_key)
-    assert job2 is not None  # Now allows with defer
-    # Check defer was applied based on remaining lock TTL
-    score = await job_store_for_client_tests.redis.zscore(
-        rrq_client.settings.default_queue_name, job2.id.encode("utf-8")
-    )
-    remaining = await job_store_for_client_tests.redis.ttl(
-        f"{UNIQUE_JOB_LOCK_PREFIX}{unique_key}"
-    )
-    expected_min = int(
-        (
-            datetime.now(timezone.utc) + timedelta(seconds=max(0, remaining - 1))
-        ).timestamp()
-        * 1000
-    )
-    assert score >= expected_min
+    assert job2 is not None
+    assert job2.id == job1.id

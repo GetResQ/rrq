@@ -7,6 +7,7 @@ export const ENV_EXECUTOR_SOCKET = "RRQ_EXECUTOR_SOCKET";
 export const ENV_EXECUTOR_TCP_SOCKET = "RRQ_EXECUTOR_TCP_SOCKET";
 export const PROTOCOL_VERSION = "1";
 const MAX_FRAME_LEN = 16 * 1024 * 1024;
+const MAX_IN_FLIGHT_PER_CONNECTION = 64;
 
 export type OutcomeStatus = "success" | "retry" | "timeout" | "error";
 
@@ -70,10 +71,7 @@ export class Registry {
     this.handlers.set(name, handler);
   }
 
-  async execute(
-    request: ExecutionRequest,
-    signal: AbortSignal,
-  ): Promise<ExecutionOutcome> {
+  async execute(request: ExecutionRequest, signal: AbortSignal): Promise<ExecutionOutcome> {
     const handler = this.handlers.get(request.function_name);
     if (!handler) {
       return errorOutcome(request, "handler_not_found", "Handler not found");
@@ -103,12 +101,14 @@ interface InFlightTask {
   controller: AbortController;
   respond: (outcome: ExecutionOutcome) => Promise<void>;
   job_id: string;
+  activeRequests: Set<string>;
+  completed: boolean;
 }
 
 export class ExecutorRuntime {
   private registry: Registry;
   private inFlight = new Map<string, InFlightTask>();
-  private jobIndex = new Map<string, string>();
+  private jobIndex = new Map<string, Set<string>>();
 
   constructor(registry: Registry) {
     this.registry = registry;
@@ -126,9 +126,7 @@ export class ExecutorRuntime {
       return;
     }
     if (!socketPath) {
-      throw new Error(
-        `${ENV_EXECUTOR_SOCKET} or ${ENV_EXECUTOR_TCP_SOCKET} must be set`,
-      );
+      throw new Error(`${ENV_EXECUTOR_SOCKET} or ${ENV_EXECUTOR_TCP_SOCKET} must be set`);
     }
     await this.runSocket(socketPath);
   }
@@ -167,24 +165,26 @@ export class ExecutorRuntime {
       await enqueueWrite({ type: "response", payload: outcome });
     };
 
-    const cleanupRequest = (requestId: string, jobId: string): void => {
-      this.inFlight.delete(requestId);
-      this.jobIndex.delete(jobId);
-      activeRequests.delete(requestId);
-    };
-
     socket.on("data", (chunk) => {
-      const messages = parser.push(chunk);
+      let messages: ExecutorMessage[];
+      try {
+        messages = parser.push(chunk);
+      } catch (error) {
+        console.error("executor message parse error:", error);
+        socket.destroy();
+        return;
+      }
       for (const message of messages) {
         if (message.type === "request") {
           const request = message.payload;
           if (request.protocol_version !== PROTOCOL_VERSION) {
+            void respond(errorOutcome(request, undefined, "Unsupported protocol version"));
+            continue;
+          }
+
+          if (activeRequests.size >= MAX_IN_FLIGHT_PER_CONNECTION) {
             void respond(
-              errorOutcome(
-                request,
-                "protocol",
-                "Unsupported protocol version",
-              ),
+              errorOutcome(request, undefined, "Executor busy: too many in-flight requests"),
             );
             continue;
           }
@@ -197,18 +197,32 @@ export class ExecutorRuntime {
             controller,
             respond,
             job_id: jobId,
+            activeRequests,
+            completed: false,
           });
-          this.jobIndex.set(jobId, requestId);
+          const jobEntries = this.jobIndex.get(jobId) ?? new Set<string>();
+          jobEntries.add(requestId);
+          this.jobIndex.set(jobId, jobEntries);
           activeRequests.add(requestId);
 
-          void this.executeWithDeadline(request, controller.signal)
+          void this.executeWithDeadline(request, controller)
             .then(async (outcome) => {
+              const task = this.inFlight.get(requestId);
+              if (!task || task.completed) {
+                return;
+              }
+              task.completed = true;
               await respond(outcome);
-              cleanupRequest(requestId, jobId);
+              this.cleanupRequest(requestId, task.job_id, task.activeRequests);
             })
             .catch(async (error) => {
+              const task = this.inFlight.get(requestId);
+              if (!task || task.completed) {
+                return;
+              }
+              task.completed = true;
               await respond(errorOutcome(request, undefined, asErrorMessage(error)));
-              cleanupRequest(requestId, jobId);
+              this.cleanupRequest(requestId, task.job_id, task.activeRequests);
             });
         } else if (message.type === "cancel") {
           this.handleCancel(message.payload);
@@ -224,13 +238,14 @@ export class ExecutorRuntime {
     });
 
     socket.on("close", () => {
-      for (const requestId of activeRequests) {
+      const pending = Array.from(activeRequests);
+      for (const requestId of pending) {
         const task = this.inFlight.get(requestId);
-        if (task) {
-          task.controller.abort();
-          this.jobIndex.delete(task.job_id);
-          this.inFlight.delete(requestId);
+        if (!task) {
+          continue;
         }
+        task.controller.abort();
+        this.cleanupRequest(requestId, task.job_id, task.activeRequests);
       }
     });
 
@@ -242,8 +257,9 @@ export class ExecutorRuntime {
 
   private async executeWithDeadline(
     request: ExecutionRequest,
-    signal: AbortSignal,
+    controller: AbortController,
   ): Promise<ExecutionOutcome> {
+    const signal = controller.signal;
     const deadline = request.context.deadline;
     if (!deadline) {
       return this.registry.execute(request, signal);
@@ -251,7 +267,7 @@ export class ExecutorRuntime {
 
     const deadlineDate = new Date(deadline);
     if (Number.isNaN(deadlineDate.getTime())) {
-      return errorOutcome(request, "deadline", "Invalid deadline timestamp");
+      return errorOutcome(request, undefined, "Invalid deadline timestamp");
     }
     const remainingMs = deadlineDate.getTime() - Date.now();
     if (remainingMs <= 0) {
@@ -259,10 +275,8 @@ export class ExecutorRuntime {
     }
 
     try {
-      return await withTimeout(
-        this.registry.execute(request, signal),
-        remainingMs,
-        signal,
+      return await withTimeout(this.registry.execute(request, signal), remainingMs, signal, () =>
+        controller.abort(),
       );
     } catch (error) {
       if (isAbortError(error)) {
@@ -279,23 +293,42 @@ export class ExecutorRuntime {
     if (payload.protocol_version !== PROTOCOL_VERSION) {
       return;
     }
-    const requestId = payload.request_id ?? this.jobIndex.get(payload.job_id);
-    if (!requestId) {
+    const requestIds = payload.request_id
+      ? [payload.request_id]
+      : Array.from(this.jobIndex.get(payload.job_id) ?? []);
+    if (requestIds.length === 0) {
       return;
     }
-    const task = this.inFlight.get(requestId);
-    if (!task) {
-      return;
+    for (const requestId of requestIds) {
+      const task = this.inFlight.get(requestId);
+      if (!task || task.completed) {
+        continue;
+      }
+      task.completed = true;
+      task.controller.abort();
+      void task
+        .respond({
+          job_id: payload.job_id,
+          request_id: requestId,
+          status: "error",
+          error: { message: "Job cancelled", type: "cancelled" },
+        })
+        .finally(() => {
+          this.cleanupRequest(requestId, task.job_id, task.activeRequests);
+        });
     }
-    task.controller.abort();
-    void task.respond({
-      job_id: payload.job_id,
-      request_id: requestId,
-      status: "error",
-      error: { message: "Job cancelled", type: "cancelled" },
-    });
+  }
+
+  private cleanupRequest(requestId: string, jobId: string, activeRequests: Set<string>): void {
     this.inFlight.delete(requestId);
-    this.jobIndex.delete(task.job_id);
+    const jobEntries = this.jobIndex.get(jobId);
+    if (jobEntries) {
+      jobEntries.delete(requestId);
+      if (jobEntries.size === 0) {
+        this.jobIndex.delete(jobId);
+      }
+    }
+    activeRequests.delete(requestId);
   }
 }
 
@@ -369,10 +402,7 @@ class FrameParser {
   }
 }
 
-async function writeFrame(
-  socket: net.Socket,
-  message: ExecutorMessage,
-): Promise<void> {
+async function writeFrame(socket: net.Socket, message: ExecutorMessage): Promise<void> {
   const payload = Buffer.from(JSON.stringify(message));
   const header = Buffer.alloc(4);
   header.writeUInt32BE(payload.length, 0);
@@ -439,8 +469,7 @@ function isAbortError(error: unknown): boolean {
     return false;
   }
   return (
-    error instanceof Error &&
-    (error.name === "AbortError" || error.message === "Job cancelled")
+    error instanceof Error && (error.name === "AbortError" || error.message === "Job cancelled")
   );
 }
 
@@ -464,6 +493,7 @@ function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
   signal: AbortSignal,
+  onTimeout?: () => void,
 ): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   return new Promise<T>((resolve, reject) => {
@@ -487,6 +517,9 @@ function withTimeout<T>(
     signal.addEventListener("abort", onAbort);
     timer = setTimeout(() => {
       cleanup();
+      if (onTimeout) {
+        onTimeout();
+      }
       reject(new TimeoutError("Job execution timed out"));
     }, timeoutMs);
 

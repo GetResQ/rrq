@@ -2,6 +2,7 @@ export const JOB_KEY_PREFIX = "rrq:job:";
 export const QUEUE_KEY_PREFIX = "rrq:queue:";
 export const DLQ_KEY_PREFIX = "rrq:dlq:";
 export const UNIQUE_JOB_LOCK_PREFIX = "rrq:lock:unique:";
+export const IDEMPOTENCY_KEY_PREFIX = "rrq:idempotency:";
 
 export const DEFAULT_QUEUE_NAME = "rrq:queue:default";
 export const DEFAULT_DLQ_NAME = "rrq:dlq:default";

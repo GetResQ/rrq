@@ -1,10 +1,6 @@
-import crypto from "node:crypto";
-import Redis from "ioredis";
-import {
-  JOB_KEY_PREFIX,
-  QUEUE_KEY_PREFIX,
-  UNIQUE_JOB_LOCK_PREFIX,
-} from "./constants.js";
+import { z } from "zod";
+
+import { RustProducer, RustProducerError } from "./producer_ffi.js";
 import { DEFAULT_SETTINGS, resolveSettings, RRQSettings } from "./settings.js";
 
 export interface EnqueueOptions {
@@ -13,6 +9,7 @@ export interface EnqueueOptions {
   queueName?: string;
   jobId?: string;
   uniqueKey?: string;
+  uniqueTtlSeconds?: number;
   maxRetries?: number;
   jobTimeoutSeconds?: number;
   resultTtlSeconds?: number;
@@ -21,178 +18,211 @@ export interface EnqueueOptions {
   traceContext?: Record<string, string> | null;
 }
 
-export interface JobRecord {
-  id: string;
-  function_name: string;
-  job_args: string;
-  job_kwargs: string;
-  enqueue_time: string;
-  status: "PENDING";
-  current_retries: string;
-  queue_name: string;
-  next_scheduled_run_time: string;
-  max_retries: string;
-  job_timeout_seconds: string;
-  result_ttl_seconds: string;
-  job_unique_key?: string;
-  result: string;
-  trace_context?: string;
+export interface RateLimitOptions extends EnqueueOptions {
+  rateLimitKey: string;
+  rateLimitSeconds: number;
 }
+
+export interface DebounceOptions extends EnqueueOptions {
+  debounceKey: string;
+  debounceSeconds: number;
+}
+
+interface ProducerResponse {
+  status?: string;
+  job_id?: string | null;
+}
+
+const ProducerOptionsSchema = z
+  .object({
+    queue_name: z.string().optional(),
+    job_id: z.string().optional(),
+    unique_key: z.string().optional(),
+    unique_ttl_seconds: z.number().int().positive().optional(),
+    max_retries: z.number().int().nonnegative().optional(),
+    job_timeout_seconds: z.number().int().positive().optional(),
+    result_ttl_seconds: z.number().int().nonnegative().optional(),
+    trace_context: z.record(z.string()).optional(),
+    defer_until: z.string().optional(),
+    defer_by_seconds: z.number().finite().min(0).optional(),
+    rate_limit_key: z.string().optional(),
+    rate_limit_seconds: z.number().finite().positive().optional(),
+    debounce_key: z.string().optional(),
+    debounce_seconds: z.number().finite().positive().optional(),
+  })
+  .strict();
+
+const ProducerRequestSchema = z
+  .object({
+    mode: z.string(),
+    function_name: z.string().min(1),
+    args: z.array(z.any()),
+    kwargs: z.record(z.any()),
+    options: ProducerOptionsSchema,
+  })
+  .strict();
+
+const ProducerResponseSchema = z
+  .object({
+    status: z.enum(["enqueued", "rate_limited"]).optional(),
+    job_id: z.string().nullable().optional(),
+  })
+  .strict();
 
 export class RRQClient {
   private settings: RRQSettings;
-  private redis: Redis;
-  private ownsRedis: boolean;
+  private producer: RustProducer;
 
-  constructor(settings?: Partial<RRQSettings>, redis?: Redis) {
+  constructor(settings?: Partial<RRQSettings>, producer?: RustProducer) {
     this.settings = resolveSettings(settings);
-    if (redis) {
-      this.redis = redis;
-      this.ownsRedis = false;
-    } else {
-      this.redis = new Redis(this.settings.redisDsn);
-      this.ownsRedis = true;
-    }
+    this.producer =
+      producer ??
+      RustProducer.fromConfig({
+        redis_dsn: this.settings.redisDsn,
+        queue_name: this.settings.defaultQueueName,
+        max_retries: this.settings.defaultMaxRetries,
+        job_timeout_seconds: this.settings.defaultJobTimeoutSeconds,
+        result_ttl_seconds: this.settings.defaultResultTtlSeconds,
+      });
   }
 
   async close(): Promise<void> {
-    if (this.ownsRedis) {
-      await this.redis.quit();
-    }
+    this.producer.close();
   }
 
   async enqueue(functionName: string, options: EnqueueOptions = {}): Promise<string> {
-    const args = options.args ?? [];
-    const kwargs = options.kwargs ?? {};
-    const queueName = options.queueName ?? this.settings.defaultQueueName;
-    const jobId = options.jobId ?? crypto.randomUUID();
+    const mode =
+      options.uniqueKey !== undefined && options.uniqueKey !== null
+        ? "unique"
+        : options.deferUntil || options.deferBySeconds !== undefined
+          ? "deferred"
+          : "enqueue";
+    const response = await this.callProducer(mode, functionName, options);
+    return this.expectJobId(response);
+  }
 
-    const enqueueTime = new Date();
-    let desiredRunTime = enqueueTime;
-    let lockTtlSeconds = this.settings.defaultUniqueJobLockTtlSeconds;
+  async enqueueWithUniqueKey(
+    functionName: string,
+    uniqueKey: string,
+    options: Omit<EnqueueOptions, "uniqueKey"> = {},
+  ): Promise<string> {
+    return this.enqueue(functionName, { ...options, uniqueKey });
+  }
 
-    if (options.deferUntil) {
-      const deferUntil = ensureUtcDate(options.deferUntil);
-      desiredRunTime = deferUntil;
-      const diffSeconds = Math.max(
-        0,
-        Math.ceil((deferUntil.getTime() - enqueueTime.getTime()) / 1000),
-      );
-      lockTtlSeconds = Math.max(lockTtlSeconds, diffSeconds + 1);
-    } else if (typeof options.deferBySeconds === "number") {
-      const deferSeconds = Math.max(0, Math.floor(options.deferBySeconds));
-      desiredRunTime = new Date(enqueueTime.getTime() + deferSeconds * 1000);
-      lockTtlSeconds = Math.max(lockTtlSeconds, deferSeconds + 1);
-    }
+  async enqueueWithRateLimit(
+    functionName: string,
+    options: RateLimitOptions,
+  ): Promise<string | null> {
+    const response = await this.callProducer("rate_limit", functionName, options);
+    return response.job_id ?? null;
+  }
 
-    let uniqueAcquired = false;
-    if (options.uniqueKey) {
-      const remainingTtl = await this.getLockTtl(options.uniqueKey);
-      if (remainingTtl > 0) {
-        desiredRunTime = new Date(
-          Math.max(
-            desiredRunTime.getTime(),
-            enqueueTime.getTime() + remainingTtl * 1000,
-          ),
-        );
-      } else {
-        uniqueAcquired = await this.acquireUniqueJobLock(
-          options.uniqueKey,
-          jobId,
-          lockTtlSeconds,
-        );
-        if (!uniqueAcquired) {
-          const remaining = await this.getLockTtl(options.uniqueKey);
-          desiredRunTime = new Date(
-            Math.max(
-              desiredRunTime.getTime(),
-              enqueueTime.getTime() + remaining * 1000,
-            ),
-          );
-        }
-      }
-    }
+  async enqueueWithDebounce(functionName: string, options: DebounceOptions): Promise<string> {
+    const response = await this.callProducer("debounce", functionName, options, {
+      includeDefers: false,
+    });
+    return this.expectJobId(response);
+  }
 
-    const jobRecord: JobRecord = {
-      id: jobId,
+  async enqueueDeferred(functionName: string, options: EnqueueOptions): Promise<string> {
+    const response = await this.callProducer("deferred", functionName, options);
+    return this.expectJobId(response);
+  }
+
+  private async callProducer(
+    mode: string,
+    functionName: string,
+    options: EnqueueOptions,
+    config: { includeDefers?: boolean } = {},
+  ): Promise<ProducerResponse> {
+    const request = {
+      mode,
       function_name: functionName,
-      job_args: JSON.stringify(args),
-      job_kwargs: JSON.stringify(kwargs),
-      enqueue_time: enqueueTime.toISOString(),
-      status: "PENDING",
-      current_retries: "0",
-      queue_name: queueName,
-      next_scheduled_run_time: desiredRunTime.toISOString(),
-      max_retries: String(options.maxRetries ?? this.settings.defaultMaxRetries),
-      job_timeout_seconds: String(
-        options.jobTimeoutSeconds ?? this.settings.defaultJobTimeoutSeconds,
-      ),
-      result_ttl_seconds: String(
-        options.resultTtlSeconds ?? this.settings.defaultResultTtlSeconds,
-      ),
-      result: JSON.stringify(null),
+      args: options.args ?? [],
+      kwargs: options.kwargs ?? {},
+      options: this.buildOptions(options, config),
     };
 
-    if (options.uniqueKey) {
-      jobRecord.job_unique_key = options.uniqueKey;
-    }
-    if (options.traceContext) {
-      jobRecord.trace_context = JSON.stringify(options.traceContext);
-    }
-
-    const jobKey = `${JOB_KEY_PREFIX}${jobId}`;
-    const queueKey = formatQueueKey(queueName);
-    const score = desiredRunTime.getTime();
-
     try {
-      const pipeline = this.redis.pipeline();
-      pipeline.hset(jobKey, jobRecord);
-      pipeline.zadd(queueKey, score, jobId);
-      await pipeline.exec();
-    } catch (error) {
-      if (uniqueAcquired && options.uniqueKey) {
-        await this.releaseUniqueJobLock(options.uniqueKey);
+      ProducerRequestSchema.parse(request);
+      const response = (await this.producer.enqueue(request)) as ProducerResponse;
+      const parsed = ProducerResponseSchema.safeParse(response);
+      if (!parsed.success) {
+        throw new RustProducerError(parsed.error.message);
       }
-      throw error;
+      return parsed.data;
+    } catch (error) {
+      if (error instanceof RustProducerError) {
+        throw error;
+      }
+      throw new RustProducerError(String(error));
+    }
+  }
+
+  private buildOptions(
+    options: EnqueueOptions,
+    config: { includeDefers?: boolean },
+  ): Record<string, unknown> {
+    const includeDefers = config.includeDefers ?? true;
+    const payload: Record<string, unknown> = {
+      queue_name: options.queueName,
+      job_id: options.jobId,
+      unique_key: options.uniqueKey,
+      unique_ttl_seconds: options.uniqueKey
+        ? (options.uniqueTtlSeconds ?? this.settings.defaultUniqueJobLockTtlSeconds)
+        : undefined,
+      max_retries: options.maxRetries,
+      job_timeout_seconds: options.jobTimeoutSeconds,
+      result_ttl_seconds: options.resultTtlSeconds,
+      trace_context: options.traceContext ?? undefined,
+    };
+
+    if (includeDefers) {
+      if (options.deferUntil) {
+        payload.defer_until = formatDeferUntil(options.deferUntil);
+      }
+      if (options.deferBySeconds !== undefined) {
+        if (!Number.isFinite(options.deferBySeconds)) {
+          throw new RustProducerError("deferBySeconds must be finite");
+        }
+        payload.defer_by_seconds = Math.max(0, options.deferBySeconds);
+      }
     }
 
+    if ("rateLimitKey" in options) {
+      if (!Number.isFinite((options as RateLimitOptions).rateLimitSeconds)) {
+        throw new RustProducerError("rateLimitSeconds must be finite");
+      }
+      payload.rate_limit_key = (options as RateLimitOptions).rateLimitKey;
+      payload.rate_limit_seconds = (options as RateLimitOptions).rateLimitSeconds;
+    }
+
+    if ("debounceKey" in options) {
+      if (!Number.isFinite((options as DebounceOptions).debounceSeconds)) {
+        throw new RustProducerError("debounceSeconds must be finite");
+      }
+      payload.debounce_key = (options as DebounceOptions).debounceKey;
+      payload.debounce_seconds = (options as DebounceOptions).debounceSeconds;
+    }
+
+    return payload;
+  }
+
+  private expectJobId(response: ProducerResponse): string {
+    const jobId = response.job_id;
+    if (!jobId) {
+      throw new RustProducerError("Producer did not return a job_id");
+    }
     return jobId;
   }
-
-  private async acquireUniqueJobLock(
-    uniqueKey: string,
-    jobId: string,
-    ttlSeconds: number,
-  ): Promise<boolean> {
-    const lockKey = `${UNIQUE_JOB_LOCK_PREFIX}${uniqueKey}`;
-    const result = await this.redis.set(lockKey, jobId, "EX", ttlSeconds, "NX");
-    return result === "OK";
-  }
-
-  private async releaseUniqueJobLock(uniqueKey: string): Promise<void> {
-    const lockKey = `${UNIQUE_JOB_LOCK_PREFIX}${uniqueKey}`;
-    await this.redis.del(lockKey);
-  }
-
-  private async getLockTtl(uniqueKey: string): Promise<number> {
-    const lockKey = `${UNIQUE_JOB_LOCK_PREFIX}${uniqueKey}`;
-    const ttl = await this.redis.ttl(lockKey);
-    return typeof ttl === "number" && ttl > 0 ? ttl : 0;
-  }
-}
-
-export function formatQueueKey(queueName: string): string {
-  if (queueName.startsWith(QUEUE_KEY_PREFIX)) {
-    return queueName;
-  }
-  return `${QUEUE_KEY_PREFIX}${queueName}`;
-}
-
-function ensureUtcDate(value: Date): Date {
-  if (Number.isNaN(value.getTime())) {
-    throw new Error("Invalid deferUntil timestamp");
-  }
-  return value;
 }
 
 export { DEFAULT_SETTINGS };
+export { RustProducerError };
+
+function formatDeferUntil(value: Date): string {
+  if (Number.isNaN(value.getTime())) {
+    throw new RustProducerError("Invalid deferUntil timestamp");
+  }
+  return value.toISOString();
+}

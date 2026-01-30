@@ -1363,6 +1363,7 @@ dependencies = [
  "chrono",
  "redis",
  "rustls",
+ "serde",
  "serde_json",
  "tokio",
  "uuid",

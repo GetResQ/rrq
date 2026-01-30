@@ -18,7 +18,6 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from .client import RRQClient
-from .exc import HandlerNotFound
 from .executor import ExecutionError, ExecutionOutcome, ExecutionRequest, PythonExecutor
 from .executor_settings import PythonExecutorSettings
 from .protocol import read_message, write_message
@@ -32,6 +31,7 @@ ENV_EXECUTOR_SETTINGS = "RRQ_EXECUTOR_SETTINGS"
 ENV_EXECUTOR_SOCKET = "RRQ_EXECUTOR_SOCKET"
 ENV_EXECUTOR_TCP_SOCKET = "RRQ_EXECUTOR_TCP_SOCKET"
 _LOCALHOST_ALIASES = {"localhost", "127.0.0.1", "::1"}
+MAX_IN_FLIGHT_PER_CONNECTION = 64
 
 
 class CancelRequest(BaseModel):
@@ -189,16 +189,6 @@ async def _execute_and_respond(
     try:
         try:
             outcome = await _execute_with_deadline(executor, request)
-        except HandlerNotFound as exc:
-            outcome = ExecutionOutcome(
-                job_id=request.job_id,
-                request_id=request.request_id,
-                status="error",
-                error=ExecutionError(
-                    message=str(exc),
-                    type="handler_not_found",
-                ),
-            )
         except asyncio.CancelledError:
             outcome = ExecutionOutcome(
                 job_id=request.job_id,
@@ -376,6 +366,25 @@ async def _handle_connection(
                     await _write_outcome(writer, outcome, write_lock)
                     continue
 
+                async with connection_lock:
+                    if len(connection_requests) >= MAX_IN_FLIGHT_PER_CONNECTION:
+                        busy = True
+                    else:
+                        busy = False
+                        connection_requests.add(request.request_id)
+                        connection_jobs[request.request_id] = request.job_id
+                if busy:
+                    outcome = ExecutionOutcome(
+                        job_id=request.job_id,
+                        request_id=request.request_id,
+                        status="error",
+                        error=ExecutionError(
+                            message="Executor busy: too many in-flight requests"
+                        ),
+                    )
+                    await _write_outcome(writer, outcome, write_lock)
+                    continue
+
                 task = asyncio.create_task(
                     _execute_and_respond(
                         executor,
@@ -390,9 +399,6 @@ async def _handle_connection(
                     name=f"rrq-executor-{request.request_id}",
                 )
                 await tracker.track_start(request.request_id, request.job_id, task)
-                async with connection_lock:
-                    connection_requests.add(request.request_id)
-                    connection_jobs[request.request_id] = request.job_id
                 continue
 
             if message_type == "cancel":

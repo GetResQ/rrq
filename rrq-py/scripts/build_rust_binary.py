@@ -16,6 +16,7 @@ REPO_ROOT = PY_ROOT.parent
 RUST_WORKSPACE = REPO_ROOT / "rrq-rs"
 TARGET_DIR = RUST_WORKSPACE / "target"
 PACKAGE_BIN_DIR = PY_ROOT / "rrq" / "bin"
+PRODUCER_LIB_NAME = "rrq_producer"
 
 
 def _run(cmd: list[str], *, env: dict[str, str] | None = None) -> None:
@@ -111,7 +112,52 @@ def _build_binary(target: str) -> Path:
     return built
 
 
+def _producer_lib_filename() -> str:
+    if sys.platform == "win32":
+        return f"{PRODUCER_LIB_NAME}.dll"
+    if sys.platform == "darwin":
+        return f"lib{PRODUCER_LIB_NAME}.dylib"
+    return f"lib{PRODUCER_LIB_NAME}.so"
+
+
+def _build_producer_lib(target: str) -> Path:
+    env = os.environ.copy()
+    env["CARGO_TARGET_DIR"] = str(TARGET_DIR)
+
+    _run(["rustup", "target", "add", target], env=env)
+    _run(
+        [
+            "cargo",
+            "build",
+            "--release",
+            "-p",
+            "rrq-producer",
+            "--lib",
+            "--target",
+            target,
+            "--manifest-path",
+            str(RUST_WORKSPACE / "Cargo.toml"),
+        ],
+        env=env,
+    )
+
+    lib_name = _producer_lib_filename()
+    built = TARGET_DIR / target / "release" / lib_name
+    if not built.exists():
+        raise FileNotFoundError(f"Built producer library not found at {built}")
+    return built
+
+
 def _install_binary(built: Path) -> None:
+    _ensure_path(PACKAGE_BIN_DIR)
+    dest = PACKAGE_BIN_DIR / built.name
+    shutil.copy2(built, dest)
+    if sys.platform != "win32":
+        dest.chmod(0o755)
+    print(f"Installed {dest}")
+
+
+def _install_producer_lib(built: Path) -> None:
     _ensure_path(PACKAGE_BIN_DIR)
     dest = PACKAGE_BIN_DIR / built.name
     shutil.copy2(built, dest)
@@ -125,6 +171,8 @@ def main() -> None:
     target = _detect_target()
     built = _build_binary(target)
     _install_binary(built)
+    producer_lib = _build_producer_lib(target)
+    _install_producer_lib(producer_lib)
 
 
 if __name__ == "__main__":

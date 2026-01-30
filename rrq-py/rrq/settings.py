@@ -48,7 +48,7 @@ class RRQSettings(BaseModel):
     )
     default_unique_job_lock_ttl_seconds: int = Field(
         default=DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
-        description="Default TTL (in seconds) for unique job locks if `_unique_key` is used during enqueue.",
+        description="Default TTL (in seconds) for idempotency keys if `_unique_key` is used during enqueue.",
     )
     expected_job_ttl: int = Field(
         default=30,

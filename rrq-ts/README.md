@@ -5,7 +5,8 @@ TypeScript/JavaScript package for RRQ (Reliable Redis Queue). Includes:
 - **Producer** client for enqueuing jobs into RRQ.
 - **Executor runtime** to run job handlers over the RRQ socket protocol.
 
-Designed to work with **Node.js** and **Bun**.
+Designed to work with **Node.js (20+)** and **Bun**. The producer FFI uses
+`koffi` on Node and `bun:ffi` when running under Bun.
 
 ## Installation
 
@@ -33,6 +34,21 @@ console.log("enqueued", jobId);
 await client.close();
 ```
 
+### Producer requirements
+
+The TypeScript producer uses the Rust `rrq_producer` shared library via FFI.
+Provide the library in one of these ways:
+
+- Set `RRQ_PRODUCER_LIB_PATH` to the absolute path of the shared library.
+- Place the library in `rrq-ts/bin` (e.g. `librrq_producer.dylib`, `librrq_producer.so`,
+  or `rrq_producer.dll`).
+
+To build the library from this repo:
+
+```bash
+cargo build -p rrq-producer --release
+```
+
 ### Producer options
 
 ```ts
@@ -42,6 +58,7 @@ interface EnqueueOptions {
   queueName?: string;
   jobId?: string;
   uniqueKey?: string;
+  uniqueTtlSeconds?: number;
   maxRetries?: number;
   jobTimeoutSeconds?: number;
   resultTtlSeconds?: number;
@@ -49,6 +66,26 @@ interface EnqueueOptions {
   deferBySeconds?: number;
   traceContext?: Record<string, string> | null;
 }
+```
+
+`uniqueKey` is idempotency: repeated enqueues with the same key return the same
+job id.
+
+### Rate limit / debounce
+
+```ts
+const jobId = await client.enqueueWithRateLimit("send_email", {
+  rateLimitKey: "user-123",
+  rateLimitSeconds: 5,
+});
+if (jobId === null) {
+  // rate limited
+}
+
+const debouncedId = await client.enqueueWithDebounce("sync_user", {
+  debounceKey: "user-123",
+  debounceSeconds: 5,
+});
 ```
 
 ## Executor runtime usage
@@ -81,13 +118,19 @@ RRQ_EXECUTOR_SOCKET=/tmp/rrq-executor.sock node dist/executor_runtime.js
 ## Build
 
 ```bash
-npm run build
+bun run build
+```
+
+## Tests
+
+```bash
+bun test
 ```
 
 ## Notes
 
-- Producer writes job hashes and queue entries compatible with RRQ's Python/Rust
-  orchestrator.
+- Producer uses the Rust FFI library for enqueue semantics consistent with RRQ's
+  Rust/Python producers.
 - The executor implements the RRQ v1 socket protocol.
 
 ## License

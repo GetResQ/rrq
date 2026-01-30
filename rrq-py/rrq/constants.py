@@ -21,6 +21,7 @@ ACTIVE_JOBS_PREFIX: str = (
 )
 LOCK_KEY_PREFIX: str = "rrq:lock:job:"  # For job processing locks
 UNIQUE_JOB_LOCK_PREFIX: str = "rrq:lock:unique:"  # For user-defined unique job keys
+IDEMPOTENCY_KEY_PREFIX: str = "rrq:idempotency:"
 HEALTH_KEY_PREFIX: str = "rrq:health:worker:"
 RETRY_COUNTER_PREFIX: str = (
     "rrq:retry_count:"  # Potentially, if not stored directly in job hash

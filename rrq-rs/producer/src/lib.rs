@@ -19,6 +19,9 @@ use std::sync::Once;
 use std::time::Duration;
 use uuid::Uuid;
 
+#[allow(dead_code)]
+mod ffi;
+
 static CRYPTO_PROVIDER_INIT: Once = Once::new();
 
 /// Ensures the rustls crypto provider is installed for TLS connections (rediss://).
@@ -33,6 +36,8 @@ fn ensure_crypto_provider() {
 const JOB_KEY_PREFIX: &str = "rrq:job:";
 const QUEUE_KEY_PREFIX: &str = "rrq:queue:";
 const IDEMPOTENCY_KEY_PREFIX: &str = "rrq:idempotency:";
+const RATE_LIMIT_KEY_PREFIX: &str = "rrq:rate_limit:";
+const DEBOUNCE_KEY_PREFIX: &str = "rrq:debounce:";
 const DEFAULT_IDEMPOTENCY_TTL_SECONDS: i64 = 6 * 60 * 60;
 
 /// Job status as stored in Redis.
@@ -112,6 +117,8 @@ pub struct Producer {
     default_job_timeout_seconds: i64,
     default_result_ttl_seconds: i64,
     enqueue_script: Script,
+    rate_limit_script: Script,
+    debounce_script: Script,
 }
 
 /// Configuration for creating a Producer.
@@ -126,10 +133,10 @@ pub struct ProducerConfig {
 impl Default for ProducerConfig {
     fn default() -> Self {
         Self {
-            queue_name: "default".to_string(),
-            max_retries: 3,
+            queue_name: "rrq:queue:default".to_string(),
+            max_retries: 5,
             job_timeout_seconds: 300,
-            result_ttl_seconds: 3600,
+            result_ttl_seconds: 3600 * 24,
         }
     }
 }
@@ -157,6 +164,8 @@ impl Producer {
             default_job_timeout_seconds: config.job_timeout_seconds,
             default_result_ttl_seconds: config.result_ttl_seconds,
             enqueue_script: build_enqueue_script(),
+            rate_limit_script: build_rate_limit_script(),
+            debounce_script: build_debounce_script(),
         })
     }
 
@@ -169,6 +178,8 @@ impl Producer {
             default_job_timeout_seconds: config.job_timeout_seconds,
             default_result_ttl_seconds: config.result_ttl_seconds,
             enqueue_script: build_enqueue_script(),
+            rate_limit_script: build_rate_limit_script(),
+            debounce_script: build_debounce_script(),
         }
     }
 
@@ -252,6 +263,173 @@ impl Producer {
         match status {
             1 => Ok(returned_id),
             0 => Ok(returned_id),
+            -1 => anyhow::bail!("job_id already exists"),
+            _ => anyhow::bail!("unexpected enqueue status"),
+        }
+    }
+
+    /// Enqueue a job with a leading-edge rate limit.
+    ///
+    /// Returns Ok(None) when the rate limit key is already held.
+    pub async fn enqueue_with_rate_limit(
+        &self,
+        function_name: &str,
+        args: Vec<Value>,
+        kwargs: Map<String, Value>,
+        rate_limit_key: &str,
+        rate_limit_window: Duration,
+        options: EnqueueOptions,
+    ) -> Result<Option<String>> {
+        validate_name("function_name", function_name)?;
+        validate_name("rate_limit_key", rate_limit_key)?;
+        let queue_name = options
+            .queue_name
+            .unwrap_or_else(|| self.default_queue_name.clone());
+        validate_name("queue_name", &queue_name)?;
+        let job_id = options.job_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let enqueue_time = options.enqueue_time.unwrap_or_else(Utc::now);
+        let scheduled_time = options.scheduled_time.unwrap_or(enqueue_time);
+        let max_retries = options.max_retries.unwrap_or(self.default_max_retries);
+        let job_timeout_seconds = options
+            .job_timeout_seconds
+            .unwrap_or(self.default_job_timeout_seconds);
+        if job_timeout_seconds <= 0 {
+            anyhow::bail!("job_timeout_seconds must be positive");
+        }
+        let result_ttl_seconds = options
+            .result_ttl_seconds
+            .unwrap_or(self.default_result_ttl_seconds);
+
+        let ttl_seconds = rate_limit_window.as_secs_f64().ceil() as i64;
+        if ttl_seconds <= 0 {
+            anyhow::bail!("rate_limit_window must be positive");
+        }
+
+        let job_key = format!("{JOB_KEY_PREFIX}{job_id}");
+        let queue_key = format_queue_key(&queue_name);
+        let rate_limit_key = format_rate_limit_key(rate_limit_key);
+        let score_ms = scheduled_time.timestamp_millis() as f64;
+
+        let job_args_json = serde_json::to_string(&args)?;
+        let job_kwargs_json = serde_json::to_string(&kwargs)?;
+        let trace_context_json = if let Some(trace_context) = options.trace_context {
+            serde_json::to_string(&trace_context)?
+        } else {
+            String::new()
+        };
+
+        let mut conn = self.manager.clone();
+        let (status, returned_id): (i64, String) = self
+            .rate_limit_script
+            .key(job_key)
+            .key(queue_key)
+            .key(rate_limit_key)
+            .arg(&job_id)
+            .arg(function_name)
+            .arg(&job_args_json)
+            .arg(&job_kwargs_json)
+            .arg(enqueue_time.to_rfc3339())
+            .arg("PENDING")
+            .arg(0i64)
+            .arg(scheduled_time.to_rfc3339())
+            .arg(max_retries)
+            .arg(job_timeout_seconds)
+            .arg(result_ttl_seconds)
+            .arg(&queue_name)
+            .arg("null")
+            .arg(trace_context_json)
+            .arg(score_ms)
+            .arg(ttl_seconds)
+            .invoke_async(&mut conn)
+            .await?;
+
+        match status {
+            1 => Ok(Some(returned_id)),
+            2 => Ok(None),
+            -1 => anyhow::bail!("job_id already exists"),
+            _ => anyhow::bail!("unexpected enqueue status"),
+        }
+    }
+
+    /// Enqueue a job using trailing-edge debounce semantics.
+    ///
+    /// Reuses a pending job for the debounce key when possible and reschedules it
+    /// for `enqueue_time + debounce_window`.
+    pub async fn enqueue_with_debounce(
+        &self,
+        function_name: &str,
+        args: Vec<Value>,
+        kwargs: Map<String, Value>,
+        debounce_key: &str,
+        debounce_window: Duration,
+        options: EnqueueOptions,
+    ) -> Result<String> {
+        validate_name("function_name", function_name)?;
+        validate_name("debounce_key", debounce_key)?;
+        let queue_name = options
+            .queue_name
+            .unwrap_or_else(|| self.default_queue_name.clone());
+        validate_name("queue_name", &queue_name)?;
+        let job_id = options.job_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let enqueue_time = options.enqueue_time.unwrap_or_else(Utc::now);
+        let scheduled_time = options.scheduled_time.unwrap_or_else(|| {
+            enqueue_time + chrono::Duration::from_std(debounce_window).unwrap_or_default()
+        });
+        let max_retries = options.max_retries.unwrap_or(self.default_max_retries);
+        let job_timeout_seconds = options
+            .job_timeout_seconds
+            .unwrap_or(self.default_job_timeout_seconds);
+        if job_timeout_seconds <= 0 {
+            anyhow::bail!("job_timeout_seconds must be positive");
+        }
+        let result_ttl_seconds = options
+            .result_ttl_seconds
+            .unwrap_or(self.default_result_ttl_seconds);
+
+        let ttl_seconds = debounce_window.as_secs_f64().ceil() as i64;
+        if ttl_seconds <= 0 {
+            anyhow::bail!("debounce_window must be positive");
+        }
+
+        let queue_key = format_queue_key(&queue_name);
+        let debounce_key = format_debounce_key(debounce_key);
+        let score_ms = scheduled_time.timestamp_millis() as f64;
+
+        let job_args_json = serde_json::to_string(&args)?;
+        let job_kwargs_json = serde_json::to_string(&kwargs)?;
+        let trace_context_json = if let Some(trace_context) = options.trace_context {
+            serde_json::to_string(&trace_context)?
+        } else {
+            String::new()
+        };
+
+        let mut conn = self.manager.clone();
+        let (status, returned_id): (i64, String) = self
+            .debounce_script
+            .key(queue_key)
+            .key(debounce_key)
+            .arg(JOB_KEY_PREFIX)
+            .arg(&job_id)
+            .arg(function_name)
+            .arg(&job_args_json)
+            .arg(&job_kwargs_json)
+            .arg(enqueue_time.to_rfc3339())
+            .arg("PENDING")
+            .arg(0i64)
+            .arg(scheduled_time.to_rfc3339())
+            .arg(max_retries)
+            .arg(job_timeout_seconds)
+            .arg(result_ttl_seconds)
+            .arg(&queue_name)
+            .arg("null")
+            .arg(trace_context_json)
+            .arg(score_ms)
+            .arg(ttl_seconds)
+            .invoke_async(&mut conn)
+            .await?;
+
+        match status {
+            1 | 0 => Ok(returned_id),
             -1 => anyhow::bail!("job_id already exists"),
             _ => anyhow::bail!("unexpected enqueue status"),
         }
@@ -372,6 +550,22 @@ fn format_idempotency_key(key: &str) -> String {
     format!("{IDEMPOTENCY_KEY_PREFIX}{key}")
 }
 
+fn format_rate_limit_key(key: &str) -> String {
+    if key.starts_with(RATE_LIMIT_KEY_PREFIX) {
+        key.to_string()
+    } else {
+        format!("{RATE_LIMIT_KEY_PREFIX}{key}")
+    }
+}
+
+fn format_debounce_key(key: &str) -> String {
+    if key.starts_with(DEBOUNCE_KEY_PREFIX) {
+        key.to_string()
+    } else {
+        format!("{DEBOUNCE_KEY_PREFIX}{key}")
+    }
+}
+
 fn validate_name(label: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         anyhow::bail!("{label} cannot be empty");
@@ -439,6 +633,133 @@ fn build_enqueue_script() -> Script {
         job_prefix = JOB_KEY_PREFIX
     );
     Script::new(&script)
+}
+
+fn build_rate_limit_script() -> Script {
+    let script = "\
+        -- KEYS: [1] = job_key, [2] = queue_key, [3] = rate_limit_key\n\
+        -- ARGV: [1] = job_id, [2] = function_name, [3] = job_args, [4] = job_kwargs\n\
+        --       [5] = enqueue_time, [6] = status, [7] = current_retries\n\
+        --       [8] = next_scheduled_run_time, [9] = max_retries\n\
+        --       [10] = job_timeout_seconds, [11] = result_ttl_seconds\n\
+        --       [12] = queue_name, [13] = result, [14] = trace_context_json\n\
+        --       [15] = score_ms, [16] = rate_limit_ttl_seconds\n\
+        local rate_key = KEYS[3]\n\
+        local rate_set = false\n\
+        if rate_key ~= '' then\n\
+            local ttl = tonumber(ARGV[16])\n\
+            if not ttl or ttl <= 0 then\n\
+                return {-2, ARGV[1]}\n\
+            end\n\
+            local ok = redis.call('SET', rate_key, ARGV[1], 'NX', 'EX', ttl)\n\
+            if not ok then\n\
+                return {2, ''}\n\
+            end\n\
+            rate_set = true\n\
+        end\n\
+        if redis.call('EXISTS', KEYS[1]) == 1 then\n\
+            if rate_set then\n\
+                redis.call('DEL', rate_key)\n\
+            end\n\
+            return {-1, ARGV[1]}\n\
+        end\n\
+        redis.call('HSET', KEYS[1],\n\
+            'id', ARGV[1],\n\
+            'function_name', ARGV[2],\n\
+            'job_args', ARGV[3],\n\
+            'job_kwargs', ARGV[4],\n\
+            'enqueue_time', ARGV[5],\n\
+            'status', ARGV[6],\n\
+            'current_retries', ARGV[7],\n\
+            'next_scheduled_run_time', ARGV[8],\n\
+            'max_retries', ARGV[9],\n\
+            'job_timeout_seconds', ARGV[10],\n\
+            'result_ttl_seconds', ARGV[11],\n\
+            'queue_name', ARGV[12],\n\
+            'result', ARGV[13])\n\
+        if ARGV[14] ~= '' then\n\
+            redis.call('HSET', KEYS[1], 'trace_context', ARGV[14])\n\
+        end\n\
+        redis.call('ZADD', KEYS[2], ARGV[15], ARGV[1])\n\
+        return {1, ARGV[1]}";
+    Script::new(script)
+}
+
+fn build_debounce_script() -> Script {
+    let script = "\
+        -- KEYS: [1] = queue_key, [2] = debounce_key\n\
+        -- ARGV: [1] = job_prefix, [2] = job_id, [3] = function_name, [4] = job_args\n\
+        --       [5] = job_kwargs, [6] = enqueue_time, [7] = status\n\
+        --       [8] = current_retries, [9] = next_scheduled_run_time\n\
+        --       [10] = max_retries, [11] = job_timeout_seconds\n\
+        --       [12] = result_ttl_seconds, [13] = queue_name\n\
+        --       [14] = result, [15] = trace_context_json\n\
+        --       [16] = score_ms, [17] = debounce_ttl_seconds\n\
+        local existing_id = redis.call('GET', KEYS[2])\n\
+        if existing_id then\n\
+            local existing_job_key = ARGV[1] .. existing_id\n\
+            if redis.call('EXISTS', existing_job_key) == 1 then\n\
+                local status = redis.call('HGET', existing_job_key, 'status')\n\
+                if status == 'PENDING' then\n\
+                    redis.call('HSET', existing_job_key,\n\
+                        'function_name', ARGV[3],\n\
+                        'job_args', ARGV[4],\n\
+                        'job_kwargs', ARGV[5],\n\
+                        'next_scheduled_run_time', ARGV[9],\n\
+                        'max_retries', ARGV[10],\n\
+                        'job_timeout_seconds', ARGV[11],\n\
+                        'result_ttl_seconds', ARGV[12],\n\
+                        'queue_name', ARGV[13])\n\
+                    if ARGV[15] ~= '' then\n\
+                        redis.call('HSET', existing_job_key, 'trace_context', ARGV[15])\n\
+                    end\n\
+                    redis.call('ZADD', KEYS[1], ARGV[16], existing_id)\n\
+                    local ttl = tonumber(ARGV[17])\n\
+                    if ttl and ttl > 0 then\n\
+                        redis.call('EXPIRE', KEYS[2], ttl)\n\
+                    end\n\
+                    return {0, existing_id}\n\
+                end\n\
+            end\n\
+            redis.call('DEL', KEYS[2])\n\
+        end\n\
+        local job_key = ARGV[1] .. ARGV[2]\n\
+        if redis.call('EXISTS', job_key) == 1 then\n\
+            return {-1, ARGV[2]}\n\
+        end\n\
+        local ttl = tonumber(ARGV[17])\n\
+        if ttl and ttl > 0 then\n\
+            local ok = redis.call('SET', KEYS[2], ARGV[2], 'NX', 'EX', ttl)\n\
+            if not ok then\n\
+                local other = redis.call('GET', KEYS[2])\n\
+                if other then\n\
+                    return {0, other}\n\
+                end\n\
+                return {2, ''}\n\
+            end\n\
+        else\n\
+            redis.call('SET', KEYS[2], ARGV[2], 'NX')\n\
+        end\n\
+        redis.call('HSET', job_key,\n\
+            'id', ARGV[2],\n\
+            'function_name', ARGV[3],\n\
+            'job_args', ARGV[4],\n\
+            'job_kwargs', ARGV[5],\n\
+            'enqueue_time', ARGV[6],\n\
+            'status', ARGV[7],\n\
+            'current_retries', ARGV[8],\n\
+            'next_scheduled_run_time', ARGV[9],\n\
+            'max_retries', ARGV[10],\n\
+            'job_timeout_seconds', ARGV[11],\n\
+            'result_ttl_seconds', ARGV[12],\n\
+            'queue_name', ARGV[13],\n\
+            'result', ARGV[14])\n\
+        if ARGV[15] ~= '' then\n\
+            redis.call('HSET', job_key, 'trace_context', ARGV[15])\n\
+        end\n\
+        redis.call('ZADD', KEYS[1], ARGV[16], ARGV[2])\n\
+        return {1, ARGV[2]}";
+    Script::new(script)
 }
 
 fn parse_result(result: &str) -> Option<Value> {
