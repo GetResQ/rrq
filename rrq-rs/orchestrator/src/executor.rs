@@ -1144,7 +1144,23 @@ mod tests {
         assert!(err.to_string().contains("already in use"));
 
         drop(listener);
-        pool.ensure_tcp_port_available(addr).unwrap();
+        let mut last_err: Option<anyhow::Error> = None;
+        for _ in 0..10 {
+            match pool.ensure_tcp_port_available(addr) {
+                Ok(()) => {
+                    last_err = None;
+                    break;
+                }
+                Err(err) if err.to_string().contains("already in use") => {
+                    last_err = Some(err);
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(err) => panic!("unexpected error: {err}"),
+            }
+        }
+        if let Some(err) = last_err {
+            panic!("port still in use after release: {err}");
+        }
     }
 
     #[tokio::test]
