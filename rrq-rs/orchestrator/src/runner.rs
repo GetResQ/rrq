@@ -10,8 +10,8 @@ use crate::constants::DEFAULT_RUNNER_CONNECT_TIMEOUT_MS;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rrq_protocol::{
-    CancelRequest, ExecutionOutcome, ExecutionRequest, RunnerMessage, FRAME_HEADER_LEN,
-    PROTOCOL_VERSION, encode_frame,
+    CancelRequest, ExecutionOutcome, ExecutionRequest, FRAME_HEADER_LEN, PROTOCOL_VERSION,
+    RunnerMessage, encode_frame,
 };
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -70,9 +70,7 @@ fn parse_tcp_socket(raw: &str) -> Result<TcpSocketSpec> {
             .parse()
             .with_context(|| format!("Invalid runner tcp_socket host: {host}"))?;
         if !parsed.is_loopback() {
-            return Err(anyhow::anyhow!(
-                "runner tcp_socket host must be localhost"
-            ));
+            return Err(anyhow::anyhow!("runner tcp_socket host must be localhost"));
         }
         parsed
     };
@@ -806,7 +804,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{RunnerConfig, RunnerType, RRQSettings};
+    use crate::settings::{RRQSettings, RunnerConfig, RunnerType};
     use std::net::TcpListener as StdTcpListener;
     use tokio::net::TcpListener as TokioTcpListener;
     use tokio::process::Command;
@@ -1316,12 +1314,9 @@ mod tests {
                 "wrong-req",
                 serde_json::json!({"ok": true}),
             );
-            write_message(
-                &mut stream,
-                &RunnerMessage::Response { payload: response },
-            )
-            .await
-            .unwrap();
+            write_message(&mut stream, &RunnerMessage::Response { payload: response })
+                .await
+                .unwrap();
         });
 
         let child = Command::new("sleep").arg("60").spawn().unwrap();

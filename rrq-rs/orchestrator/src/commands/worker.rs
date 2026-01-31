@@ -278,8 +278,7 @@ pub(crate) async fn run_worker_watch(
         let mut settings = settings;
         settings.worker_shutdown_grace_period_seconds = 0.0;
         let runners =
-            build_runners_from_settings(&settings, Some(&pool_sizes), Some(&max_in_flight))
-                .await?;
+            build_runners_from_settings(&settings, Some(&pool_sizes), Some(&max_in_flight)).await?;
         let queue_arg = if queues.is_empty() {
             None
         } else {

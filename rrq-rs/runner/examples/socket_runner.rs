@@ -1,5 +1,5 @@
 use rrq_runner::{
-    ENV_RUNNER_TCP_SOCKET, ExecutionOutcome, RunnerRuntime, Registry, parse_tcp_socket,
+    ENV_RUNNER_TCP_SOCKET, ExecutionOutcome, Registry, RunnerRuntime, parse_tcp_socket,
 };
 
 #[cfg(not(feature = "otel"))]

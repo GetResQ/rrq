@@ -2,7 +2,7 @@ use crate::registry::Registry;
 use crate::telemetry::{NoopTelemetry, Telemetry};
 use crate::types::{ExecutionError, ExecutionOutcome};
 use chrono::{DateTime, Utc};
-use rrq_protocol::{CancelRequest, RunnerMessage, OutcomeStatus, PROTOCOL_VERSION, encode_frame};
+use rrq_protocol::{CancelRequest, OutcomeStatus, PROTOCOL_VERSION, RunnerMessage, encode_frame};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{

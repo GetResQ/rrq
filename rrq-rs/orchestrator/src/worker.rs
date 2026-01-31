@@ -16,8 +16,8 @@ use uuid::Uuid;
 use crate::client::{EnqueueOptions, RRQClient};
 use crate::constants::DEFAULT_WORKER_ID_PREFIX;
 use crate::cron::CronJob;
-use crate::runner::Runner;
 use crate::job::{Job, JobStatus};
+use crate::runner::Runner;
 use crate::settings::RRQSettings;
 use crate::store::JobStore;
 

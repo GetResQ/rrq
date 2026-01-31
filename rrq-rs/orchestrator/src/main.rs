@@ -8,8 +8,8 @@ mod commands;
 use commands::{
     DlqListOptions, DlqRequeueOptions, check_workers, debug_clear, debug_generate_jobs,
     debug_generate_workers, debug_stress_test, debug_submit, dlq_inspect, dlq_list, dlq_requeue,
-    dlq_stats, runner_python, job_cancel, job_list, job_replay, job_show, job_trace,
-    queue_inspect, queue_list, queue_stats, run_worker, run_worker_watch,
+    dlq_stats, job_cancel, job_list, job_replay, job_show, job_trace, queue_inspect, queue_list,
+    queue_stats, run_worker, run_worker_watch, runner_python,
 };
 
 #[derive(Parser)]
