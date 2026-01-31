@@ -59,7 +59,7 @@ class RRQClient:
         function_name: str,
         options: dict[str, Any] | None = None,
     ) -> str:
-        options = options or {}
+        options = dict(options) if options else {}
         args = list(options.pop("args", []))
         kwargs = dict(options.pop("kwargs", {}))
 

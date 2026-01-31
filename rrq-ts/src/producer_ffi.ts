@@ -51,8 +51,6 @@ function platformLibraryName(): string | null {
       return "librrq_producer.so";
     case "darwin":
       return "librrq_producer.dylib";
-    case "win32":
-      return "rrq_producer.dll";
     default:
       return null;
   }
@@ -78,7 +76,6 @@ function findLibraryPath(): string {
   candidates.push(
     path.join(baseDir, "librrq_producer.so"),
     path.join(baseDir, "librrq_producer.dylib"),
-    path.join(baseDir, "rrq_producer.dll"),
   );
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) {

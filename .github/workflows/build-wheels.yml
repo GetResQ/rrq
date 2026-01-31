@@ -79,31 +79,6 @@ jobs:
           name: rrq-producer-darwin-arm64
           path: artifact/librrq_producer.dylib
 
-  build-ffi-windows-x64:
-    runs-on: windows-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build rrq producer shared library
-        run: cargo build -p rrq-producer --release
-        working-directory: rrq-rs
-
-      - name: Stage shared library
-        shell: bash
-        run: |
-          mkdir -p artifact
-          cp rrq-rs/target/release/rrq_producer.dll artifact/
-
-      - name: Upload shared library
-        uses: actions/upload-artifact@v4
-        with:
-          name: rrq-producer-win32-x64
-          path: artifact/rrq_producer.dll
-
   build-linux-x86_64:
     runs-on: ubuntu-22.04
     steps:
@@ -210,7 +185,6 @@ jobs:
       - build-ffi-linux-x64
       - build-ffi-linux-arm64
       - build-ffi-macos-arm64
-      - build-ffi-windows-x64
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -242,12 +216,6 @@ jobs:
         with:
           name: rrq-producer-darwin-arm64
           path: rrq-ts/bin/darwin-arm64
-
-      - name: Download Windows x64 shared library
-        uses: actions/download-artifact@v4
-        with:
-          name: rrq-producer-win32-x64
-          path: rrq-ts/bin/win32-x64
 
       - name: Install dependencies
         run: bun install

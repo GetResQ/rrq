@@ -128,7 +128,6 @@ def _find_library() -> Path:
     candidates = [
         base_dir / "librrq_producer.so",
         base_dir / "librrq_producer.dylib",
-        base_dir / "rrq_producer.dll",
     ]
     for path in candidates:
         if path.exists():

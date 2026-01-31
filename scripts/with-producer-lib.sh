@@ -16,7 +16,7 @@ cd "$ROOT_DIR/rrq-rs"
 cargo build -p rrq-producer --release
 
 LIB=""
-for ext in dylib so dll; do
+for ext in dylib so; do
   candidate="$ROOT_DIR/rrq-rs/target/release/librrq_producer.$ext"
   if [ -f "$candidate" ]; then
     LIB="$candidate"
