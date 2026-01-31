@@ -1,4 +1,4 @@
-name: Build Wheels
+name: Release
 
 on:
   workflow_dispatch:
@@ -261,3 +261,33 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+
+  publish-crates:
+    runs-on: ubuntu-22.04
+    permissions:
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish rrq-protocol
+        run: cargo publish -p rrq-protocol
+        working-directory: rrq-rs
+
+      - name: Publish rrq-config
+        run: cargo publish -p rrq-config
+        working-directory: rrq-rs
+
+      - name: Wait for crates.io indexing
+        run: sleep 30
+
+      - name: Publish rrq-producer
+        run: cargo publish -p rrq-producer
+        working-directory: rrq-rs
+
+      - name: Publish rrq-runner
+        run: cargo publish -p rrq-runner
+        working-directory: rrq-rs
