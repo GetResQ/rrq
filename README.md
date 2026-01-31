@@ -9,8 +9,8 @@ implemented in Rust, with runners available in multiple languages.
 ## At a Glance
 
 - **Rust orchestrator**: schedules, retries, timeouts, DLQ, cron.
-- **TCP runners**: Python, Rust, or any other runtime.
-- **Python SDK**: enqueue jobs and run a Python runner runtime.
+- **TCP runners**: Python, TypeScript, Rust, or any other runtime.
+- **Python + TypeScript SDKs**: enqueue jobs and run runner runtimes.
 
 ## Repo Layout
 
@@ -19,14 +19,15 @@ implemented in Rust, with runners available in multiple languages.
 - `examples/` Python + Rust usage samples
 - `rrq-py/` Python package (`rrq`), tests, and build tooling
 - `rrq-rs/` Rust workspace (orchestrator, producer, runner, protocol)
-- `rrq-ts/` placeholder for the future TypeScript package
+- `rrq-ts/` TypeScript package (producer + runner runtime)
 
 ## Architecture
 
 ```
 ┌──────────────────────────────┐
 │        Producers SDKs        │
-│  (Python, Rust, other langs) │
+│ (Python, TypeScript, Rust,   │
+│        other langs)          │
 └───────────────┬──────────────┘
                 │ enqueue jobs
                 ▼
@@ -51,8 +52,8 @@ implemented in Rust, with runners available in multiple languages.
                  │ (request <-> outcome)
                  ▼
    ┌─────────────────────┬─────────────────────┐
-   │ Python Runner     │ Rust/Other Runner │
-   │ (rrq-runner)      │ (rrq-runner)      │
+   │ Python/TS Runner   │ Rust/Other Runner │
+   │ (rrq-runner)       │ (rrq-runner)      │
    └───────────────────────────────────────────┘
 ```
 
@@ -62,6 +63,7 @@ state/results back to Redis.
 ## Requirements
 
 - Python 3.11+ (producer + Python runner runtime)
+- Node.js 20+ or Bun (TypeScript producer + runner runtime)
 - Rust `rrq` binary (bundled in wheels or provided separately)
 - Redis 5.0+
 
@@ -137,6 +139,45 @@ async def main():
 
 asyncio.run(main())
 ```
+
+## TypeScript (Producer + Runner)
+
+### Install
+
+```
+npm install rrq-ts
+```
+
+### Enqueue jobs (TypeScript)
+
+```ts
+import { RRQClient } from "rrq-ts";
+
+const client = new RRQClient({ redisDsn: "redis://localhost:6379/1" });
+await client.enqueue("process_message", { args: ["hello"] });
+await client.close();
+```
+
+### Run a TypeScript runner
+
+```ts
+import { RunnerRuntime, Registry } from "rrq-ts";
+
+const registry = new Registry();
+registry.register("process_message", async (request) => ({
+  job_id: request.job_id,
+  request_id: request.request_id,
+  status: "success",
+  result: { ok: true },
+}));
+
+const runtime = new RunnerRuntime(registry);
+await runtime.runFromEnv();
+```
+
+The TypeScript producer uses the Rust `rrq_producer` shared library via FFI.
+See `rrq-ts/README.md` for how to provide the shared library in local dev or
+published packages.
 
 ## Configuration
 
