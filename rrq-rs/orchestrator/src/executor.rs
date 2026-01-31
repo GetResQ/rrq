@@ -654,8 +654,10 @@ impl Executor for SocketExecutor {
             Ok(())
         }
         .await;
-        let mut in_flight = self.in_flight.lock().await;
-        in_flight.remove(&request_id);
+        if result.is_ok() {
+            let mut in_flight = self.in_flight.lock().await;
+            in_flight.remove(&request_id);
+        }
         result
     }
 
