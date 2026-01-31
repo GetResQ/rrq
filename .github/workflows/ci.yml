@@ -20,6 +20,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
@@ -32,18 +35,22 @@ jobs:
 
       - name: Sync dependencies
         run: uv sync --extra dev
+        working-directory: rrq-py
 
       - name: Ruff format check
         run: uv run ruff format --check
+        working-directory: rrq-py
 
       - name: Ruff lint
         run: uv run ruff check
+        working-directory: rrq-py
 
       - name: Type check
         run: uv run ty check
+        working-directory: rrq-py
 
       - name: Run tests
-        run: uv run pytest --disable-warnings -q --maxfail=1
+        run: scripts/with-producer-lib.sh -- sh -c "cd rrq-py && uv run pytest --disable-warnings -q --maxfail=1"
 
   rust:
     runs-on: ubuntu-latest
@@ -93,3 +100,110 @@ jobs:
       - name: Rust coverage
         run: cargo llvm-cov --workspace --fail-under-lines 80
         working-directory: rrq-rs
+
+  typescript:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.1.29"
+
+      - name: Install dependencies
+        run: bun install
+        working-directory: rrq-ts
+
+      - name: TypeScript lint
+        run: bun run lint
+        working-directory: rrq-ts
+
+      - name: TypeScript oxlint
+        run: bun run oxlint
+        working-directory: rrq-ts
+
+      - name: TypeScript oxfmt
+        run: bun run oxfmt:check
+        working-directory: rrq-ts
+
+      - name: TypeScript tsgo
+        run: bun run tsgo
+        working-directory: rrq-ts
+
+      - name: TypeScript tests
+        run: scripts/with-producer-lib.sh -- sh -c "cd rrq-ts && bun test"
+
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install uv CLI
+        run: |
+          python -m pip install --upgrade pip uv
+
+      - name: Sync dependencies
+        run: uv sync --extra dev
+        working-directory: rrq-py
+
+      - name: Install build tooling
+        run: uv pip install build
+        working-directory: rrq-py
+
+      - name: Build Python wheel (includes rrq-producer lib)
+        run: |
+          uv run python scripts/build_rust_binary.py
+          uv run python -m build --wheel
+        working-directory: rrq-py
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.1.29"
+
+      - name: Install TypeScript dependencies
+        run: bun install
+        working-directory: rrq-ts
+
+      - name: Stage rrq-producer shared library
+        run: |
+          mkdir -p rrq-ts/bin/linux-x64
+          cp rrq-py/rrq/bin/librrq_producer.so rrq-ts/bin/linux-x64/
+
+      - name: Build TypeScript package
+        run: bun run build
+        working-directory: rrq-ts
+
+      - name: Pack npm artifact
+        run: npm pack
+        working-directory: rrq-ts

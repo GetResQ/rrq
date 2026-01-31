@@ -7,7 +7,6 @@ import asyncio
 from pathlib import Path
 
 from rrq.client import RRQClient
-from rrq.config import load_toml_settings
 
 
 async def main() -> None:
@@ -22,7 +21,7 @@ async def main() -> None:
     parser.add_argument(
         "--include-rust",
         action="store_true",
-        help="Enqueue a single rust# task (requires rust executor)",
+        help="Enqueue a single rust# task (requires rust runner)",
     )
     parser.add_argument(
         "--rust-count",
@@ -32,19 +31,18 @@ async def main() -> None:
     )
     args = parser.parse_args()
 
-    settings = load_toml_settings(args.config)
-    client = RRQClient(settings=settings)
+    client = RRQClient(config_path=args.config)
 
     try:
         for i in range(args.count):
-            await client.enqueue("quick_task", f"msg-{i}")
-        await client.enqueue("slow_task", 1.0)
-        await client.enqueue("error_task")
-        await client.enqueue("retry_task", 2)
+            await client.enqueue("quick_task", {"args": [f"msg-{i}"]})
+        await client.enqueue("slow_task", {"args": [1.0]})
+        await client.enqueue("error_task", {})
+        await client.enqueue("retry_task", {"args": [2]})
 
         rust_count = args.rust_count or (1 if args.include_rust else 0)
         for i in range(rust_count):
-            await client.enqueue("rust#echo", {"hello": f"from python {i}"})
+            await client.enqueue("rust#echo", {"kwargs": {"hello": f"from python {i}"}})
     finally:
         await client.close()
 

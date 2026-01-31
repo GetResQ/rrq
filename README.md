@@ -1,23 +1,33 @@
 # RRQ: Reliable Redis Queue
 
 RRQ is a Redis-backed job queue **system** with a Rust orchestrator and a
-language-agnostic executor protocol. Producers can enqueue jobs from Python,
-Rust, or any language that can write the job schema to Redis. Executors can be
+language-agnostic runner protocol. Producers can enqueue jobs from Python,
+Rust, or any language that can write the job schema to Redis. Runners can be
 written in any language that can speak the socket protocol. The orchestrator is
-implemented in Rust, with executors available in multiple languages.
+implemented in Rust, with runners available in multiple languages.
 
 ## At a Glance
 
 - **Rust orchestrator**: schedules, retries, timeouts, DLQ, cron.
-- **Unix socket executors**: Python, Rust, or any other runtime.
-- **Python SDK**: enqueue jobs and run a Python executor runtime.
+- **TCP runners**: Python, TypeScript, Rust, or any other runtime.
+- **Python + TypeScript SDKs**: enqueue jobs and run runner runtimes.
+
+## Repo Layout
+
+- `.github/` CI workflows
+- `docs/` design docs, protocols, references
+- `examples/` Python + Rust usage samples
+- `rrq-py/` Python package (`rrq`), tests, and build tooling
+- `rrq-rs/` Rust workspace (orchestrator, producer, runner, protocol)
+- `rrq-ts/` TypeScript package (producer + runner runtime)
 
 ## Architecture
 
 ```
 ┌──────────────────────────────┐
 │        Producers SDKs        │
-│  (Python, Rust, other langs) │
+│ (Python, TypeScript, Rust,   │
+│        other langs)          │
 └───────────────┬──────────────┘
                 │ enqueue jobs
                 ▼
@@ -38,21 +48,22 @@ implemented in Rust, with executors available in multiple languages.
       │ - queue routing              │
       │ - cron jobs                  │
       └──────────┬───────────────────┘
-                 │ Unix socket protocol
+                 │ TCP socket protocol
                  │ (request <-> outcome)
                  ▼
    ┌─────────────────────┬─────────────────────┐
-   │ Python Executor     │ Rust/Other Executor │
-   │ (rrq-executor)      │ (rrq-executor)      │
+   │ Python/TS Runner   │ Rust/Other Runner │
+   │ (rrq-runner)       │ (rrq-runner)      │
    └───────────────────────────────────────────┘
 ```
 
-Executors return outcomes to the orchestrator; the orchestrator persists job
+Runners return outcomes to the orchestrator; the orchestrator persists job
 state/results back to Redis.
 
 ## Requirements
 
-- Python 3.11+ (producer + Python executor runtime)
+- Python 3.11+ (producer + Python runner runtime)
+- Node.js 20+ or Bun (TypeScript producer + runner runtime)
 - Rust `rrq` binary (bundled in wheels or provided separately)
 - Redis 5.0+
 
@@ -71,42 +82,36 @@ uv pip install rrq
 ```toml
 [rrq]
 redis_dsn = "redis://localhost:6379/1"
-default_executor_name = "python"
+default_runner_name = "python"
 
-[rrq.executors.python]
+[rrq.runners.python]
 type = "socket"
-cmd = ["rrq-executor", "--settings", "myapp.executor_config.python_executor_settings"]
-# Optional: override the directory used for executor sockets.
-# socket_dir = "/tmp/rrq-executor"
-# Optional: use a localhost TCP socket instead of Unix sockets (pool_size must be 1).
-# tcp_socket = "127.0.0.1:9000"
+cmd = ["rrq-runner", "--settings", "myapp.runner_config.python_runner_settings"]
+# Required: localhost TCP socket (host:port). For pool_size > 1, ports increment.
+tcp_socket = "127.0.0.1:9000"
 ```
 
 ### 3) Register Python handlers
 
 ```python
-# executor_config.py
-from rrq.config import load_toml_settings
-from rrq.executor_settings import PythonExecutorSettings
-from rrq.registry import JobRegistry
+# runner_config.py
+from rrq.runner_settings import PythonRunnerSettings
+from rrq.registry import Registry
 
 from . import handlers
 
-job_registry = JobRegistry()
-job_registry.register("process_message", handlers.process_message)
+registry = Registry()
+registry.register("process_message", handlers.process_message)
 
-rrq_settings = load_toml_settings("rrq.toml")
-
-python_executor_settings = PythonExecutorSettings(
-    rrq_settings=rrq_settings,
-    job_registry=job_registry,
+python_runner_settings = PythonRunnerSettings(
+    registry=registry,
 )
 ```
 
-### 4) Run the Python executor
+### 4) Run the Python runner
 
 ```
-rrq-executor --settings myapp.executor_config.python_executor_settings
+rrq-runner --settings myapp.runner_config.python_runner_settings
 ```
 
 ### 5) Run the Rust orchestrator
@@ -120,30 +125,78 @@ rrq worker run --config rrq.toml
 ```python
 import asyncio
 from rrq.client import RRQClient
-from rrq.config import load_toml_settings
 
 async def main():
-    settings = load_toml_settings("rrq.toml")
-    client = RRQClient(settings=settings)
-    await client.enqueue("process_message", "hello")
+    client = RRQClient(config_path="rrq.toml")
+    await client.enqueue("process_message", {"args": ["hello"]})
     await client.close()
 
 asyncio.run(main())
 ```
 
+## TypeScript (Producer + Runner)
+
+### Install
+
+```
+npm install rrq-ts
+```
+
+### Enqueue jobs (TypeScript)
+
+```ts
+import { RRQClient } from "rrq-ts";
+
+const client = new RRQClient({
+  config: { redisDsn: "redis://localhost:6379/1" },
+});
+await client.enqueue("process_message", { args: ["hello"] });
+await client.close();
+```
+
+### Run a TypeScript runner
+
+```ts
+import { RunnerRuntime, Registry } from "rrq-ts";
+
+const registry = new Registry();
+registry.register("process_message", async (request) => ({
+  job_id: request.job_id,
+  request_id: request.request_id,
+  status: "success",
+  result: { ok: true },
+}));
+
+const runtime = new RunnerRuntime(registry);
+await runtime.runFromEnv();
+```
+
+The TypeScript producer uses the Rust `rrq_producer` shared library via FFI.
+See `rrq-ts/README.md` for how to provide the shared library in local dev or
+published packages.
+
+For packaging details (wheels + npm), see `docs/FFI_PACKAGING.md`.
+
+## Telemetry
+
+RRQ runners can emit OpenTelemetry spans (`rrq.runner`). Producers can attach
+`trace_context` on enqueue to link traces from producer → runner. See
+`docs/TELEMETRY.md` for end-to-end examples with Python/TypeScript/Rust.
+
 ## Configuration
 
-`rrq.toml` is the source of truth for the orchestrator and executors. Key areas:
+`rrq.toml` is the source of truth for the orchestrator and runners. Key areas:
 
 - `[rrq]` basic settings (Redis, retries, timeouts, poll delay)
-- `[rrq.executors.<name>]` socket executor commands, pool sizes, and
+- `[rrq.runners.<name>]` runner commands, pool sizes, and
   `max_in_flight`
-- `[rrq.routing]` queue → executor mapping
+- `[rrq.runner_routes]` queue → runner mapping (legacy `[rrq.routing]` still
+  accepted)
 - `[[rrq.cron_jobs]]` periodic scheduling
 - `[rrq.watch]` watch mode defaults (path/patterns)
 
 See `docs/CONFIG_REFERENCE.md` for the full TOML schema,
-`docs/CLI_REFERENCE.md` for CLI details, and `docs/EXECUTOR_PROTOCOL.md` for
+`docs/CLI_REFERENCE.md` for CLI details, and `docs/RUNNER_PROTOCOL.md` for
 wire format.
 
 ## Cron Jobs (rrq.toml)
@@ -182,8 +235,8 @@ Fields:
 `rrq worker watch` runs a normal worker loop plus a filesystem watcher. It
 watches a path recursively and normalizes change paths before matching include
 globs (default `*.py`, `*.toml`) and ignore globs. A matching change triggers a
-graceful worker shutdown, closes executors, and starts a fresh worker. Watch
-mode is intended for local development; executor pool sizes and
+graceful worker shutdown, closes runners, and starts a fresh worker. Watch
+mode is intended for local development; runner pool sizes and
 `max_in_flight` are forced to 1 to keep restarts lightweight. It also respects
 `.gitignore` and `.git/info/exclude` by default; disable with `--no-gitignore`.
 
@@ -197,35 +250,37 @@ ignore_patterns = [".venv/**", "dist/**"]
 no_gitignore = false
 ```
 
-## Executor Logs
+## Runner Logs
 
-Executors can emit logs to stdout/stderr. The orchestrator captures these lines
-and emits them with executor prefixes. Structured logging is not part of the
+Runners can emit logs to stdout/stderr. The orchestrator captures these lines
+and emits them with runner prefixes. Structured logging is not part of the
 wire protocol.
 
 ## Testing
 
-Runtime-only Python tests (producer + executor + store):
+Runtime-only Python tests (producer + runner + store):
 
 ```
+cd rrq-py
 uv run pytest
 ```
 
 End-to-end integration (Python-only, Rust-only, mixed):
 
 ```
-uv run python -m examples.integration_test
+cd rrq-py
+uv run python ../examples/integration_test.py
 ```
 
 ## Reference Implementations
 
-- Rust orchestrator (crate `rrq`): `rrq-rs/rrq-orchestrator`
-- Rust producer: `rrq-rs/rrq-producer`
-- Rust executor: `rrq-rs/rrq-executor`
-- Protocol types: `rrq-rs/rrq-protocol`
-- Python socket executor example: `reference/python/socket_executor.py`
+- Rust orchestrator (crate `rrq`): `rrq-rs/orchestrator`
+- Rust producer: `rrq-rs/producer`
+- Rust runner: `rrq-rs/runner`
+- Protocol types: `rrq-rs/protocol`
+- Python runner examples: `examples/python/`
 
 ## Telemetry
 
 Optional tracing integrations are available for Python producers and the Python
-executor runtime. See `rrq/integrations/`.
+runner runtime. See `rrq-py/rrq/integrations/`.

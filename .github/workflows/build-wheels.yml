@@ -7,6 +7,78 @@ on:
       - "v*"
 
 jobs:
+  build-ffi-linux-x64:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build rrq producer shared library
+        run: cargo build -p rrq-producer --release
+        working-directory: rrq-rs
+
+      - name: Stage shared library
+        run: |
+          mkdir -p artifact
+          cp rrq-rs/target/release/librrq_producer.so artifact/
+
+      - name: Upload shared library
+        uses: actions/upload-artifact@v4
+        with:
+          name: rrq-producer-linux-x64
+          path: artifact/librrq_producer.so
+
+  build-ffi-linux-arm64:
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build rrq producer shared library
+        run: cargo build -p rrq-producer --release
+        working-directory: rrq-rs
+
+      - name: Stage shared library
+        run: |
+          mkdir -p artifact
+          cp rrq-rs/target/release/librrq_producer.so artifact/
+
+      - name: Upload shared library
+        uses: actions/upload-artifact@v4
+        with:
+          name: rrq-producer-linux-arm64
+          path: artifact/librrq_producer.so
+
+  build-ffi-macos-arm64:
+    runs-on: macos-14
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build rrq producer shared library
+        run: cargo build -p rrq-producer --release
+        working-directory: rrq-rs
+
+      - name: Stage shared library
+        run: |
+          mkdir -p artifact
+          cp rrq-rs/target/release/librrq_producer.dylib artifact/
+
+      - name: Upload shared library
+        uses: actions/upload-artifact@v4
+        with:
+          name: rrq-producer-darwin-arm64
+          path: artifact/librrq_producer.dylib
+
   build-linux-x86_64:
     runs-on: ubuntu-22.04
     steps:
@@ -24,21 +96,25 @@ jobs:
 
       - name: Sync dependencies
         run: uv sync --extra dev
+        working-directory: rrq-py
 
       - name: Install build tooling
         run: uv pip install build
+        working-directory: rrq-py
 
       - name: Build Rust binary
         run: uv run python scripts/build_rust_binary.py
+        working-directory: rrq-py
 
       - name: Build wheel
         run: uv run python -m build --wheel
+        working-directory: rrq-py
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-x86_64
-          path: dist/*.whl
+          path: rrq-py/dist/*.whl
 
   build-linux-aarch64:
     runs-on: ubuntu-22.04-arm
@@ -57,21 +133,25 @@ jobs:
 
       - name: Sync dependencies
         run: uv sync --extra dev
+        working-directory: rrq-py
 
       - name: Install build tooling
         run: uv pip install build
+        working-directory: rrq-py
 
       - name: Build Rust binary
         run: uv run python scripts/build_rust_binary.py
+        working-directory: rrq-py
 
       - name: Build wheel
         run: uv run python -m build --wheel
+        working-directory: rrq-py
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-aarch64
-          path: dist/*.whl
+          path: rrq-py/dist/*.whl
 
   build-macos:
     runs-on: ${{ matrix.os }}
@@ -89,10 +169,68 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.21.0
         with:
-          output-dir: wheelhouse
+          output-dir: rrq-py/wheelhouse
+        env:
+          CIBW_PROJECT_DIR: rrq-py
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.arch }}
-          path: wheelhouse/*.whl
+          path: rrq-py/wheelhouse/*.whl
+
+  build-npm-package:
+    runs-on: ubuntu-22.04
+    needs:
+      - build-ffi-linux-x64
+      - build-ffi-linux-arm64
+      - build-ffi-macos-arm64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: "1.1.29"
+
+      - name: Download Linux x64 shared library
+        uses: actions/download-artifact@v4
+        with:
+          name: rrq-producer-linux-x64
+          path: rrq-ts/bin/linux-x64
+
+      - name: Download Linux arm64 shared library
+        uses: actions/download-artifact@v4
+        with:
+          name: rrq-producer-linux-arm64
+          path: rrq-ts/bin/linux-arm64
+
+      - name: Download macOS arm64 shared library
+        uses: actions/download-artifact@v4
+        with:
+          name: rrq-producer-darwin-arm64
+          path: rrq-ts/bin/darwin-arm64
+
+      - name: Install dependencies
+        run: bun install
+        working-directory: rrq-ts
+
+      - name: Build package
+        run: bun run build
+        working-directory: rrq-ts
+
+      - name: Pack npm artifact
+        run: npm pack
+        working-directory: rrq-ts
+
+      - name: Upload npm package
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: rrq-ts/*.tgz

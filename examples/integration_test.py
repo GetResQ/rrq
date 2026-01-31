@@ -1,6 +1,6 @@
 """Integration test script for RRQ example apps.
 
-Runs Python and Rust producers against Python/Rust executors, verifying that
+Runs Python and Rust producers against Python/Rust runners, verifying that
 queued work drains once the Rust orchestrator is started.
 """
 
@@ -10,6 +10,7 @@ import argparse
 import os
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -20,7 +21,11 @@ from pathlib import Path
 from typing import Iterable
 
 import redis
-from rrq.constants import JOB_KEY_PREFIX, QUEUE_KEY_PREFIX
+from rrq.producer_ffi import get_producer_constants
+
+_CONSTANTS = get_producer_constants()
+JOB_KEY_PREFIX = _CONSTANTS.job_key_prefix
+QUEUE_KEY_PREFIX = _CONSTANTS.queue_key_prefix
 
 
 @dataclass
@@ -52,11 +57,13 @@ def _write_config(
     path: Path,
     *,
     redis_dsn: str,
-    default_executor: str,
+    default_runner: str,
     python_cmd: list[str] | None = None,
     rust_cmd: list[str] | None = None,
-    worker_concurrency: int = 4,
-    routing: dict[str, str] | None = None,
+    python_tcp_socket: str | None = None,
+    rust_tcp_socket: str | None = None,
+    max_in_flight: int = 4,
+    runner_routes: dict[str, str] | None = None,
     default_max_retries: int | None = None,
     base_retry_delay_seconds: float | None = None,
     max_retry_delay_seconds: float | None = None,
@@ -64,8 +71,7 @@ def _write_config(
     lines: list[str] = [
         "[rrq]",
         f'redis_dsn = "{redis_dsn}"',
-        f'default_executor_name = "{default_executor}"',
-        f"worker_concurrency = {worker_concurrency}",
+        f'default_runner_name = "{default_runner}"',
     ]
     if default_max_retries is not None:
         lines.append(f"default_max_retries = {default_max_retries}")
@@ -78,27 +84,35 @@ def _write_config(
     if python_cmd is not None:
         lines.extend(
             [
-                "[rrq.executors.python]",
+                "[rrq.runners.python]",
                 'type = "socket"',
                 f"cmd = {_toml_list(python_cmd)}",
-                "",
+                "pool_size = 1",
+                f"max_in_flight = {max_in_flight}",
             ]
         )
+        if python_tcp_socket is not None:
+            lines.append(f'tcp_socket = "{python_tcp_socket}"')
+        lines.append("")
 
     if rust_cmd is not None:
         lines.extend(
             [
-                "[rrq.executors.rust]",
+                "[rrq.runners.rust]",
                 'type = "socket"',
                 f"cmd = {_toml_list(rust_cmd)}",
-                "",
+                "pool_size = 1",
+                f"max_in_flight = {max_in_flight}",
             ]
         )
+        if rust_tcp_socket is not None:
+            lines.append(f'tcp_socket = "{rust_tcp_socket}"')
+        lines.append("")
 
-    if routing:
-        lines.append("[rrq.routing]")
-        for queue_name, executor_name in routing.items():
-            lines.append(f'{queue_name} = "{executor_name}"')
+    if runner_routes:
+        lines.append("[rrq.runner_routes]")
+        for queue_name, runner_name in runner_routes.items():
+            lines.append(f'{queue_name} = "{runner_name}"')
         lines.append("")
 
     path.write_text("\n".join(lines))
@@ -111,40 +125,56 @@ def _run(
     subprocess.run(cmd, cwd=cwd, env=env, check=True)
 
 
-def _resolve_rrq_cmd(root: Path) -> list[str]:
-    packaged = root / "rrq" / "bin"
-    if sys.platform == "win32":
-        packaged_bin = packaged / "rrq.exe"
-    else:
-        packaged_bin = packaged / "rrq"
-    if packaged_bin.exists():
-        return [str(packaged_bin)]
-
+def _resolve_rrq_cmd() -> list[str]:
     rrq_path = shutil.which("rrq")
     if rrq_path:
-        resolved = Path(rrq_path).resolve()
-        # Prefer cargo run if rrq comes from the repo's .venv (often stale in dev).
-        if ".venv" not in resolved.parts or root not in resolved.parents:
-            return [str(resolved)]
+        return [rrq_path]
 
-    if shutil.which("cargo") is None:
-        raise SystemExit(
-            "rrq CLI not found on PATH and cargo is unavailable to build it."
-        )
-
-    manifest_path = root / "rrq-rs" / "Cargo.toml"
-    return [
-        "cargo",
-        "run",
-        "--quiet",
-        "-p",
-        "rrq",
-        "--bin",
-        "rrq",
-        "--manifest-path",
-        str(manifest_path),
-        "--",
+    repo_root = Path(__file__).resolve().parents[1]
+    repo_candidates = [
+        repo_root / "rrq-py" / "rrq" / "bin" / "rrq",
+        repo_root / "rrq-rs" / "target" / "release" / "rrq",
+        repo_root / "rrq-rs" / "target" / "debug" / "rrq",
     ]
+    for candidate in repo_candidates:
+        if candidate.exists():
+            return [str(candidate)]
+
+    raise SystemExit(
+        "rrq CLI not found on PATH. Install it via `pip install rrq` or "
+        "`cargo install rrq`."
+    )
+
+
+def _resolve_producer_lib_path() -> str:
+    override = os.getenv("RRQ_PRODUCER_LIB_PATH")
+    if override:
+        path = Path(override)
+        if path.exists():
+            return str(path)
+        raise SystemExit(f"RRQ_PRODUCER_LIB_PATH not found: {override}")
+
+    repo_root = Path(__file__).resolve().parents[1]
+    candidates: list[Path] = [
+        repo_root / "rrq-py" / "rrq" / "bin" / "librrq_producer.dylib",
+        repo_root / "rrq-py" / "rrq" / "bin" / "librrq_producer.so",
+        repo_root / "rrq-py" / "rrq" / "bin" / "rrq_producer.dll",
+        repo_root / "rrq-rs" / "target" / "release" / "librrq_producer.dylib",
+        repo_root / "rrq-rs" / "target" / "release" / "librrq_producer.so",
+        repo_root / "rrq-rs" / "target" / "release" / "rrq_producer.dll",
+        repo_root / "rrq-rs" / "target" / "debug" / "librrq_producer.dylib",
+        repo_root / "rrq-rs" / "target" / "debug" / "librrq_producer.so",
+        repo_root / "rrq-rs" / "target" / "debug" / "rrq_producer.dll",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    raise SystemExit(
+        "RRQ producer library not found. Build it via "
+        "`scripts/with-producer-lib.sh -- true` or "
+        "`python rrq-py/scripts/build_rust_binary.py`."
+    )
 
 
 def _start_worker(
@@ -236,23 +266,48 @@ def _wait_for_completion(
     return False
 
 
-def _resolve_rust_executor_cmd(
-    root: Path, build: bool, override: str | None
-) -> list[str]:
+def _resolve_rust_runner_cmd(override: str | None) -> list[str]:
     if override:
         return shlex.split(override)
-    if "RRQ_RUST_EXECUTOR_CMD" in os.environ:
-        return shlex.split(os.environ["RRQ_RUST_EXECUTOR_CMD"])
+    if "RRQ_RUST_RUNNER_CMD" in os.environ:
+        return shlex.split(os.environ["RRQ_RUST_RUNNER_CMD"])
 
-    executor_dir = root / "rrq-rs" / "rrq-executor"
-    workspace_target = root / "rrq-rs" / "target"
-    binary = executor_dir / "target" / "debug" / "examples" / "socket_executor"
-    workspace_binary = workspace_target / "debug" / "examples" / "socket_executor"
-    if not binary.exists() and not workspace_binary.exists() and build:
-        _run(["cargo", "build", "--example", "socket_executor"], cwd=executor_dir)
-    if workspace_binary.exists():
-        return [str(workspace_binary)]
-    return [str(binary)]
+    runner_path = shutil.which("socket_runner")
+    if runner_path:
+        return [runner_path]
+
+    repo_root = Path(__file__).resolve().parents[1]
+    repo_candidate = (
+        repo_root / "rrq-rs" / "target" / "debug" / "examples" / "socket_runner"
+    )
+    if repo_candidate.exists():
+        return [str(repo_candidate)]
+
+    raise SystemExit(
+        "socket_runner not found on PATH. Install it via "
+        "`cargo install rrq-runner --example socket_runner` or provide "
+        "--rust-runner-cmd."
+    )
+
+
+def _resolve_ts_producer_cmd() -> list[str]:
+    bun_path = shutil.which("bun")
+    if bun_path is None:
+        raise SystemExit("bun not found on PATH. Install Bun to run TS scenarios.")
+
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "rrq-ts" / "examples" / "integration_producer.ts"
+    if not script_path.exists():
+        raise SystemExit(f"TypeScript producer script not found at {script_path}")
+
+    return [bun_path, str(script_path)]
+
+
+def _pick_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        return int(sock.getsockname()[1])
 
 
 def main() -> int:
@@ -276,10 +331,10 @@ def main() -> int:
         help="Seconds between progress logs if status unchanged",
     )
     parser.add_argument(
-        "--worker-concurrency",
+        "--max-in-flight",
         type=int,
         default=4,
-        help="Worker concurrency",
+        help="Max in-flight requests per runner process",
     )
     parser.add_argument(
         "--flush",
@@ -292,15 +347,10 @@ def main() -> int:
         help="Do not flush Redis DB before each scenario",
     )
     parser.add_argument(
-        "--no-build-rust",
-        action="store_true",
-        help="Skip building the Rust socket executor",
-    )
-    parser.add_argument(
-        "--rust-executor-cmd",
+        "--rust-runner-cmd",
         type=str,
         default=None,
-        help="Command to launch the Rust socket executor (overrides build)",
+        help="Command to launch the Rust runner (overrides PATH lookup)",
     )
     parser.add_argument(
         "--burst-worker",
@@ -320,20 +370,20 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     client = redis.Redis.from_url(args.redis_dsn, decode_responses=False)
 
-    rrq_cmd = _resolve_rrq_cmd(root)
+    rrq_cmd = _resolve_rrq_cmd()
     if shutil.which("cargo") is None:
         raise SystemExit("cargo not found on PATH. Install Rust to run Rust scenarios.")
 
-    python_executor_cmd = [
+    python_runner_cmd = [
         sys.executable,
         "-m",
-        "rrq.executor_runtime",
+        "rrq.runner_runtime",
         "--settings",
-        "examples.python.executor_config.python_executor_settings",
+        "examples.python.runner_config.python_runner_settings",
     ]
-    rust_executor_cmd = _resolve_rust_executor_cmd(
-        root, not args.no_build_rust, args.rust_executor_cmd
-    )
+    rust_runner_cmd = _resolve_rust_runner_cmd(args.rust_runner_cmd)
+    ts_producer_cmd = _resolve_ts_producer_cmd()
+    producer_lib_path = _resolve_producer_lib_path()
 
     env_base = os.environ.copy()
 
@@ -342,13 +392,16 @@ def main() -> int:
         python_config = temp_path / "rrq_python.toml"
         rust_config = temp_path / "rrq_rust.toml"
         mixed_config = temp_path / "rrq_mixed.toml"
+        python_tcp_socket = f"127.0.0.1:{_pick_free_port()}"
+        rust_tcp_socket = f"127.0.0.1:{_pick_free_port()}"
 
         _write_config(
             python_config,
             redis_dsn=args.redis_dsn,
-            default_executor="python",
-            python_cmd=python_executor_cmd,
-            worker_concurrency=args.worker_concurrency,
+            default_runner="python",
+            python_cmd=python_runner_cmd,
+            python_tcp_socket=python_tcp_socket,
+            max_in_flight=args.max_in_flight,
             default_max_retries=3,
             base_retry_delay_seconds=1.0,
             max_retry_delay_seconds=5.0,
@@ -356,9 +409,10 @@ def main() -> int:
         _write_config(
             rust_config,
             redis_dsn=args.redis_dsn,
-            default_executor="rust",
-            rust_cmd=rust_executor_cmd,
-            worker_concurrency=args.worker_concurrency,
+            default_runner="rust",
+            rust_cmd=rust_runner_cmd,
+            rust_tcp_socket=rust_tcp_socket,
+            max_in_flight=args.max_in_flight,
             default_max_retries=3,
             base_retry_delay_seconds=1.0,
             max_retry_delay_seconds=5.0,
@@ -366,11 +420,13 @@ def main() -> int:
         _write_config(
             mixed_config,
             redis_dsn=args.redis_dsn,
-            default_executor="python",
-            python_cmd=python_executor_cmd,
-            rust_cmd=rust_executor_cmd,
-            worker_concurrency=args.worker_concurrency,
-            routing={"rust_queue": "rust"},
+            default_runner="python",
+            python_cmd=python_runner_cmd,
+            rust_cmd=rust_runner_cmd,
+            python_tcp_socket=python_tcp_socket,
+            rust_tcp_socket=rust_tcp_socket,
+            max_in_flight=args.max_in_flight,
+            runner_routes={"rust_queue": "rust"},
             default_max_retries=3,
             base_retry_delay_seconds=1.0,
             max_retry_delay_seconds=5.0,
@@ -395,6 +451,52 @@ def main() -> int:
                         ],
                         cwd=root,
                     )
+                ],
+            ),
+            Scenario(
+                name="typescript-only",
+                config=python_config,
+                queues=["default"],
+                producers=[
+                    ProducerSpec(
+                        cmd=ts_producer_cmd,
+                        cwd=root,
+                        env={
+                            "RRQ_PRODUCER_LIB_PATH": producer_lib_path,
+                            "RRQ_REDIS_DSN": args.redis_dsn,
+                            "RRQ_QUEUE": "default",
+                            "RRQ_FUNCTION": "quick_task",
+                            "RRQ_COUNT": str(args.count),
+                        },
+                    )
+                ],
+            ),
+            Scenario(
+                name="typescript-rust",
+                config=rust_config,
+                queues=["rust_queue"],
+                producers=[
+                    ProducerSpec(
+                        cmd=ts_producer_cmd,
+                        cwd=root,
+                        env={
+                            "RRQ_PRODUCER_LIB_PATH": producer_lib_path,
+                            "RRQ_REDIS_DSN": args.redis_dsn,
+                            "RRQ_QUEUE": "rust_queue",
+                            "RRQ_FUNCTION": "echo",
+                            "RRQ_COUNT": str(args.count),
+                        },
+                    ),
+                    ProducerSpec(
+                        cmd=["cargo", "run", "--quiet"],
+                        cwd=rust_cwd,
+                        env={
+                            "RRQ_REDIS_DSN": args.redis_dsn,
+                            "RRQ_QUEUE": "rust_queue",
+                            "RRQ_FUNCTION": "echo",
+                            "RRQ_COUNT": str(args.count),
+                        },
+                    ),
                 ],
             ),
             Scenario(
@@ -471,7 +573,7 @@ def main() -> int:
                     )
 
             producer_env_base = env_base.copy()
-            producer_env_base["RRQ_EXECUTOR_CONFIG"] = str(scenario.config)
+            producer_env_base["RRQ_RUNNER_CONFIG"] = str(scenario.config)
 
             for producer in scenario.producers:
                 env = producer_env_base.copy()
@@ -486,7 +588,8 @@ def main() -> int:
             print(f"Queue sizes after enqueue: {sizes}")
 
             worker_env = env_base.copy()
-            worker_env["RRQ_EXECUTOR_CONFIG"] = str(scenario.config)
+            worker_env["RRQ_RUNNER_CONFIG"] = str(scenario.config)
+            worker_env.setdefault("RUST_LOG", "warn")
             worker = _start_worker(
                 rrq_cmd=rrq_cmd,
                 config_path=scenario.config,

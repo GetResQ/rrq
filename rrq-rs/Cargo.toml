@@ -1,11 +1,18 @@
 [workspace]
 resolver = "2"
 members = [
-    "rrq-executor",
-    "rrq-orchestrator",
-    "rrq-producer",
-    "rrq-protocol",
+    "config",
+    "runner",
+    "orchestrator",
+    "producer",
+    "protocol",
 ]
 
 [profile.release]
 overflow-checks = true
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+dead_code = "warn"
+
+[workspace.lints.clippy]

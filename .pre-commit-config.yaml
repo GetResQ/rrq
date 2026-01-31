@@ -3,19 +3,19 @@ repos:
     hooks:
       - id: ruff-format
         name: ruff format
-        entry: uv run ruff format
+        entry: sh -c 'cd rrq-py && uv run ruff format'
         language: system
         pass_filenames: false
         stages: [pre-push]
       - id: ruff-check
         name: ruff check
-        entry: uv run ruff check
+        entry: sh -c 'cd rrq-py && uv run ruff check'
         language: system
         pass_filenames: false
         stages: [pre-push]
       - id: ty-check
         name: ty check
-        entry: uv run ty check
+        entry: sh -c 'cd rrq-py && uv run ty check'
         language: system
         pass_filenames: false
         stages: [pre-push]
@@ -28,6 +28,36 @@ repos:
       - id: cargo-clippy
         name: cargo clippy
         entry: sh -c 'cd rrq-rs && cargo clippy --all-targets --all-features'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      - id: ts-lint
+        name: typescript lint
+        entry: sh -c 'cd rrq-ts && bun run lint'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      - id: oxfmt
+        name: oxfmt
+        entry: sh -c 'cd rrq-ts && bun run oxfmt:check'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      - id: oxlint
+        name: oxlint
+        entry: sh -c 'cd rrq-ts && bun run oxlint'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      - id: tsgo
+        name: tsgo check
+        entry: sh -c 'cd rrq-ts && bun run tsgo'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      - id: ts-test
+        name: typescript test
+        entry: sh -c 'sh scripts/with-producer-lib.sh -- sh -c "cd rrq-ts && bun test"'
         language: system
         pass_filenames: false
         stages: [pre-push]

@@ -14,7 +14,7 @@ async fn main() -> Result<()> {
         .and_then(|val| val.parse().ok())
         .unwrap_or(5);
 
-    let mut producer = Producer::new(redis_dsn).await?;
+    let producer = Producer::new(redis_dsn).await?;
 
     for i in 0..count {
         let args = vec![json!(format!("from-rust-{i}"))];

@@ -5,3 +5,14 @@ __pycache__/
 target/
 rrq/bin/rrq
 rrq/bin/rrq.exe
+rrq-py/rrq/bin/rrq
+rrq-py/rrq/bin/rrq.exe
+rrq-py/rrq/bin/*.so
+rrq-py/rrq/bin/*.dylib
+rrq-py/rrq/bin/*.dll
+rrq-ts/node_modules/
+rrq-ts/dist/
+rrq-ts/*.tsbuildinfo
+rrq-ts/bin/*.so
+rrq-ts/bin/*.dylib
+rrq-ts/bin/*.dll

@@ -1,0 +1,20 @@
+[package]
+name = "rrq-protocol"
+version = "0.9.9"
+edition = "2024"
+license = "Apache-2.0"
+description = "Shared RRQ runner protocol types."
+repository = "https://github.com/getresq/rrq"
+homepage = "https://github.com/getresq/rrq"
+documentation = "https://docs.rs/rrq-protocol"
+readme = "README.md"
+keywords = ["rrq", "redis", "queue", "jobs", "protocol"]
+categories = ["asynchronous"]
+
+[dependencies]
+chrono = { version = "0.4.43", features = ["serde"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+
+[lints]
+workspace = true
