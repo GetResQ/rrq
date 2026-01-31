@@ -1,11 +1,6 @@
 import { z } from "zod";
 
-import {
-  JobResult,
-  JobStatusResponse,
-  RustProducer,
-  RustProducerError,
-} from "./producer_ffi.js";
+import { JobResult, JobStatusResponse, RustProducer, RustProducerError } from "./producer_ffi.js";
 
 export interface ProducerConfig {
   redisDsn: string;

@@ -1,4 +1,5 @@
 import {
+  type Attributes,
   SpanKind,
   SpanStatusCode,
   context,
@@ -79,7 +80,7 @@ export class OtelTelemetry implements Telemetry {
     const parentContext = carrier
       ? propagation.extract(context.active(), carrier)
       : context.active();
-    const attributes: Record<string, unknown> = {
+    const attributes: Attributes = {
       "rrq.job_id": request.job_id,
       "rrq.function": request.function_name,
       "rrq.queue": request.context.queue_name,
