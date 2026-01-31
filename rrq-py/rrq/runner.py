@@ -1,4 +1,4 @@
-"""Executor interfaces and Python implementation for RRQ job execution."""
+"""Runner interfaces and Python implementation for RRQ job execution."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ class ExecutionContext(BaseModel):
 
 
 class ExecutionRequest(BaseModel):
-    """Job data sent to an executor."""
+    """Job data sent to an runner."""
 
     protocol_version: str = "1"
     request_id: str
@@ -42,7 +42,7 @@ class ExecutionRequest(BaseModel):
 
 
 class ExecutionError(BaseModel):
-    """Structured error information from an executor."""
+    """Structured error information from an runner."""
 
     message: str
     type: str | None = None
@@ -51,7 +51,7 @@ class ExecutionError(BaseModel):
 
 
 class ExecutionOutcome(BaseModel):
-    """Result returned by an executor."""
+    """Result returned by an runner."""
 
     job_id: str | None = None
     request_id: str | None = None
@@ -61,7 +61,7 @@ class ExecutionOutcome(BaseModel):
     retry_after_seconds: float | None = None
 
 
-class Executor(Protocol):
+class Runner(Protocol):
     async def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
         """Run a job and return an outcome."""
 
@@ -69,10 +69,10 @@ class Executor(Protocol):
         """Best-effort cancellation for in-flight jobs."""
 
     async def close(self) -> None:
-        """Release executor resources."""
+        """Release runner resources."""
 
 
-class PythonExecutor:
+class PythonRunner:
     """Executes Python handlers registered in JobRegistry."""
 
     def __init__(
@@ -110,7 +110,7 @@ class PythonExecutor:
 
         telemetry = get_telemetry()
         start_time = time.monotonic()
-        span_cm = telemetry.executor_span(
+        span_cm = telemetry.runner_span(
             job_id=request.context.job_id,
             function_name=request.function_name,
             queue_name=request.context.queue_name,

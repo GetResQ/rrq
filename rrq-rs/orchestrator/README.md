@@ -4,15 +4,15 @@
 [![Documentation](https://docs.rs/rrq/badge.svg)](https://docs.rs/rrq)
 [![License](https://img.shields.io/crates/l/rrq.svg)](LICENSE)
 
-A high-performance Redis job queue orchestrator written in Rust. RRQ manages job scheduling, worker coordination, and executor process pools for distributed task processing.
+A high-performance Redis job queue orchestrator written in Rust. RRQ manages job scheduling, worker coordination, and runner process pools for distributed task processing.
 
 ## Features
 
 - **Redis-backed job queue** with atomic operations and reliable delivery
-- **Socket-based executor pool** for running jobs in isolated processes
+- **Socket-based runner pool** for running jobs in isolated processes
 - **Auto-reconnecting Redis connections** via ConnectionManager
 - **Cron job scheduling** with standard cron syntax
-- **Watch mode** for development with automatic executor restarts
+- **Watch mode** for development with automatic runner restarts
 - **Dead letter queue (DLQ)** for failed jobs
 - **Health checks** and worker heartbeats
 - **OpenTelemetry trace context** propagation
@@ -37,11 +37,11 @@ rrq = "0.9"
 ```toml
 [rrq]
 redis_dsn = "redis://localhost:6379/0"
-default_executor_name = "python"
+default_runner_name = "python"
 
-[rrq.executors.python]
+[rrq.runners.python]
 type = "socket"
-cmd = ["rrq-executor", "--settings", "my_app.executor_settings"]
+cmd = ["rrq-runner", "--settings", "my_app.runner_settings"]
 pool_size = 2
 max_in_flight = 10
 ```
@@ -138,16 +138,16 @@ rrq health --config rrq.toml
 # Redis connection string (required)
 redis_dsn = "redis://localhost:6379/0"
 
-# Default executor for jobs without explicit executor
-default_executor_name = "python"
+# Default runner for jobs without explicit runner
+default_runner_name = "python"
 
-# Worker concurrency is derived from executor pool_size * max_in_flight
+# Worker concurrency is derived from runner pool_size * max_in_flight
 
 # Worker heartbeat interval (seconds)
 heartbeat_interval_seconds = 60
 
-# Connection timeout for executors (milliseconds)
-executor_connect_timeout_ms = 5000
+# Connection timeout for runners (milliseconds)
+runner_connect_timeout_ms = 5000
 
 # Default job timeout (seconds)
 default_job_timeout_seconds = 300
@@ -155,27 +155,27 @@ default_job_timeout_seconds = 300
 # Lock extension beyond job timeout (seconds)
 default_lock_timeout_extension_seconds = 60
 
-[rrq.executors.python]
-# Executor type: "socket" (only supported type currently)
+[rrq.runners.python]
+# Runner type: "socket" (only supported type currently)
 type = "socket"
 
-# Command to spawn executor process
-cmd = ["rrq-executor", "--settings", "my_app.settings"]
+# Command to spawn runner process
+cmd = ["rrq-runner", "--settings", "my_app.settings"]
 
-# Number of executor processes in pool
+# Number of runner processes in pool
 pool_size = 2
 
-# Max concurrent jobs per executor process
+# Max concurrent jobs per runner process
 max_in_flight = 10
 
 # TCP socket address (required)
 tcp_socket = "127.0.0.1:9000"
 
-# Optional: Working directory for executor
+# Optional: Working directory for runner
 cwd = "/app"
 
 # Optional: Environment variables
-[rrq.executors.python.env]
+[rrq.runners.python.env]
 PYTHONPATH = "/app"
 
 # Optional: Response timeout (seconds)
@@ -208,12 +208,12 @@ queue_name = "maintenance"
 │              ┌───────────┴───────────┐                       │
 │              │                       │                       │
 │      ┌───────▼───────┐       ┌───────▼───────┐              │
-│      │ Executor Pool │       │ Executor Pool │              │
+│      │ Runner Pool │       │ Runner Pool │              │
 │      │   (Python)    │       │    (Node)     │              │
 │      └───────┬───────┘       └───────┬───────┘              │
 │              │                       │                       │
 │      ┌───────▼───────┐       ┌───────▼───────┐              │
-│      │  rrq-executor │       │  rrq-executor │              │
+│      │  rrq-runner │       │  rrq-runner │              │
 │      │   (process)   │       │   (process)   │              │
 │      └───────────────┘       └───────────────┘              │
 └─────────────────────────────────────────────────────────────┘
@@ -224,16 +224,16 @@ queue_name = "maintenance"
 | Crate | Description |
 |-------|-------------|
 | [`rrq-producer`](https://crates.io/crates/rrq-producer) | Client library for enqueuing jobs |
-| [`rrq-executor`](https://crates.io/crates/rrq-executor) | Executor runtime for Python/custom handlers |
-| [`rrq-protocol`](https://crates.io/crates/rrq-protocol) | Protocol definitions for orchestrator-executor communication |
+| [`rrq-runner`](https://crates.io/crates/rrq-runner) | Runner runtime for Python/custom handlers |
+| [`rrq-protocol`](https://crates.io/crates/rrq-protocol) | Protocol definitions for orchestrator-runner communication |
 
 ## Compatibility
 
 RRQ is designed to be compatible with the Python RRQ implementation:
 - Redis schema and key prefixes match the Python implementation
-- Executor protocol is language-agnostic (see `docs/EXECUTOR_PROTOCOL.md`)
+- Runner protocol is language-agnostic (see `docs/RUNNER_PROTOCOL.md`)
 - Python producers (`rrq.client`) work with the Rust orchestrator
-- Python executors (`rrq.executor_runtime`) work with the Rust orchestrator
+- Python runners (`rrq.runner_runtime`) work with the Rust orchestrator
 
 ## Environment Variables
 
@@ -242,7 +242,7 @@ RRQ is designed to be compatible with the Python RRQ implementation:
 | `RRQ_CONFIG` | Path to configuration file |
 | `RRQ_REDIS_DSN` | Redis connection string (overrides config) |
 | `RRQ_LOG_LEVEL` | Log level: trace, debug, info, warn, error |
-| `RRQ_EXECUTOR_TCP_SOCKET` | TCP socket address (set by orchestrator for executors) |
+| `RRQ_RUNNER_TCP_SOCKET` | TCP socket address (set by orchestrator for runners) |
 
 ## License
 

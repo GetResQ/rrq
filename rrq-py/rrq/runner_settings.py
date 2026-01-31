@@ -1,4 +1,4 @@
-"""Settings model for Python executor runtime."""
+"""Settings model for Python runner runtime."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from pydantic import BaseModel
 from .registry import JobRegistry
 
 
-class PythonExecutorSettings(BaseModel):
-    """Configuration for the Python executor runtime."""
+class PythonRunnerSettings(BaseModel):
+    """Configuration for the Python runner runtime."""
 
     job_registry: JobRegistry
     on_startup: Callable[[], Awaitable[None] | None] | None = None

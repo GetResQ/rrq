@@ -22,7 +22,7 @@ async def main() -> None:
     parser.add_argument(
         "--include-rust",
         action="store_true",
-        help="Enqueue a single rust# task (requires rust executor)",
+        help="Enqueue a single rust# task (requires rust runner)",
     )
     parser.add_argument(
         "--rust-count",

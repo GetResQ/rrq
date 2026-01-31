@@ -1,7 +1,7 @@
 {
   "name": "rrq-ts",
   "version": "0.1.0",
-  "description": "RRQ TypeScript producer and executor runtime.",
+  "description": "RRQ TypeScript producer and runner runtime.",
   "license": "MIT",
   "author": "RRQ Contributors",
   "type": "module",
@@ -22,14 +22,14 @@
       "types": "./dist/producer.d.ts",
       "default": "./dist/producer.js"
     },
-    "./executor": {
-      "types": "./dist/executor_runtime.d.ts",
-      "default": "./dist/executor_runtime.js"
+    "./runner": {
+      "types": "./dist/runner_runtime.d.ts",
+      "default": "./dist/runner_runtime.js"
     }
   },
   "scripts": {
     "build:types": "tsc -p tsconfig.json --emitDeclarationOnly",
-    "build:bundle": "bun build src/index.ts src/producer.ts src/executor_runtime.ts src/settings.ts src/constants.ts --outdir dist --format esm --target node --external koffi --external bun:ffi",
+    "build:bundle": "bun build src/index.ts src/producer.ts src/runner_runtime.ts src/settings.ts src/constants.ts --outdir dist --format esm --target node --external koffi --external bun:ffi",
     "build": "bun run build:bundle && bun run build:types",
     "lint": "tsc -p tsconfig.json --noEmit",
     "oxlint": "oxlint src tests",

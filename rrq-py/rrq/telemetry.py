@@ -4,7 +4,7 @@ RRQ intentionally keeps telemetry optional: the core queue semantics must work
 even when tracing/metrics libraries are missing or misconfigured.
 
 Telemetry is configured per-process via :func:`configure` and used internally by
-RRQClient and the Python executor runtime.
+RRQClient and the Python runner runtime.
 """
 
 from __future__ import annotations
@@ -77,10 +77,10 @@ class JobSpan(AbstractContextManager["JobSpan"]):
         pass
 
 
-class ExecutorSpan(AbstractContextManager["ExecutorSpan"]):
-    """Context manager for an executor span."""
+class RunnerSpan(AbstractContextManager["RunnerSpan"]):
+    """Context manager for an runner span."""
 
-    def __enter__(self) -> "ExecutorSpan":
+    def __enter__(self) -> "RunnerSpan":
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:  # type: ignore[override]
@@ -141,7 +141,7 @@ class Telemetry:
     ) -> JobSpan:
         return _NOOP_JOB_SPAN
 
-    def executor_span(
+    def runner_span(
         self,
         *,
         job_id: str,
@@ -150,8 +150,8 @@ class Telemetry:
         attempt: int,
         trace_context: Optional[dict[str, str]],
         worker_id: Optional[str],
-    ) -> "ExecutorSpan":
-        return _NOOP_EXECUTOR_SPAN
+    ) -> "RunnerSpan":
+        return _NOOP_RUNNER_SPAN
 
     def worker_started(self, *, worker_id: str, queues: list[str]) -> None:
         pass
@@ -165,7 +165,7 @@ class Telemetry:
 
 _NOOP_ENQUEUE_SPAN = EnqueueSpan()
 _NOOP_JOB_SPAN = JobSpan()
-_NOOP_EXECUTOR_SPAN = ExecutorSpan()
+_NOOP_RUNNER_SPAN = RunnerSpan()
 _telemetry: Telemetry = Telemetry()
 
 

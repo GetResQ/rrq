@@ -12,16 +12,16 @@ All durations are in seconds unless noted otherwise.
 ```toml
 [rrq]
 redis_dsn = "redis://localhost:6379/1"
-default_executor_name = "python"
+default_runner_name = "python"
 
-[rrq.executors.python]
+[rrq.runners.python]
 type = "socket"
-cmd = ["rrq-executor", "--settings", "myapp.executor_config.python_executor_settings"]
+cmd = ["rrq-runner", "--settings", "myapp.runner_config.python_runner_settings"]
 ```
 
 ## [rrq]
 
-Core settings shared by the orchestrator, producers, and executors. The Rust
+Core settings shared by the orchestrator, producers, and runners. The Rust
 orchestrator consumes all fields; the Python SDK ignores fields it does not
 understand (for example, `cron_jobs` and `watch`).
 
@@ -35,11 +35,11 @@ understand (for example, `cron_jobs` and `watch`).
 | `default_lock_timeout_extension_seconds` | int | `60` | `RRQ_DEFAULT_LOCK_TIMEOUT_EXTENSION_SECONDS` | Extra time added to job timeout for lock TTL. |
 | `default_result_ttl_seconds` | int | `86400` | `RRQ_DEFAULT_RESULT_TTL_SECONDS` | TTL for successful job results. |
 | `default_poll_delay_seconds` | float | `0.1` | `RRQ_DEFAULT_POLL_DELAY_SECONDS` | Worker sleep when queues are empty. |
-| `executor_connect_timeout_ms` | int | `15000` | `RRQ_EXECUTOR_CONNECT_TIMEOUT_MS` | Time (ms) to wait for executor sockets to come online. |
+| `runner_connect_timeout_ms` | int | `15000` | `RRQ_RUNNER_CONNECT_TIMEOUT_MS` | Time (ms) to wait for runner sockets to come online. |
 | `default_unique_job_lock_ttl_seconds` | int | `21600` | `RRQ_DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS` | TTL for unique job locks. |
-| `default_executor_name` | string | `"python"` | `RRQ_DEFAULT_EXECUTOR_NAME` | Must match a configured executor. |
-| `executors` | table | `{}` | — | Map of executor configs. See below. |
-| `executor_routes` | table | `{}` | — | Map of `queue_name = "executor"`. |
+| `default_runner_name` | string | `"python"` | `RRQ_DEFAULT_RUNNER_NAME` | Must match a configured runner. |
+| `runners` | table | `{}` | — | Map of runner configs. See below. |
+| `runner_routes` | table | `{}` | — | Map of `queue_name = "runner"`. |
 | `worker_health_check_interval_seconds` | float | `60` | `RRQ_WORKER_HEALTH_CHECK_INTERVAL_SECONDS` | Heartbeat interval. |
 | `worker_health_check_ttl_buffer_seconds` | float | `10` | `RRQ_WORKER_HEALTH_CHECK_TTL_BUFFER_SECONDS` | Extra TTL buffer added to worker health records. |
 | `base_retry_delay_seconds` | float | `5.0` | `RRQ_BASE_RETRY_DELAY_SECONDS` | Initial retry delay for backoff. |
@@ -50,51 +50,51 @@ understand (for example, `cron_jobs` and `watch`).
 Notes:
 - Queue and DLQ names can be bare (for example, `"default"`). RRQ prefixes them
   with `rrq:queue:` or `rrq:dlq:` unless you provide a full key.
-- The worker requires at least one executor, and `default_executor_name` must
+- The worker requires at least one runner, and `default_runner_name` must
   match one of them.
-- You can select a specific executor per job by prefixing the function name as
-  `executor#handler`. This overrides queue routing.
+- You can select a specific runner per job by prefixing the function name as
+  `runner#handler`. This overrides queue routing.
 
-## [rrq.executors.<name>]
+## [rrq.runners.<name>]
 
-Executor configuration for localhost TCP socket runtimes (Python, Rust, or
+Runner configuration for localhost TCP socket runtimes (Python, Rust, or
 other).
 
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `type` | string | `"socket"` | Only `socket` is supported. |
-| `cmd` | array of strings | required | Command to start the executor. |
+| `cmd` | array of strings | required | Command to start the runner. |
 | `pool_size` | int | CPU count | Forced to `1` in watch mode. |
-| `max_in_flight` | int | `1` | Max concurrent requests per executor process. |
-| `env` | table | — | Extra environment variables for the executor process. |
-| `cwd` | string | — | Working directory for the executor process. |
+| `max_in_flight` | int | `1` | Max concurrent requests per runner process. |
+| `env` | table | — | Extra environment variables for the runner process. |
+| `cwd` | string | — | Working directory for the runner process. |
 | `tcp_socket` | string | required | Localhost TCP socket in `host:port` or `[host]:port` form. |
-| `response_timeout_seconds` | float | — | Max wait for an executor response. |
+| `response_timeout_seconds` | float | — | Max wait for an runner response. |
 
 Notes:
-- `cmd` must be present for socket executors; RRQ will start one process per
-  pool slot and pass `RRQ_EXECUTOR_TCP_SOCKET` for each process.
+- `cmd` must be present for runners; RRQ will start one process per
+  pool slot and pass `RRQ_RUNNER_TCP_SOCKET` for each process.
 - `tcp_socket` must point to a localhost address. When `pool_size > 1`, RRQ
-  assigns one port per executor process starting at the configured port (for
+  assigns one port per runner process starting at the configured port (for
   example, `9000`, `9001`, ...).
 - `response_timeout_seconds` is separate from job timeouts. If it is hit, the
-  executor process is discarded and the job is treated as failed.
+  runner process is discarded and the job is treated as failed.
 
-## [rrq.executor_routes]
+## [rrq.runner_routes]
 
-Optional queue-to-executor routing map. Legacy `[rrq.routing]` is still
-accepted and normalized to `executor_routes`.
+Optional queue-to-runner routing map. Legacy `[rrq.routing]` is still
+accepted and normalized to `runner_routes`.
 
 ```toml
-[rrq.executor_routes]
+[rrq.runner_routes]
 low_latency = "python"
 bulk = "rust"
 ```
 
 Resolution order:
-1) `executor#handler` prefix in the job's function name
-2) `[rrq.executor_routes]` entry for the queue
-3) `default_executor_name`
+1) `runner#handler` prefix in the job's function name
+2) `[rrq.runner_routes]` entry for the queue
+3) `default_runner_name`
 
 ## [[rrq.cron_jobs]]
 
@@ -122,7 +122,7 @@ unique = true
 ## [rrq.watch]
 
 Defaults for `rrq worker watch`. CLI flags override these values. Watch mode
-also forces executor pool sizes and `max_in_flight` to `1` and sets
+also forces runner pool sizes and `max_in_flight` to `1` and sets
 `worker_shutdown_grace_period_seconds` to `0`.
 
 | Key | Type | Default | Notes |

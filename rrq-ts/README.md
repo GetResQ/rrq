@@ -1,9 +1,9 @@
-# RRQ TypeScript (Producer + Executor)
+# RRQ TypeScript (Producer + Runner)
 
 TypeScript/JavaScript package for RRQ (Reliable Redis Queue). Includes:
 
 - **Producer** client for enqueuing jobs into RRQ.
-- **Executor runtime** to run job handlers over the RRQ socket protocol.
+- **Runner runtime** to run job handlers over the RRQ socket protocol.
 
 Designed to work with **Node.js (20+)** and **Bun**. The producer FFI uses
 `koffi` on Node and `bun:ffi` when running under Bun.
@@ -91,10 +91,10 @@ const debouncedId = await client.enqueueWithDebounce("sync_user", {
 });
 ```
 
-## Executor runtime usage
+## Runner runtime usage
 
 ```ts
-import { ExecutorRuntime, Registry } from "rrq-ts";
+import { RunnerRuntime, Registry } from "rrq-ts";
 
 const registry = new Registry();
 registry.register("send_email", async (request) => {
@@ -107,15 +107,15 @@ registry.register("send_email", async (request) => {
   };
 });
 
-const runtime = new ExecutorRuntime(registry);
+const runtime = new RunnerRuntime(registry);
 await runtime.runFromEnv();
 ```
 
-The orchestrator sets `RRQ_EXECUTOR_TCP_SOCKET` when launching executors. You
+The orchestrator sets `RRQ_RUNNER_TCP_SOCKET` when launching runners. You
 can also run the runtime directly:
 
 ```bash
-RRQ_EXECUTOR_TCP_SOCKET=127.0.0.1:9000 node dist/executor_runtime.js
+RRQ_RUNNER_TCP_SOCKET=127.0.0.1:9000 node dist/runner_runtime.js
 ```
 
 ## Build
@@ -140,7 +140,7 @@ sh ../scripts/with-producer-lib.sh -- sh -c "cd rrq-ts && bun test"
 
 - Producer uses the Rust FFI library for enqueue semantics consistent with RRQ's
   Rust/Python producers.
-- The executor implements the RRQ v1 socket protocol.
+- The runner implements the RRQ v1 socket protocol.
 
 ## License
 

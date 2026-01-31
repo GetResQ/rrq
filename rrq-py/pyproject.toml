@@ -42,7 +42,7 @@ dev = [
 
 [project.scripts]
 rrq = "rrq.cli:main"
-rrq-executor = "rrq.executor_runtime:main"
+rrq-runner = "rrq.runner_runtime:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"

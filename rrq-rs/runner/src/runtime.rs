@@ -2,7 +2,7 @@ use crate::registry::Registry;
 use crate::telemetry::{NoopTelemetry, Telemetry};
 use crate::types::{ExecutionError, ExecutionOutcome};
 use chrono::{DateTime, Utc};
-use rrq_protocol::{CancelRequest, ExecutorMessage, OutcomeStatus, PROTOCOL_VERSION, encode_frame};
+use rrq_protocol::{CancelRequest, RunnerMessage, OutcomeStatus, PROTOCOL_VERSION, encode_frame};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{
@@ -14,7 +14,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, timeout};
 
-pub const ENV_EXECUTOR_TCP_SOCKET: &str = "RRQ_EXECUTOR_TCP_SOCKET";
+pub const ENV_RUNNER_TCP_SOCKET: &str = "RRQ_RUNNER_TCP_SOCKET";
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 const RESPONSE_CHANNEL_CAPACITY: usize = 64;
 const RESPONSE_SEND_TIMEOUT: Duration = Duration::from_secs(1);
@@ -29,29 +29,29 @@ fn invalid_input(message: impl Into<String>) -> Box<dyn std::error::Error> {
 pub fn parse_tcp_socket(raw: &str) -> Result<SocketAddr, Box<dyn std::error::Error>> {
     let raw = raw.trim();
     if raw.is_empty() {
-        return Err(invalid_input("executor tcp_socket cannot be empty"));
+        return Err(invalid_input("runner tcp_socket cannot be empty"));
     }
 
     let (host, port_str) = if let Some(rest) = raw.strip_prefix('[') {
         let (host, port_str) = rest
             .split_once("]:")
-            .ok_or_else(|| invalid_input("executor tcp_socket must be in [host]:port format"))?;
+            .ok_or_else(|| invalid_input("runner tcp_socket must be in [host]:port format"))?;
         (host, port_str)
     } else {
         let (host, port_str) = raw
             .rsplit_once(':')
-            .ok_or_else(|| invalid_input("executor tcp_socket must be in host:port format"))?;
+            .ok_or_else(|| invalid_input("runner tcp_socket must be in host:port format"))?;
         if host.is_empty() {
-            return Err(invalid_input("executor tcp_socket host cannot be empty"));
+            return Err(invalid_input("runner tcp_socket host cannot be empty"));
         }
         (host, port_str)
     };
 
     let port: u16 = port_str
         .parse()
-        .map_err(|_| invalid_input(format!("Invalid executor tcp_socket port: {port_str}")))?;
+        .map_err(|_| invalid_input(format!("Invalid runner tcp_socket port: {port_str}")))?;
     if port == 0 {
-        return Err(invalid_input("executor tcp_socket port must be > 0"));
+        return Err(invalid_input("runner tcp_socket port must be > 0"));
     }
 
     let ip = if host == "localhost" {
@@ -59,9 +59,9 @@ pub fn parse_tcp_socket(raw: &str) -> Result<SocketAddr, Box<dyn std::error::Err
     } else {
         let parsed: IpAddr = host
             .parse()
-            .map_err(|_| invalid_input(format!("Invalid executor tcp_socket host: {host}")))?;
+            .map_err(|_| invalid_input(format!("Invalid runner tcp_socket host: {host}")))?;
         if !parsed.is_loopback() {
-            return Err(invalid_input("executor tcp_socket host must be localhost"));
+            return Err(invalid_input("runner tcp_socket host must be localhost"));
         }
         parsed
     };
@@ -69,11 +69,11 @@ pub fn parse_tcp_socket(raw: &str) -> Result<SocketAddr, Box<dyn std::error::Err
     Ok(SocketAddr::new(ip, port))
 }
 
-pub struct ExecutorRuntime {
+pub struct RunnerRuntime {
     runtime: tokio::runtime::Runtime,
 }
 
-impl ExecutorRuntime {
+impl RunnerRuntime {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             runtime: tokio::runtime::Runtime::new()?,
@@ -104,7 +104,7 @@ impl ExecutorRuntime {
 }
 
 pub fn run_tcp(registry: &Registry, addr: SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
-    ExecutorRuntime::new()?.run_tcp(registry, addr)
+    RunnerRuntime::new()?.run_tcp(registry, addr)
 }
 
 pub fn run_tcp_with<T: Telemetry + ?Sized>(
@@ -112,7 +112,7 @@ pub fn run_tcp_with<T: Telemetry + ?Sized>(
     addr: SocketAddr,
     telemetry: &T,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    ExecutorRuntime::new()?.run_tcp_with(registry, addr, telemetry)
+    RunnerRuntime::new()?.run_tcp_with(registry, addr, telemetry)
 }
 
 fn run_tcp_loop<T: Telemetry + ?Sized>(
@@ -129,7 +129,7 @@ fn run_tcp_loop<T: Telemetry + ?Sized>(
     runtime.block_on(async move {
         if !addr.ip().is_loopback() {
             return Err(invalid_input(format!(
-                "executor tcp_socket must be loopback-only (got {addr})"
+                "runner tcp_socket must be loopback-only (got {addr})"
             )));
         }
         let listener = TcpListener::bind(addr).await?;
@@ -144,7 +144,7 @@ fn run_tcp_loop<T: Telemetry + ?Sized>(
                     handle_connection(stream, &registry, telemetry.as_ref(), in_flight, job_index)
                         .await
                 {
-                    tracing::error!("executor connection error: {err}");
+                    tracing::error!("runner connection error: {err}");
                 }
             });
         }
@@ -167,7 +167,7 @@ where
         mpsc::channel::<ExecutionOutcome>(RESPONSE_CHANNEL_CAPACITY);
     let writer_task = tokio::spawn(async move {
         while let Some(outcome) = response_rx.recv().await {
-            let response = ExecutorMessage::Response { payload: outcome };
+            let response = RunnerMessage::Response { payload: outcome };
             if write_message(&mut writer, &response).await.is_err() {
                 break;
             }
@@ -182,7 +182,7 @@ where
             None => break,
         };
         match message {
-            ExecutorMessage::Request { payload } => {
+            RunnerMessage::Request { payload } => {
                 if payload.protocol_version != PROTOCOL_VERSION {
                     let outcome = ExecutionOutcome::error(
                         payload.job_id.clone(),
@@ -201,7 +201,7 @@ where
                         let outcome = ExecutionOutcome::error(
                             payload.job_id.clone(),
                             payload.request_id.clone(),
-                            "Executor busy: too many in-flight requests",
+                            "Runner busy: too many in-flight requests",
                         );
                         drop(active);
                         let _ = response_tx.try_send(outcome);
@@ -230,10 +230,10 @@ where
                     match send_result {
                         Ok(Ok(())) => {}
                         Ok(Err(_)) => {
-                            tracing::warn!("executor response channel closed; dropping outcome");
+                            tracing::warn!("runner response channel closed; dropping outcome");
                         }
                         Err(_) => {
-                            tracing::warn!("executor response channel stalled; dropping outcome");
+                            tracing::warn!("runner response channel stalled; dropping outcome");
                         }
                     }
                     {
@@ -276,10 +276,10 @@ where
                         .insert(request_id);
                 }
             }
-            ExecutorMessage::Cancel { payload } => {
+            RunnerMessage::Cancel { payload } => {
                 handle_cancel(payload, &in_flight, &job_index).await;
             }
-            ExecutorMessage::Response { .. } => {
+            RunnerMessage::Response { .. } => {
                 let outcome = ExecutionOutcome {
                     job_id: Some("unknown".to_string()),
                     request_id: None,
@@ -386,10 +386,10 @@ async fn handle_cancel(
             match send_result {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => {
-                    tracing::warn!("executor response channel closed; dropping cancel outcome");
+                    tracing::warn!("runner response channel closed; dropping cancel outcome");
                 }
                 Err(_) => {
-                    tracing::warn!("executor response channel stalled; dropping cancel outcome");
+                    tracing::warn!("runner response channel stalled; dropping cancel outcome");
                 }
             }
             let mut job_index = job_index.lock().await;
@@ -439,7 +439,7 @@ async fn execute_with_deadline<T: Telemetry + ?Sized>(
 
 async fn read_message<R: AsyncRead + Unpin>(
     stream: &mut R,
-) -> Result<Option<ExecutorMessage>, Box<dyn std::error::Error>> {
+) -> Result<Option<RunnerMessage>, Box<dyn std::error::Error>> {
     let mut header = [0u8; 4];
     match stream.read_exact(&mut header).await {
         Ok(_) => {}
@@ -448,10 +448,10 @@ async fn read_message<R: AsyncRead + Unpin>(
     }
     let length = u32::from_be_bytes(header) as usize;
     if length == 0 {
-        return Err("executor message payload cannot be empty".into());
+        return Err("runner message payload cannot be empty".into());
     }
     if length > MAX_FRAME_LEN {
-        return Err("executor message payload too large".into());
+        return Err("runner message payload too large".into());
     }
     let mut payload = vec![0u8; length];
     stream.read_exact(&mut payload).await?;
@@ -461,7 +461,7 @@ async fn read_message<R: AsyncRead + Unpin>(
 
 async fn write_message<W: AsyncWrite + Unpin>(
     stream: &mut W,
-    message: &ExecutorMessage,
+    message: &RunnerMessage,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let framed = encode_frame(message)?;
     stream.write_all(&framed).await?;
@@ -528,11 +528,11 @@ mod tests {
         });
         let mut client = client;
         let request = build_request("echo");
-        let message = ExecutorMessage::Request { payload: request };
+        let message = RunnerMessage::Request { payload: request };
         write_message(&mut client, &message).await.unwrap();
         let response = read_message(&mut client).await.unwrap().unwrap();
         match response {
-            ExecutorMessage::Response { payload } => {
+            RunnerMessage::Response { payload } => {
                 assert_eq!(payload.status, OutcomeStatus::Success);
                 assert_eq!(payload.result, Some(json!({"ok": true})));
             }
@@ -556,11 +556,11 @@ mod tests {
         let mut client = client;
         let mut request = build_request("echo");
         request.protocol_version = "0".to_string();
-        let message = ExecutorMessage::Request { payload: request };
+        let message = RunnerMessage::Request { payload: request };
         write_message(&mut client, &message).await.unwrap();
         let response = read_message(&mut client).await.unwrap().unwrap();
         match response {
-            ExecutorMessage::Response { payload } => {
+            RunnerMessage::Response { payload } => {
                 assert_eq!(payload.status, OutcomeStatus::Error);
             }
             _ => panic!("expected response"),
@@ -606,11 +606,11 @@ mod tests {
                 worker_id: None,
             },
         };
-        let message = ExecutorMessage::Request {
+        let message = RunnerMessage::Request {
             payload: request.clone(),
         };
         write_message(&mut client, &message).await.unwrap();
-        let cancel = ExecutorMessage::Cancel {
+        let cancel = RunnerMessage::Cancel {
             payload: CancelRequest {
                 protocol_version: PROTOCOL_VERSION.to_string(),
                 job_id: request.job_id.clone(),
@@ -621,7 +621,7 @@ mod tests {
         write_message(&mut client, &cancel).await.unwrap();
         let response = read_message(&mut client).await.unwrap().unwrap();
         match response {
-            ExecutorMessage::Response { payload } => {
+            RunnerMessage::Response { payload } => {
                 assert_eq!(payload.status, OutcomeStatus::Error);
                 let error_type = payload
                     .error
@@ -666,12 +666,12 @@ mod tests {
             request.request_id = format!("req-{i}");
             request.job_id = job_id.clone();
             request.context.job_id = job_id.clone();
-            write_message(&mut client, &ExecutorMessage::Request { payload: request })
+            write_message(&mut client, &RunnerMessage::Request { payload: request })
                 .await
                 .unwrap();
         }
 
-        let cancel = ExecutorMessage::Cancel {
+        let cancel = RunnerMessage::Cancel {
             payload: CancelRequest {
                 protocol_version: PROTOCOL_VERSION.to_string(),
                 job_id: job_id.clone(),
@@ -686,7 +686,7 @@ mod tests {
             .unwrap()
             .unwrap();
         match response {
-            ExecutorMessage::Response { payload } => {
+            RunnerMessage::Response { payload } => {
                 assert_eq!(payload.status, OutcomeStatus::Error);
                 let error_type = payload
                     .error
@@ -703,7 +703,7 @@ mod tests {
         extra_request.context.job_id = job_id.clone();
         write_message(
             &mut client,
-            &ExecutorMessage::Request {
+            &RunnerMessage::Request {
                 payload: extra_request,
             },
         )
@@ -719,7 +719,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .unwrap();
-            if let ExecutorMessage::Response { payload } = response
+            if let RunnerMessage::Response { payload } = response
                 && payload.request_id.as_deref() == Some("req-extra")
             {
                 assert_eq!(payload.status, OutcomeStatus::Success);
@@ -780,13 +780,13 @@ mod tests {
                 .unwrap();
         });
         let mut client = client;
-        let response = ExecutorMessage::Response {
+        let response = RunnerMessage::Response {
             payload: ExecutionOutcome::error("job-x", "req-x", "oops"),
         };
         write_message(&mut client, &response).await.unwrap();
         let reply = read_message(&mut client).await.unwrap().unwrap();
         match reply {
-            ExecutorMessage::Response { payload } => {
+            RunnerMessage::Response { payload } => {
                 assert_eq!(payload.status, OutcomeStatus::Error);
                 assert!(
                     payload
@@ -824,11 +824,11 @@ mod tests {
         });
         let mut client = client;
         let request = build_request("sleep");
-        let message = ExecutorMessage::Request {
+        let message = RunnerMessage::Request {
             payload: request.clone(),
         };
         write_message(&mut client, &message).await.unwrap();
-        let cancel = ExecutorMessage::Cancel {
+        let cancel = RunnerMessage::Cancel {
             payload: CancelRequest {
                 protocol_version: PROTOCOL_VERSION.to_string(),
                 job_id: request.job_id.clone(),
@@ -839,7 +839,7 @@ mod tests {
         write_message(&mut client, &cancel).await.unwrap();
         let response = read_message(&mut client).await.unwrap().unwrap();
         match response {
-            ExecutorMessage::Response { payload } => {
+            RunnerMessage::Response { payload } => {
                 assert_eq!(payload.status, OutcomeStatus::Error);
                 let error_type = payload
                     .error
@@ -879,13 +879,13 @@ mod tests {
         let mut request2 = build_request("sleep");
         request2.request_id = "req-2".to_string();
         request2.job_id = "job-shared".to_string();
-        write_message(&mut client, &ExecutorMessage::Request { payload: request1 })
+        write_message(&mut client, &RunnerMessage::Request { payload: request1 })
             .await
             .unwrap();
-        write_message(&mut client, &ExecutorMessage::Request { payload: request2 })
+        write_message(&mut client, &RunnerMessage::Request { payload: request2 })
             .await
             .unwrap();
-        let cancel = ExecutorMessage::Cancel {
+        let cancel = RunnerMessage::Cancel {
             payload: CancelRequest {
                 protocol_version: PROTOCOL_VERSION.to_string(),
                 job_id: "job-shared".to_string(),
@@ -903,7 +903,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             match response {
-                ExecutorMessage::Response { payload } => {
+                RunnerMessage::Response { payload } => {
                     assert_eq!(payload.status, OutcomeStatus::Error);
                     let error_type = payload
                         .error
@@ -949,7 +949,7 @@ mod tests {
         });
         let mut client = client;
         let request = build_request("sleep");
-        let message = ExecutorMessage::Request {
+        let message = RunnerMessage::Request {
             payload: request.clone(),
         };
         write_message(&mut client, &message).await.unwrap();

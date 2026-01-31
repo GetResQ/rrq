@@ -1,7 +1,7 @@
 import net from "node:net";
 import { fileURLToPath } from "node:url";
 
-export const ENV_EXECUTOR_TCP_SOCKET = "RRQ_EXECUTOR_TCP_SOCKET";
+export const ENV_RUNNER_TCP_SOCKET = "RRQ_RUNNER_TCP_SOCKET";
 export const PROTOCOL_VERSION = "1";
 const MAX_FRAME_LEN = 16 * 1024 * 1024;
 const MAX_IN_FLIGHT_PER_CONNECTION = 64;
@@ -51,7 +51,7 @@ export interface CancelRequest {
   hard_kill?: boolean;
 }
 
-type ExecutorMessage =
+type RunnerMessage =
   | { type: "request"; payload: ExecutionRequest }
   | { type: "response"; payload: ExecutionOutcome }
   | { type: "cancel"; payload: CancelRequest };
@@ -102,7 +102,7 @@ interface InFlightTask {
   completed: boolean;
 }
 
-export class ExecutorRuntime {
+export class RunnerRuntime {
   private registry: Registry;
   private inFlight = new Map<string, InFlightTask>();
   private jobIndex = new Map<string, Set<string>>();
@@ -112,13 +112,13 @@ export class ExecutorRuntime {
   }
 
   async runFromEnv(): Promise<void> {
-    const tcpSocket = process.env[ENV_EXECUTOR_TCP_SOCKET];
+    const tcpSocket = process.env[ENV_RUNNER_TCP_SOCKET];
     if (tcpSocket) {
       const address = parseTcpSocket(tcpSocket);
       await this.runTcp(address.host, address.port);
       return;
     }
-    throw new Error(`${ENV_EXECUTOR_TCP_SOCKET} must be set`);
+    throw new Error(`${ENV_RUNNER_TCP_SOCKET} must be set`);
   }
 
   async runTcp(host: string, port: number): Promise<void> {
@@ -138,7 +138,7 @@ export class ExecutorRuntime {
     const activeRequests = new Set<string>();
     let writeChain = Promise.resolve();
 
-    const enqueueWrite = (message: ExecutorMessage): Promise<void> => {
+    const enqueueWrite = (message: RunnerMessage): Promise<void> => {
       writeChain = writeChain.then(() => writeFrame(socket, message));
       return writeChain;
     };
@@ -148,11 +148,11 @@ export class ExecutorRuntime {
     };
 
     socket.on("data", (chunk) => {
-      let messages: ExecutorMessage[];
+      let messages: RunnerMessage[];
       try {
         messages = parser.push(chunk);
       } catch (error) {
-        console.error("executor message parse error:", error);
+        console.error("runner message parse error:", error);
         socket.destroy();
         return;
       }
@@ -166,7 +166,7 @@ export class ExecutorRuntime {
 
           if (activeRequests.size >= MAX_IN_FLIGHT_PER_CONNECTION) {
             void respond(
-              errorOutcome(request, undefined, "Executor busy: too many in-flight requests"),
+              errorOutcome(request, undefined, "Runner busy: too many in-flight requests"),
             );
             continue;
           }
@@ -232,7 +232,7 @@ export class ExecutorRuntime {
     });
 
     socket.on("error", (error) => {
-      console.error("executor connection error:", error);
+      console.error("runner connection error:", error);
       socket.destroy();
     });
   }
@@ -317,7 +317,7 @@ export class ExecutorRuntime {
 export function parseTcpSocket(value: string): { host: string; port: number } {
   const raw = value.trim();
   if (!raw) {
-    throw new Error("executor tcp_socket cannot be empty");
+    throw new Error("runner tcp_socket cannot be empty");
   }
 
   let host: string;
@@ -325,35 +325,35 @@ export function parseTcpSocket(value: string): { host: string; port: number } {
   if (raw.startsWith("[")) {
     const closing = raw.indexOf("]:");
     if (closing === -1) {
-      throw new Error("executor tcp_socket must be in [host]:port format");
+      throw new Error("runner tcp_socket must be in [host]:port format");
     }
     host = raw.slice(1, closing);
     portPart = raw.slice(closing + 2);
   } else {
     const lastColon = raw.lastIndexOf(":");
     if (lastColon === -1) {
-      throw new Error("executor tcp_socket must be in host:port format");
+      throw new Error("runner tcp_socket must be in host:port format");
     }
     host = raw.slice(0, lastColon);
     portPart = raw.slice(lastColon + 1);
     if (!host) {
-      throw new Error("executor tcp_socket host cannot be empty");
+      throw new Error("runner tcp_socket host cannot be empty");
     }
   }
 
   const port = Number.parseInt(portPart, 10);
   if (!Number.isFinite(port) || port <= 0 || port > 65535) {
-    throw new Error(`Invalid executor tcp_socket port: ${portPart}`);
+    throw new Error(`Invalid runner tcp_socket port: ${portPart}`);
   }
 
   if (host === "localhost") {
     return { host: "127.0.0.1", port };
   }
   if (!net.isIP(host)) {
-    throw new Error(`Invalid executor tcp_socket host: ${host}`);
+    throw new Error(`Invalid runner tcp_socket host: ${host}`);
   }
   if (!isLoopback(host)) {
-    throw new Error("executor tcp_socket host must be localhost");
+    throw new Error("runner tcp_socket host must be localhost");
   }
   return { host, port };
 }
@@ -361,30 +361,30 @@ export function parseTcpSocket(value: string): { host: string; port: number } {
 class FrameParser {
   private buffer = Buffer.alloc(0);
 
-  push(chunk: Buffer): ExecutorMessage[] {
+  push(chunk: Buffer): RunnerMessage[] {
     this.buffer = Buffer.concat([this.buffer, chunk]);
-    const messages: ExecutorMessage[] = [];
+    const messages: RunnerMessage[] = [];
     while (this.buffer.length >= 4) {
       const length = this.buffer.readUInt32BE(0);
       if (length === 0) {
-        throw new Error("executor message payload cannot be empty");
+        throw new Error("runner message payload cannot be empty");
       }
       if (length > MAX_FRAME_LEN) {
-        throw new Error("executor message payload too large");
+        throw new Error("runner message payload too large");
       }
       if (this.buffer.length < 4 + length) {
         break;
       }
       const payload = this.buffer.subarray(4, 4 + length);
       this.buffer = this.buffer.subarray(4 + length);
-      const decoded = JSON.parse(payload.toString("utf-8")) as ExecutorMessage;
+      const decoded = JSON.parse(payload.toString("utf-8")) as RunnerMessage;
       messages.push(decoded);
     }
     return messages;
   }
 }
 
-async function writeFrame(socket: net.Socket, message: ExecutorMessage): Promise<void> {
+async function writeFrame(socket: net.Socket, message: RunnerMessage): Promise<void> {
   const payload = Buffer.from(JSON.stringify(message));
   const header = Buffer.alloc(4);
   header.writeUInt32BE(payload.length, 0);
@@ -533,7 +533,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     result: { job_id: request.job_id },
   }));
 
-  const runtime = new ExecutorRuntime(registry);
+  const runtime = new RunnerRuntime(registry);
   runtime
     .runFromEnv()
     .catch((error) => {

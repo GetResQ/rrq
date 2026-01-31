@@ -1,10 +1,10 @@
-# rrq-executor
+# rrq-runner
 
-[![Crates.io](https://img.shields.io/crates/v/rrq-executor.svg)](https://crates.io/crates/rrq-executor)
-[![Documentation](https://docs.rs/rrq-executor/badge.svg)](https://docs.rs/rrq-executor)
-[![License](https://img.shields.io/crates/l/rrq-executor.svg)](LICENSE)
+[![Crates.io](https://img.shields.io/crates/v/rrq-runner.svg)](https://crates.io/crates/rrq-runner)
+[![Documentation](https://docs.rs/rrq-runner/badge.svg)](https://docs.rs/rrq-runner)
+[![License](https://img.shields.io/crates/l/rrq-runner.svg)](LICENSE)
 
-A Rust runtime for building [RRQ](https://crates.io/crates/rrq) job executors. This crate handles the socket protocol, connection management, and job dispatching—you just implement your handlers.
+A Rust runtime for building [RRQ](https://crates.io/crates/rrq) job runners. This crate handles the socket protocol, connection management, and job dispatching—you just implement your handlers.
 
 ## Features
 
@@ -19,22 +19,22 @@ A Rust runtime for building [RRQ](https://crates.io/crates/rrq) job executors. T
 
 ```toml
 [dependencies]
-rrq-executor = "0.9"
+rrq-runner = "0.9"
 ```
 
 With OpenTelemetry tracing:
 
 ```toml
 [dependencies]
-rrq-executor = { version = "0.9", features = ["otel"] }
+rrq-runner = { version = "0.9", features = ["otel"] }
 ```
 
 ## Quick Start
 
-Create a simple executor with one handler:
+Create a simple runner with one handler:
 
 ```rust
-use rrq_executor::{parse_tcp_socket, run_tcp, ExecutionOutcome, Registry};
+use rrq_runner::{parse_tcp_socket, run_tcp, ExecutionOutcome, Registry};
 use serde_json::json;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -54,8 +54,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     });
 
-    // Run the executor (reads address from RRQ_EXECUTOR_TCP_SOCKET)
-    let addr = std::env::var("RRQ_EXECUTOR_TCP_SOCKET")?;
+    // Run the runner (reads address from RRQ_RUNNER_TCP_SOCKET)
+    let addr = std::env::var("RRQ_RUNNER_TCP_SOCKET")?;
     let socket_addr = parse_tcp_socket(&addr)?;
     run_tcp(&registry, socket_addr)
 }
@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Handlers receive an `ExecutionRequest` and return an `ExecutionOutcome`:
 
 ```rust
-use rrq_executor::{ExecutionOutcome, Registry};
+use rrq_runner::{ExecutionOutcome, Registry};
 use rrq_protocol::ExecutionRequest;
 
 let mut registry = Registry::new();
@@ -103,7 +103,7 @@ registry.register("process_order", |request: ExecutionRequest| async move {
 Return different outcomes based on execution result:
 
 ```rust
-use rrq_executor::ExecutionOutcome;
+use rrq_runner::ExecutionOutcome;
 
 // Success - job completed
 ExecutionOutcome::success(job_id, request_id, json!({"result": "ok"}))
@@ -123,14 +123,14 @@ ExecutionOutcome::cancelled(job_id, request_id)
 
 ## Custom Runtime
 
-For more control, create your own `ExecutorRuntime`:
+For more control, create your own `RunnerRuntime`:
 
 ```rust
-use rrq_executor::{ExecutorRuntime, Registry, ENV_EXECUTOR_TCP_SOCKET, parse_tcp_socket};
+use rrq_runner::{RunnerRuntime, Registry, ENV_RUNNER_TCP_SOCKET, parse_tcp_socket};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create runtime (initializes Tokio)
-    let runtime = ExecutorRuntime::new()?;
+    let runtime = RunnerRuntime::new()?;
 
     let mut registry = Registry::new();
     registry.register("echo", |req| async move {
@@ -141,7 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     });
 
-    let addr = std::env::var(ENV_EXECUTOR_TCP_SOCKET)?;
+    let addr = std::env::var(ENV_RUNNER_TCP_SOCKET)?;
     let socket_addr = parse_tcp_socket(&addr)?;
     runtime.run_tcp(&registry, socket_addr)
 }
@@ -152,16 +152,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Enable the `otel` feature for distributed tracing:
 
 ```rust
-use rrq_executor::{ExecutorRuntime, Registry, ENV_EXECUTOR_TCP_SOCKET, parse_tcp_socket};
-use rrq_executor::telemetry::otel::{init_tracing, OtelTelemetry};
+use rrq_runner::{RunnerRuntime, Registry, ENV_RUNNER_TCP_SOCKET, parse_tcp_socket};
+use rrq_runner::telemetry::otel::{init_tracing, OtelTelemetry};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = ExecutorRuntime::new()?;
+    let runtime = RunnerRuntime::new()?;
 
     // Initialize OpenTelemetry (requires runtime context)
     {
         let _guard = runtime.enter();
-        init_tracing("my-executor")?;
+        init_tracing("my-runner")?;
     }
 
     let telemetry = OtelTelemetry;
@@ -176,7 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     });
 
-    let addr = std::env::var(ENV_EXECUTOR_TCP_SOCKET)?;
+    let addr = std::env::var(ENV_RUNNER_TCP_SOCKET)?;
     let socket_addr = parse_tcp_socket(&addr)?;
     runtime.run_tcp_with(&registry, socket_addr, &telemetry)
 }
@@ -188,12 +188,12 @@ Configure via standard OpenTelemetry environment variables:
 
 ## Configuration in rrq.toml
 
-Point the RRQ orchestrator to your executor:
+Point the RRQ orchestrator to your runner:
 
 ```toml
-[rrq.executors.rust]
+[rrq.runners.rust]
 type = "socket"
-cmd = ["./target/release/my-executor"]
+cmd = ["./target/release/my-runner"]
 tcp_socket = "127.0.0.1:9000"
 pool_size = 4
 max_in_flight = 10
@@ -201,16 +201,16 @@ max_in_flight = 10
 
 ## Environment Variables
 
-Set by the orchestrator when spawning executors:
+Set by the orchestrator when spawning runners:
 
 | Variable | Description |
 |----------|-------------|
-| `RRQ_EXECUTOR_TCP_SOCKET` | TCP socket address for communication |
+| `RRQ_RUNNER_TCP_SOCKET` | TCP socket address for communication |
 
 ## Example Project Structure
 
 ```
-my-executor/
+my-runner/
 ├── Cargo.toml
 └── src/
     └── main.rs
@@ -219,15 +219,15 @@ my-executor/
 ```toml
 # Cargo.toml
 [package]
-name = "my-executor"
+name = "my-runner"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "my-executor"
+name = "my-runner"
 
 [dependencies]
-rrq-executor = "0.9"
+rrq-runner = "0.9"
 serde_json = "1.0"
 ```
 

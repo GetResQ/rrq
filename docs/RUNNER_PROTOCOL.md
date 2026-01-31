@@ -1,12 +1,12 @@
-# RRQ Executor Protocol (v1)
+# RRQ Runner Protocol (v1)
 
 This protocol defines the contract between the RRQ orchestrator (Rust `rrq`
-worker) and executor runtimes (Python, Rust, or any other language). The v1
+worker) and runner runtimes (Python, Rust, or any other language). The v1
 transport is a localhost TCP socket with length-delimited JSON frames.
 
 ## Design Goals
 - **Centralized scheduling** in the Rust orchestrator (timeouts, retries, DLQ).
-- **Language-agnostic executors** that only execute jobs and return outcomes.
+- **Language-agnostic runners** that only execute jobs and return outcomes.
 - **Stable wire format** for cross-language compatibility.
 
 ## Encoding
@@ -15,11 +15,11 @@ transport is a localhost TCP socket with length-delimited JSON frames.
 - Field names are **snake_case**.
 
 ## Transport (v1)
-- The orchestrator sets `RRQ_EXECUTOR_TCP_SOCKET` to a `host:port` value.
-- The executor **binds** a TCP socket on the provided **localhost-only**
+- The orchestrator sets `RRQ_RUNNER_TCP_SOCKET` to a `host:port` value.
+- The runner **binds** a TCP socket on the provided **localhost-only**
   address and accepts connections.
-- When using TCP executors with a pool, RRQ assigns a distinct port per
-  executor process.
+- When using TCP runners with a pool, RRQ assigns a distinct port per
+  runner process.
 - Each connection is a stream of **length-delimited frames**:
   - 4-byte **big-endian** unsigned length prefix
   - followed by a UTF-8 JSON payload of that length
@@ -37,12 +37,12 @@ Message types:
 - `response`: `payload` is an `ExecutionOutcome`.
 - `cancel`: `payload` is a `CancelRequest`.
 
-Executors should read requests and write responses **sequentially** on a single
+Runners should read requests and write responses **sequentially** on a single
 connection. The orchestrator correlates responses by `request_id` and expects
 exactly one response per request. The orchestrator may open **multiple
-concurrent connections** to the same executor process (often one connection per
+concurrent connections** to the same runner process (often one connection per
 request). Cancellation frames may be sent on their own short-lived connection.
-Protocol logging is not supported; executors should emit logs to stdout/stderr
+Protocol logging is not supported; runners should emit logs to stdout/stderr
 as needed.
 
 ## ExecutionRequest (payload)
@@ -84,11 +84,11 @@ as needed.
   - `worker_id` (string, optional)
 
 ### Tracing
-`trace_context` carries the producer's trace propagation headers. Executors can
-use it to continue traces in their own runtime. The Python executor runtime
-will emit `rrq.executor` spans when telemetry is enabled.
+`trace_context` carries the producer's trace propagation headers. Runners can
+use it to continue traces in their own runtime. The Python runner runtime
+will emit `rrq.runner` spans when telemetry is enabled.
 
-The Rust reference executor supports OpenTelemetry with W3C
+The Rust reference runner supports OpenTelemetry with W3C
 `traceparent`/`tracestate` headers when built with the `otel` feature.
 
 For cross-language tracing, all runtimes must use the same propagation format.
@@ -108,8 +108,8 @@ For cross-language tracing, all runtimes must use the same propagation format.
 ### status
 One of:
 - `success`: Execution completed. Orchestrator persists result.
-- `retry`: Executor requests retry. Orchestrator applies retry policy.
-- `timeout`: Executor timed itself out (orchestrator still enforces hard
+- `retry`: Runner requests retry. Orchestrator applies retry policy.
+- `timeout`: Runner timed itself out (orchestrator still enforces hard
   timeout).
 - `error`: Execution failed. Orchestrator applies retry policy.
 
@@ -155,31 +155,31 @@ override per policy.
 - `request_id` (string, optional): If present, cancel only the matching
   in-flight request.
 - `hard_kill` (bool): Reserved for orchestrator-level process management;
-  executors may ignore it.
+  runners may ignore it.
 
 ## Scheduling Semantics
-- **Timeouts** are enforced by the orchestrator. Executors may return `timeout`
+- **Timeouts** are enforced by the orchestrator. Runners may return `timeout`
   if they implement their own local timeouts.
-- **Retries** are controlled by the orchestrator. Executors return `retry` to
+- **Retries** are controlled by the orchestrator. Runners return `retry` to
   request a retry.
 - **DLQ** decisions are controlled by the orchestrator.
-- **Cancellation** (v1) is best-effort. Executors should attempt to cancel the
+- **Cancellation** (v1) is best-effort. Runners should attempt to cancel the
   associated task and return an outcome (typically `error` with a `cancelled`
-  type/message). If `request_id` is omitted, executors may cancel any matching
+  type/message). If `request_id` is omitted, runners may cancel any matching
   in-flight task for the job ID or no-op if nothing is running.
 
-## Executor Selection
-RRQ may embed executor selection in the job function name using:
+## Runner Selection
+RRQ may embed runner selection in the job function name using:
 
 ```
-executor#handler
+runner#handler
 ```
 
 Example: `rust#send_email`. The orchestrator strips the prefix and sends only
 `handler` as `function_name` in the `ExecutionRequest`.
 
 ## Reference Implementations
-- Python: `rrq-py/rrq/executor_runtime.py` (see `examples/python/`)
+- Python: `rrq-py/rrq/runner_runtime.py` (see `examples/python/`)
 - Rust protocol types: `rrq-rs/protocol`
-- Rust executor: `rrq-rs/executor` (see
-  `rrq-rs/executor/examples/socket_executor.rs`)
+- Rust runner: `rrq-rs/runner` (see
+  `rrq-rs/runner/examples/socket_runner.rs`)

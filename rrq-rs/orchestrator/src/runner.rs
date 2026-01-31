@@ -6,11 +6,11 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use crate::constants::DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS;
+use crate::constants::DEFAULT_RUNNER_CONNECT_TIMEOUT_MS;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rrq_protocol::{
-    CancelRequest, ExecutionOutcome, ExecutionRequest, ExecutorMessage, FRAME_HEADER_LEN,
+    CancelRequest, ExecutionOutcome, ExecutionRequest, RunnerMessage, FRAME_HEADER_LEN,
     PROTOCOL_VERSION, encode_frame,
 };
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -20,7 +20,7 @@ use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, timeout};
 
-const ENV_EXECUTOR_TCP_SOCKET: &str = "RRQ_EXECUTOR_TCP_SOCKET";
+const ENV_RUNNER_TCP_SOCKET: &str = "RRQ_RUNNER_TCP_SOCKET";
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,29 +38,29 @@ impl TcpSocketSpec {
 fn parse_tcp_socket(raw: &str) -> Result<TcpSocketSpec> {
     let raw = raw.trim();
     if raw.is_empty() {
-        return Err(anyhow::anyhow!("executor tcp_socket cannot be empty"));
+        return Err(anyhow::anyhow!("runner tcp_socket cannot be empty"));
     }
 
     let (host, port_str) = if let Some(rest) = raw.strip_prefix('[') {
         let (host, port_str) = rest
             .split_once("]:")
-            .ok_or_else(|| anyhow::anyhow!("executor tcp_socket must be in [host]:port format"))?;
+            .ok_or_else(|| anyhow::anyhow!("runner tcp_socket must be in [host]:port format"))?;
         (host, port_str)
     } else {
         let (host, port_str) = raw
             .rsplit_once(':')
-            .ok_or_else(|| anyhow::anyhow!("executor tcp_socket must be in host:port format"))?;
+            .ok_or_else(|| anyhow::anyhow!("runner tcp_socket must be in host:port format"))?;
         if host.is_empty() {
-            return Err(anyhow::anyhow!("executor tcp_socket host cannot be empty"));
+            return Err(anyhow::anyhow!("runner tcp_socket host cannot be empty"));
         }
         (host, port_str)
     };
 
     let port: u16 = port_str
         .parse()
-        .with_context(|| format!("Invalid executor tcp_socket port: {port_str}"))?;
+        .with_context(|| format!("Invalid runner tcp_socket port: {port_str}"))?;
     if port == 0 {
-        return Err(anyhow::anyhow!("executor tcp_socket port must be > 0"));
+        return Err(anyhow::anyhow!("runner tcp_socket port must be > 0"));
     }
 
     let ip = if host == "localhost" {
@@ -68,10 +68,10 @@ fn parse_tcp_socket(raw: &str) -> Result<TcpSocketSpec> {
     } else {
         let parsed: IpAddr = host
             .parse()
-            .with_context(|| format!("Invalid executor tcp_socket host: {host}"))?;
+            .with_context(|| format!("Invalid runner tcp_socket host: {host}"))?;
         if !parsed.is_loopback() {
             return Err(anyhow::anyhow!(
-                "executor tcp_socket host must be localhost"
+                "runner tcp_socket host must be localhost"
             ));
         }
         parsed
@@ -84,13 +84,13 @@ fn connect_timeout_from_settings(timeout_ms: i64) -> Duration {
     let ms = if timeout_ms > 0 {
         timeout_ms
     } else {
-        DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS
+        DEFAULT_RUNNER_CONNECT_TIMEOUT_MS
     };
     Duration::from_millis(ms as u64)
 }
 
 #[async_trait]
-pub trait Executor: Send + Sync {
+pub trait Runner: Send + Sync {
     async fn execute(&self, request: ExecutionRequest) -> Result<ExecutionOutcome>;
     async fn cancel(&self, _job_id: &str, _request_id: Option<&str>) -> Result<()> {
         Ok(())
@@ -100,23 +100,23 @@ pub trait Executor: Send + Sync {
     }
 }
 
-trait ExecutorIo: AsyncRead + AsyncWrite {}
+trait RunnerIo: AsyncRead + AsyncWrite {}
 
-impl<T: AsyncRead + AsyncWrite + ?Sized> ExecutorIo for T {}
+impl<T: AsyncRead + AsyncWrite + ?Sized> RunnerIo for T {}
 
-type ExecutorStream = Box<dyn ExecutorIo + Unpin + Send>;
+type RunnerStream = Box<dyn RunnerIo + Unpin + Send>;
 
-type ExecutorSocketTarget = SocketAddr;
+type RunnerSocketTarget = SocketAddr;
 
 struct SocketProcess {
     child: Child,
-    socket: ExecutorSocketTarget,
+    socket: RunnerSocketTarget,
     stdout_task: Option<JoinHandle<()>>,
     stderr_task: Option<JoinHandle<()>>,
     permits: Arc<Semaphore>,
 }
 
-pub struct SocketExecutorPool {
+pub struct SocketRunnerPool {
     cmd: Vec<String>,
     pool_size: usize,
     max_in_flight: usize,
@@ -144,7 +144,7 @@ impl Drop for ProcessPermit {
     }
 }
 
-impl SocketExecutorPool {
+impl SocketRunnerPool {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         cmd: Vec<String>,
@@ -167,13 +167,13 @@ impl SocketExecutorPool {
         }
 
         let tcp_socket = tcp_socket.ok_or_else(|| {
-            anyhow::anyhow!("executor tcp_socket is required (unix sockets are not supported)")
+            anyhow::anyhow!("runner tcp_socket is required (unix sockets are not supported)")
         })?;
         let tcp_socket = parse_tcp_socket(&tcp_socket)?;
         let max_port = tcp_socket.port as u32 + (pool_size as u32).saturating_sub(1);
         if max_port > u16::MAX as u32 {
             return Err(anyhow::anyhow!(
-                "executor tcp_socket range too small for pool_size"
+                "runner tcp_socket range too small for pool_size"
             ));
         }
 
@@ -227,16 +227,16 @@ impl SocketExecutorPool {
         let offset = self.tcp_port_cursor.fetch_add(1, Ordering::Relaxed);
         let port = spec.port as u32 + offset as u32;
         if port > u16::MAX as u32 {
-            return Err(anyhow::anyhow!("executor tcp_socket port range exhausted"));
+            return Err(anyhow::anyhow!("runner tcp_socket port range exhausted"));
         }
         Ok(spec.addr(port as u16))
     }
 
-    /// Spawn a new executor process.
+    /// Spawn a new runner process.
     /// If `reuse_socket` is provided, the process reuses that socket/port instead of allocating a new one.
     async fn spawn_process(
         &self,
-        reuse_socket: Option<ExecutorSocketTarget>,
+        reuse_socket: Option<RunnerSocketTarget>,
     ) -> Result<SocketProcess> {
         #[cfg(test)]
         if let Some(spawn_override) = &self.spawn_override {
@@ -275,16 +275,16 @@ impl SocketExecutorPool {
             if let Some(env) = &self.env {
                 command.envs(env);
             }
-            command.env(ENV_EXECUTOR_TCP_SOCKET, socket.to_string());
+            command.env(ENV_RUNNER_TCP_SOCKET, socket.to_string());
             if let Some(cwd) = &self.cwd {
                 command.current_dir(cwd);
             }
-            let mut child = command.spawn().context("failed to spawn socket executor")?;
+            let mut child = command.spawn().context("failed to spawn runner")?;
             let stdout_task = child.stdout.take().map(|stdout| {
                 tokio::spawn(async move {
                     let mut reader = BufReader::new(stdout).lines();
                     while let Ok(Some(line)) = reader.next_line().await {
-                        tracing::warn!("[executor:stdout] {}", line);
+                        tracing::warn!("[runner:stdout] {}", line);
                     }
                 })
             });
@@ -292,7 +292,7 @@ impl SocketExecutorPool {
                 tokio::spawn(async move {
                     let mut reader = BufReader::new(stderr).lines();
                     while let Ok(Some(line)) = reader.next_line().await {
-                        tracing::warn!("[executor:stderr] {}", line);
+                        tracing::warn!("[runner:stderr] {}", line);
                     }
                 })
             });
@@ -332,14 +332,14 @@ impl SocketExecutorPool {
                 Ok(())
             }
             Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => Err(anyhow::anyhow!(
-                "executor tcp_socket port {} is already in use",
+                "runner tcp_socket port {} is already in use",
                 addr
             )),
             Err(err) => Err(err.into()),
         }
     }
 
-    async fn connect_socket(&self, socket: &ExecutorSocketTarget, child: &mut Child) -> Result<()> {
+    async fn connect_socket(&self, socket: &RunnerSocketTarget, child: &mut Child) -> Result<()> {
         let deadline = Instant::now() + self.connect_timeout;
         let mut last_error: Option<anyhow::Error> = None;
         let mut delay = Duration::from_millis(10);
@@ -347,12 +347,12 @@ impl SocketExecutorPool {
         loop {
             if let Ok(Some(status)) = child.try_wait() {
                 return Err(anyhow::anyhow!(
-                    "executor exited before socket ready ({status})"
+                    "runner exited before socket ready ({status})"
                 ));
             }
             if Instant::now() >= deadline {
                 return Err(anyhow::anyhow!(
-                    "executor socket not ready: {}",
+                    "runner socket not ready: {}",
                     last_error
                         .as_ref()
                         .map(|err| err.to_string())
@@ -363,7 +363,7 @@ impl SocketExecutorPool {
                 Ok(_) => {
                     if let Ok(Some(status)) = child.try_wait() {
                         last_error = Some(anyhow::anyhow!(
-                            "executor exited before socket ready ({status})"
+                            "runner exited before socket ready ({status})"
                         ));
                         continue;
                     }
@@ -394,7 +394,7 @@ impl SocketExecutorPool {
             let processes = {
                 let guard = self.processes.lock().await;
                 if guard.is_empty() {
-                    return Err(anyhow::anyhow!("executor pool has no processes"));
+                    return Err(anyhow::anyhow!("runner pool has no processes"));
                 }
                 guard.clone()
             };
@@ -469,12 +469,12 @@ impl SocketExecutorPool {
     }
 }
 
-pub struct SocketExecutor {
-    pool: Arc<SocketExecutorPool>,
+pub struct SocketRunner {
+    pool: Arc<SocketRunnerPool>,
     in_flight: Arc<Mutex<HashMap<String, InFlightRequest>>>,
 }
 
-impl SocketExecutor {
+impl SocketRunner {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         cmd: Vec<String>,
@@ -487,7 +487,7 @@ impl SocketExecutor {
         connect_timeout: Duration,
     ) -> Result<Self> {
         let response_timeout = response_timeout_seconds.map(Duration::from_secs_f64);
-        let pool = SocketExecutorPool::new(
+        let pool = SocketRunnerPool::new(
             cmd,
             pool_size,
             max_in_flight,
@@ -538,7 +538,7 @@ impl SocketExecutor {
                 },
             );
         }
-        let request_message = ExecutorMessage::Request {
+        let request_message = RunnerMessage::Request {
             payload: request.clone(),
         };
         write_message(&mut stream, &request_message).await?;
@@ -547,47 +547,47 @@ impl SocketExecutor {
         let message = if let Some(deadline) = deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(anyhow::anyhow!("executor response timeout"));
+                return Err(anyhow::anyhow!("runner response timeout"));
             }
             timeout(remaining, read)
                 .await
-                .context("executor response timeout")??
+                .context("runner response timeout")??
         } else {
             read.await?
         };
-        let message = message.context("executor process exited")?;
+        let message = message.context("runner process exited")?;
         match message {
-            ExecutorMessage::Response { payload } => {
+            RunnerMessage::Response { payload } => {
                 if payload.job_id.as_deref() != Some(request.job_id.as_str()) {
                     return Err(anyhow::anyhow!(
-                        "executor outcome job_id mismatch (expected {}, got {:?})",
+                        "runner outcome job_id mismatch (expected {}, got {:?})",
                         request.job_id,
                         payload.job_id
                     ));
                 }
                 if payload.request_id.as_deref() != Some(request.request_id.as_str()) {
                     return Err(anyhow::anyhow!(
-                        "executor outcome request_id mismatch (expected {}, got {:?})",
+                        "runner outcome request_id mismatch (expected {}, got {:?})",
                         request.request_id,
                         payload.request_id
                     ));
                 }
                 Ok(payload)
             }
-            ExecutorMessage::Request { .. } | ExecutorMessage::Cancel { .. } => {
-                Err(anyhow::anyhow!("unexpected executor message"))
+            RunnerMessage::Request { .. } | RunnerMessage::Cancel { .. } => {
+                Err(anyhow::anyhow!("unexpected runner message"))
             }
         }
     }
 }
 
 #[async_trait]
-impl Executor for SocketExecutor {
+impl Runner for SocketRunner {
     async fn execute(&self, request: ExecutionRequest) -> Result<ExecutionOutcome> {
         let (proc, _permit) = self.pool.acquire_process().await?;
         let result = self.execute_with_process(&proc, &request).await;
         if let Err(err) = &result
-            && err.to_string().contains("executor response timeout")
+            && err.to_string().contains("runner response timeout")
         {
             let _ = self
                 .cancel(&request.job_id, Some(request.request_id.as_str()))
@@ -640,7 +640,7 @@ impl Executor for SocketExecutor {
             return Ok(());
         };
         let request_id_for_message = request_id.clone();
-        let message = ExecutorMessage::Cancel {
+        let message = RunnerMessage::Cancel {
             payload: CancelRequest {
                 protocol_version: PROTOCOL_VERSION.to_string(),
                 job_id: info.job_id,
@@ -669,17 +669,17 @@ impl Executor for SocketExecutor {
 #[derive(Clone)]
 struct InFlightRequest {
     job_id: String,
-    socket: ExecutorSocketTarget,
+    socket: RunnerSocketTarget,
 }
 
-pub fn resolve_executor_pool_sizes(
+pub fn resolve_runner_pool_sizes(
     settings: &crate::settings::RRQSettings,
     watch_mode: bool,
     default_pool_size: Option<usize>,
 ) -> Result<HashMap<String, usize>> {
     let default_pool_size = default_pool_size.unwrap_or_else(num_cpus::get);
     let mut pool_sizes = HashMap::new();
-    for (name, config) in &settings.executors {
+    for (name, config) in &settings.runners {
         let pool_size = if watch_mode {
             1
         } else {
@@ -687,7 +687,7 @@ pub fn resolve_executor_pool_sizes(
         };
         if pool_size == 0 {
             return Err(anyhow::anyhow!(
-                "pool_size must be positive for executor '{}'",
+                "pool_size must be positive for runner '{}'",
                 name
             ));
         }
@@ -696,12 +696,12 @@ pub fn resolve_executor_pool_sizes(
     Ok(pool_sizes)
 }
 
-pub fn resolve_executor_max_in_flight(
+pub fn resolve_runner_max_in_flight(
     settings: &crate::settings::RRQSettings,
     watch_mode: bool,
 ) -> Result<HashMap<String, usize>> {
     let mut max_in_flight = HashMap::new();
-    for (name, config) in &settings.executors {
+    for (name, config) in &settings.runners {
         let limit = if watch_mode {
             1
         } else {
@@ -709,7 +709,7 @@ pub fn resolve_executor_max_in_flight(
         };
         if limit == 0 {
             return Err(anyhow::anyhow!(
-                "max_in_flight must be positive for executor '{}'",
+                "max_in_flight must be positive for runner '{}'",
                 name
             ));
         }
@@ -718,38 +718,38 @@ pub fn resolve_executor_max_in_flight(
     Ok(max_in_flight)
 }
 
-pub async fn build_executors_from_settings(
+pub async fn build_runners_from_settings(
     settings: &crate::settings::RRQSettings,
     pool_sizes: Option<&HashMap<String, usize>>,
     max_in_flight: Option<&HashMap<String, usize>>,
-) -> Result<HashMap<String, Arc<dyn Executor>>> {
+) -> Result<HashMap<String, Arc<dyn Runner>>> {
     let pool_sizes = match pool_sizes {
         Some(map) => map.clone(),
-        None => resolve_executor_pool_sizes(settings, false, None)?,
+        None => resolve_runner_pool_sizes(settings, false, None)?,
     };
     let max_in_flight = match max_in_flight {
         Some(map) => map.clone(),
-        None => resolve_executor_max_in_flight(settings, false)?,
+        None => resolve_runner_max_in_flight(settings, false)?,
     };
-    let connect_timeout = connect_timeout_from_settings(settings.executor_connect_timeout_ms);
-    let mut executors: HashMap<String, Arc<dyn Executor>> = HashMap::new();
-    for (name, config) in &settings.executors {
+    let connect_timeout = connect_timeout_from_settings(settings.runner_connect_timeout_ms);
+    let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+    for (name, config) in &settings.runners {
         if config.cmd.is_none() {
             return Err(anyhow::anyhow!(
-                "executor '{}' requires cmd for socket mode",
+                "runner '{}' requires cmd for socket mode",
                 name
             ));
         }
         let pool_size = pool_sizes
             .get(name)
             .copied()
-            .ok_or_else(|| anyhow::anyhow!("missing pool size for executor '{}'", name))?;
+            .ok_or_else(|| anyhow::anyhow!("missing pool size for runner '{}'", name))?;
         let max_in_flight = max_in_flight
             .get(name)
             .copied()
-            .ok_or_else(|| anyhow::anyhow!("missing max_in_flight for executor '{}'", name))?;
+            .ok_or_else(|| anyhow::anyhow!("missing max_in_flight for runner '{}'", name))?;
         let cmd = config.cmd.clone().unwrap_or_default();
-        let executor = SocketExecutor::new(
+        let runner = SocketRunner::new(
             cmd,
             pool_size,
             max_in_flight,
@@ -760,17 +760,17 @@ pub async fn build_executors_from_settings(
             connect_timeout,
         )
         .await?;
-        executors.insert(name.clone(), Arc::new(executor));
+        runners.insert(name.clone(), Arc::new(runner));
     }
-    Ok(executors)
+    Ok(runners)
 }
 
-async fn connect_stream(target: &ExecutorSocketTarget) -> std::io::Result<ExecutorStream> {
+async fn connect_stream(target: &RunnerSocketTarget) -> std::io::Result<RunnerStream> {
     let stream = TcpStream::connect(target).await?;
     Ok(Box::new(stream))
 }
 
-async fn read_message<R>(stream: &mut R) -> Result<Option<ExecutorMessage>>
+async fn read_message<R>(stream: &mut R) -> Result<Option<RunnerMessage>>
 where
     R: AsyncRead + Unpin + ?Sized,
 {
@@ -782,10 +782,10 @@ where
     }
     let length = u32::from_be_bytes(header) as usize;
     if length == 0 {
-        return Err(anyhow::anyhow!("executor message payload cannot be empty"));
+        return Err(anyhow::anyhow!("runner message payload cannot be empty"));
     }
     if length > MAX_FRAME_LEN {
-        return Err(anyhow::anyhow!("executor message payload too large"));
+        return Err(anyhow::anyhow!("runner message payload too large"));
     }
     let mut payload = vec![0u8; length];
     stream.read_exact(&mut payload).await?;
@@ -793,7 +793,7 @@ where
     Ok(Some(message))
 }
 
-async fn write_message<W>(stream: &mut W, message: &ExecutorMessage) -> Result<()>
+async fn write_message<W>(stream: &mut W, message: &RunnerMessage) -> Result<()>
 where
     W: AsyncWrite + Unpin + ?Sized,
 {
@@ -806,7 +806,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{ExecutorConfig, ExecutorType, RRQSettings};
+    use crate::settings::{RunnerConfig, RunnerType, RRQSettings};
     use std::net::TcpListener as StdTcpListener;
     use tokio::net::TcpListener as TokioTcpListener;
     use tokio::process::Command;
@@ -832,13 +832,13 @@ mod tests {
                 worker_id: None,
             },
         };
-        let message = ExecutorMessage::Request {
+        let message = RunnerMessage::Request {
             payload: request.clone(),
         };
         write_message(&mut client, &message).await.unwrap();
         let decoded = read_message(&mut server).await.unwrap().unwrap();
         match decoded {
-            ExecutorMessage::Request { payload } => {
+            RunnerMessage::Request { payload } => {
                 assert_eq!(payload.job_id, request.job_id);
                 assert_eq!(payload.request_id, request.request_id);
                 assert_eq!(payload.function_name, request.function_name);
@@ -847,7 +847,7 @@ mod tests {
         }
     }
 
-    fn build_test_pool(max_in_flight: usize) -> SocketExecutorPool {
+    fn build_test_pool(max_in_flight: usize) -> SocketRunnerPool {
         let child = Command::new("sleep")
             .arg("60")
             .spawn()
@@ -860,7 +860,7 @@ mod tests {
             stderr_task: None,
             permits: Arc::new(Semaphore::new(max_in_flight)),
         };
-        SocketExecutorPool {
+        SocketRunnerPool {
             cmd: vec!["sleep".to_string(), "60".to_string()],
             pool_size: 1,
             max_in_flight,
@@ -872,7 +872,7 @@ mod tests {
             cursor: AtomicUsize::new(0),
             availability: Arc::new(Notify::new()),
             response_timeout: None,
-            connect_timeout: Duration::from_millis(DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS as u64),
+            connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
             spawn_override: None,
         }
     }
@@ -927,7 +927,7 @@ mod tests {
             }
         });
         let (spec, _socket_addr) = allocate_tcp_spec();
-        let pool = SocketExecutorPool {
+        let pool = SocketRunnerPool {
             cmd: vec!["sleep".to_string(), "60".to_string()],
             pool_size: 1,
             max_in_flight: 1,
@@ -939,7 +939,7 @@ mod tests {
             cursor: AtomicUsize::new(0),
             availability: Arc::new(Notify::new()),
             response_timeout: None,
-            connect_timeout: Duration::from_millis(DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS as u64),
+            connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
             spawn_override: Some(spawn_override),
         };
         pool.ensure_started().await.unwrap();
@@ -963,7 +963,7 @@ mod tests {
     #[tokio::test]
     async fn connect_socket_errors_when_child_exits() {
         let (spec, socket_addr) = allocate_tcp_spec();
-        let pool = SocketExecutorPool {
+        let pool = SocketRunnerPool {
             cmd: vec!["true".to_string()],
             pool_size: 1,
             max_in_flight: 1,
@@ -985,19 +985,19 @@ mod tests {
             .unwrap_err();
         assert!(
             err.to_string()
-                .contains("executor exited before socket ready")
+                .contains("runner exited before socket ready")
         );
     }
 
     #[test]
     fn resolve_pool_sizes_and_max_in_flight_watch_mode() {
         let mut settings = RRQSettings::default();
-        let mut executors = HashMap::new();
-        executors.insert(
+        let mut runners = HashMap::new();
+        runners.insert(
             "python".to_string(),
-            ExecutorConfig {
-                executor_type: ExecutorType::Socket,
-                cmd: Some(vec!["rrq-executor".to_string()]),
+            RunnerConfig {
+                runner_type: RunnerType::Socket,
+                cmd: Some(vec!["rrq-runner".to_string()]),
                 pool_size: Some(4),
                 max_in_flight: Some(5),
                 env: None,
@@ -1006,10 +1006,10 @@ mod tests {
                 response_timeout_seconds: None,
             },
         );
-        settings.executors = executors;
+        settings.runners = runners;
 
-        let pool_sizes = resolve_executor_pool_sizes(&settings, true, None).unwrap();
-        let max_in_flight = resolve_executor_max_in_flight(&settings, true).unwrap();
+        let pool_sizes = resolve_runner_pool_sizes(&settings, true, None).unwrap();
+        let max_in_flight = resolve_runner_max_in_flight(&settings, true).unwrap();
         assert_eq!(pool_sizes.get("python"), Some(&1));
         assert_eq!(max_in_flight.get("python"), Some(&1));
     }
@@ -1017,12 +1017,12 @@ mod tests {
     #[test]
     fn resolve_pool_sizes_and_max_in_flight_validate_zero() {
         let mut settings = RRQSettings::default();
-        let mut executors = HashMap::new();
-        executors.insert(
+        let mut runners = HashMap::new();
+        runners.insert(
             "python".to_string(),
-            ExecutorConfig {
-                executor_type: ExecutorType::Socket,
-                cmd: Some(vec!["rrq-executor".to_string()]),
+            RunnerConfig {
+                runner_type: RunnerType::Socket,
+                cmd: Some(vec!["rrq-runner".to_string()]),
                 pool_size: Some(0),
                 max_in_flight: Some(0),
                 env: None,
@@ -1031,11 +1031,11 @@ mod tests {
                 response_timeout_seconds: None,
             },
         );
-        settings.executors = executors;
+        settings.runners = runners;
 
-        let err = resolve_executor_pool_sizes(&settings, false, None).unwrap_err();
+        let err = resolve_runner_pool_sizes(&settings, false, None).unwrap_err();
         assert!(err.to_string().contains("pool_size must be positive"));
-        let err = resolve_executor_max_in_flight(&settings, false).unwrap_err();
+        let err = resolve_runner_max_in_flight(&settings, false).unwrap_err();
         assert!(err.to_string().contains("max_in_flight must be positive"));
     }
 
@@ -1056,7 +1056,7 @@ mod tests {
 
     #[test]
     fn connect_timeout_from_settings_defaults_for_non_positive() {
-        let expected = Duration::from_millis(DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS as u64);
+        let expected = Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64);
         assert_eq!(connect_timeout_from_settings(0), expected);
         assert_eq!(connect_timeout_from_settings(-5), expected);
         assert_eq!(
@@ -1067,7 +1067,7 @@ mod tests {
 
     #[tokio::test]
     async fn tcp_socket_pool_range_rejects_overflow() {
-        let err = SocketExecutorPool::new(
+        let err = SocketRunnerPool::new(
             vec!["true".to_string()],
             2,
             1,
@@ -1075,7 +1075,7 @@ mod tests {
             None,
             Some("127.0.0.1:65535".to_string()),
             None,
-            Duration::from_millis(DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS as u64),
+            Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
         )
         .await;
         match err {
@@ -1086,7 +1086,7 @@ mod tests {
 
     #[test]
     fn tcp_socket_pool_assigns_incrementing_ports() {
-        let pool = SocketExecutorPool {
+        let pool = SocketRunnerPool {
             cmd: vec!["true".to_string()],
             pool_size: 2,
             max_in_flight: 1,
@@ -1101,7 +1101,7 @@ mod tests {
             cursor: AtomicUsize::new(0),
             availability: Arc::new(Notify::new()),
             response_timeout: None,
-            connect_timeout: Duration::from_millis(DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS as u64),
+            connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
             spawn_override: None,
         };
 
@@ -1127,7 +1127,7 @@ mod tests {
     fn tcp_port_collision_is_detected() {
         let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let pool = SocketExecutorPool {
+        let pool = SocketRunnerPool {
             cmd: vec!["true".to_string()],
             pool_size: 1,
             max_in_flight: 1,
@@ -1142,7 +1142,7 @@ mod tests {
             cursor: AtomicUsize::new(0),
             availability: Arc::new(Notify::new()),
             response_timeout: None,
-            connect_timeout: Duration::from_millis(DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS as u64),
+            connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
             spawn_override: None,
         };
 
@@ -1176,7 +1176,7 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let message = read_message(&mut stream).await.unwrap().unwrap();
             match message {
-                ExecutorMessage::Cancel { payload } => {
+                RunnerMessage::Cancel { payload } => {
                     assert_eq!(payload.job_id, "job-1");
                     assert_eq!(payload.request_id.as_deref(), Some("req-1"));
                 }
@@ -1185,12 +1185,12 @@ mod tests {
         });
 
         let pool = build_test_pool(1);
-        let executor = SocketExecutor {
+        let runner = SocketRunner {
             pool: Arc::new(pool),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
         };
         {
-            let mut in_flight = executor.in_flight.lock().await;
+            let mut in_flight = runner.in_flight.lock().await;
             in_flight.insert(
                 "req-1".to_string(),
                 InFlightRequest {
@@ -1199,10 +1199,10 @@ mod tests {
                 },
             );
         }
-        executor.cancel("job-1", None).await.unwrap();
+        runner.cancel("job-1", None).await.unwrap();
         server.await.unwrap();
 
-        let in_flight = executor.in_flight.lock().await;
+        let in_flight = runner.in_flight.lock().await;
         assert!(in_flight.is_empty());
     }
 
@@ -1210,12 +1210,12 @@ mod tests {
     async fn cancel_failure_preserves_in_flight() {
         let (_spec, socket_addr) = allocate_tcp_spec();
         let pool = build_test_pool(1);
-        let executor = SocketExecutor {
+        let runner = SocketRunner {
             pool: Arc::new(pool),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
         };
         {
-            let mut in_flight = executor.in_flight.lock().await;
+            let mut in_flight = runner.in_flight.lock().await;
             in_flight.insert(
                 "req-1".to_string(),
                 InFlightRequest {
@@ -1224,9 +1224,9 @@ mod tests {
                 },
             );
         }
-        let err = executor.cancel("job-1", None).await.unwrap_err();
+        let err = runner.cancel("job-1", None).await.unwrap_err();
         assert!(!err.to_string().is_empty());
-        let in_flight = executor.in_flight.lock().await;
+        let in_flight = runner.in_flight.lock().await;
         assert!(in_flight.contains_key("req-1"));
     }
 
@@ -1239,7 +1239,7 @@ mod tests {
             let (mut cancel_stream, _) = listener.accept().await.unwrap();
             let message = read_message(&mut cancel_stream).await.unwrap().unwrap();
             match message {
-                ExecutorMessage::Cancel { payload } => {
+                RunnerMessage::Cancel { payload } => {
                     assert_eq!(payload.job_id, "job-1");
                     assert_eq!(payload.request_id.as_deref(), Some("req-1"));
                 }
@@ -1259,7 +1259,7 @@ mod tests {
             permits: Arc::new(Semaphore::new(1)),
         };
         let (spec, _addr) = allocate_tcp_spec();
-        let pool = SocketExecutorPool {
+        let pool = SocketRunnerPool {
             cmd: vec!["sleep".to_string(), "60".to_string()],
             pool_size: 1,
             max_in_flight: 1,
@@ -1271,10 +1271,10 @@ mod tests {
             cursor: AtomicUsize::new(0),
             availability: Arc::new(Notify::new()),
             response_timeout: Some(Duration::from_millis(50)),
-            connect_timeout: Duration::from_millis(DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS as u64),
+            connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
             spawn_override: None,
         };
-        let executor = SocketExecutor {
+        let runner = SocketRunner {
             pool: Arc::new(pool),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -1295,8 +1295,8 @@ mod tests {
                 worker_id: None,
             },
         };
-        let err = executor.execute(request).await.unwrap_err();
-        assert!(err.to_string().contains("executor response timeout"));
+        let err = runner.execute(request).await.unwrap_err();
+        assert!(err.to_string().contains("runner response timeout"));
         server.await.unwrap();
     }
 
@@ -1308,7 +1308,7 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let message = read_message(&mut stream).await.unwrap().unwrap();
             let request = match message {
-                ExecutorMessage::Request { payload } => payload,
+                RunnerMessage::Request { payload } => payload,
                 _ => panic!("expected request"),
             };
             let response = ExecutionOutcome::success(
@@ -1318,7 +1318,7 @@ mod tests {
             );
             write_message(
                 &mut stream,
-                &ExecutorMessage::Response { payload: response },
+                &RunnerMessage::Response { payload: response },
             )
             .await
             .unwrap();
@@ -1333,7 +1333,7 @@ mod tests {
             permits: Arc::new(Semaphore::new(1)),
         };
         let proc = Arc::new(Mutex::new(process));
-        let executor = SocketExecutor {
+        let runner = SocketRunner {
             pool: Arc::new(build_test_pool(1)),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -1355,7 +1355,7 @@ mod tests {
                 worker_id: None,
             },
         };
-        let err = executor
+        let err = runner
             .execute_with_process(&proc, &request)
             .await
             .unwrap_err();
@@ -1370,7 +1370,7 @@ mod tests {
     #[test]
     fn spawn_process_with_reuse_socket_does_not_increment_cursor() {
         // This test verifies that when reuse_socket is Some, the tcp_port_cursor is not incremented
-        let pool = SocketExecutorPool {
+        let pool = SocketRunnerPool {
             cmd: vec!["true".to_string()],
             pool_size: 2,
             max_in_flight: 1,
@@ -1385,7 +1385,7 @@ mod tests {
             cursor: AtomicUsize::new(0),
             availability: Arc::new(Notify::new()),
             response_timeout: None,
-            connect_timeout: Duration::from_millis(DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS as u64),
+            connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
             spawn_override: None,
         };
 
@@ -1421,7 +1421,7 @@ mod tests {
         });
 
         let (spec, _addr) = allocate_tcp_spec();
-        let pool = SocketExecutorPool {
+        let pool = SocketRunnerPool {
             cmd: vec!["sleep".to_string(), "60".to_string()],
             pool_size: 1,
             max_in_flight: 1,
@@ -1433,7 +1433,7 @@ mod tests {
             cursor: AtomicUsize::new(0),
             availability: Arc::new(Notify::new()),
             response_timeout: None,
-            connect_timeout: Duration::from_millis(DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS as u64),
+            connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
             spawn_override: Some(spawn_override),
         };
 

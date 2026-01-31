@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { Registry, parseTcpSocket } from "../src/executor_runtime.js";
+import { Registry, parseTcpSocket } from "../src/runner_runtime.js";
 
 const baseRequest = {
   protocol_version: "1",
@@ -44,12 +44,12 @@ describe("parseTcpSocket", () => {
       port: 5555,
     });
     expect(() => parseTcpSocket("0.0.0.0:5555")).toThrow(
-      "executor tcp_socket host must be localhost",
+      "runner tcp_socket host must be localhost",
     );
   });
 
   it("rejects invalid ports", () => {
-    expect(() => parseTcpSocket("localhost:0")).toThrow("Invalid executor tcp_socket port");
-    expect(() => parseTcpSocket("localhost:99999")).toThrow("Invalid executor tcp_socket port");
+    expect(() => parseTcpSocket("localhost:0")).toThrow("Invalid runner tcp_socket port");
+    expect(() => parseTcpSocket("localhost:99999")).toThrow("Invalid runner tcp_socket port");
   });
 });

@@ -8,7 +8,7 @@ class JobRegistry:
 
     Handlers are asynchronous functions that perform the actual work of a job.
     They are registered with a unique name, which is used by the RRQClient to
-    enqueue jobs and by the Python executor runtime to look up the appropriate handler for execution.
+    enqueue jobs and by the Python runner runtime to look up the appropriate handler for execution.
     """
 
     def __init__(self) -> None:

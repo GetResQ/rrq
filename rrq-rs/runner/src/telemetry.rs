@@ -2,7 +2,7 @@ use crate::types::ExecutionRequest;
 use tracing::Span;
 
 pub trait Telemetry: Send + Sync {
-    fn executor_span(&self, request: &ExecutionRequest) -> Span;
+    fn runner_span(&self, request: &ExecutionRequest) -> Span;
     fn clone_box(&self) -> Box<dyn Telemetry>;
 }
 
@@ -16,7 +16,7 @@ impl Clone for Box<dyn Telemetry> {
 pub struct NoopTelemetry;
 
 impl Telemetry for NoopTelemetry {
-    fn executor_span(&self, _request: &ExecutionRequest) -> Span {
+    fn runner_span(&self, _request: &ExecutionRequest) -> Span {
         Span::none()
     }
 
@@ -55,7 +55,7 @@ mod tests {
         let telemetry: Box<dyn Telemetry> = Box::new(NoopTelemetry);
         let cloned = telemetry.clone();
         let request = build_request();
-        let span = cloned.executor_span(&request);
+        let span = cloned.runner_span(&request);
         let _guard = span.enter();
     }
 }
@@ -82,9 +82,9 @@ pub mod otel {
     }
 
     impl Telemetry for OtelTelemetry {
-        fn executor_span(&self, request: &ExecutionRequest) -> Span {
+        fn runner_span(&self, request: &ExecutionRequest) -> Span {
             let span = tracing::info_span!(
-                "rrq.executor",
+                "rrq.runner",
                 "span.kind" = "consumer",
                 "messaging.system" = "redis",
                 "messaging.destination.name" = %request.context.queue_name,

@@ -25,29 +25,29 @@ Options:
 - `--no-gitignore` Disable `.gitignore` and `.git/info/exclude` filtering
 
 Notes:
-- Watch mode forces executor pool sizes and `max_in_flight` to 1.
+- Watch mode forces runner pool sizes and `max_in_flight` to 1.
 - A change that matches `--pattern` and does not match `--ignore-pattern`
   triggers a worker restart.
-- Executors can write to stdout/stderr; the orchestrator will capture and emit
-  those lines with executor prefixes. Use `RUST_LOG` to control orchestrator
+- Runners can write to stdout/stderr; the orchestrator will capture and emit
+  those lines with runner prefixes. Use `RUST_LOG` to control orchestrator
   verbosity.
 - Watch defaults can be set in `rrq.toml` under `[rrq.watch]`. CLI flags take
   precedence over config values.
 
-## Executor
+## Runner
 
-### `rrq executor python`
-Spawn the Python executor runtime (`rrq-executor`).
+### `rrq runner python`
+Spawn the Python runner runtime (`rrq-runner`).
 
 Options:
-- `--settings` PythonExecutorSettings object path (optional; falls back to
-  `RRQ_EXECUTOR_SETTINGS`)
+- `--settings` PythonRunnerSettings object path (optional; falls back to
+  `RRQ_RUNNER_SETTINGS`)
 - `--tcp-socket` Localhost TCP socket in `host:port` form (optional; falls back
-  to `RRQ_EXECUTOR_TCP_SOCKET`)
+  to `RRQ_RUNNER_TCP_SOCKET`)
 
 Notes:
-- The orchestrator sets `RRQ_EXECUTOR_TCP_SOCKET` automatically when it launches
-  executors. For manual runs, pass `--tcp-socket` or set the env var.
+- The orchestrator sets `RRQ_RUNNER_TCP_SOCKET` automatically when it launches
+  runners. For manual runs, pass `--tcp-socket` or set the env var.
 - TCP sockets must bind to localhost.
 
 ## Health

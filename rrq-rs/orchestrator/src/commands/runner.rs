@@ -3,11 +3,11 @@ use std::process::Stdio;
 use anyhow::Result;
 use tokio::process::Command;
 
-pub(crate) async fn executor_python(
+pub(crate) async fn runner_python(
     settings: Option<String>,
     tcp_socket: Option<String>,
 ) -> Result<()> {
-    let mut cmd = Command::new("rrq-executor");
+    let mut cmd = Command::new("rrq-runner");
     if let Some(settings) = settings {
         cmd.arg("--settings").arg(settings);
     }
@@ -19,7 +19,7 @@ pub(crate) async fn executor_python(
         .stderr(Stdio::inherit());
     let status = cmd.status().await?;
     if !status.success() {
-        anyhow::bail!("rrq-executor exited with status {status}");
+        anyhow::bail!("rrq-runner exited with status {status}");
     }
     Ok(())
 }
@@ -63,10 +63,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn executor_python_runs_command() -> Result<()> {
+    async fn runner_python_runs_command() -> Result<()> {
         let dir = std::env::temp_dir().join(format!("rrq-exec-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).await?;
-        let script_path = dir.join("rrq-executor");
+        let script_path = dir.join("rrq-runner");
         let script = "#!/bin/sh\nexit 0\n";
         fs::write(&script_path, script).await?;
         let mut perms = fs::metadata(&script_path).await?.permissions();
@@ -77,7 +77,7 @@ mod tests {
         let new_path = format!("{}:{}", dir.to_string_lossy(), original);
         let _guard = EnvGuard::set("PATH", new_path);
 
-        executor_python(
+        runner_python(
             Some("settings.toml".to_string()),
             Some("127.0.0.1:1234".to_string()),
         )

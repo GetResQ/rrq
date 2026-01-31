@@ -16,7 +16,7 @@ use uuid::Uuid;
 use crate::client::{EnqueueOptions, RRQClient};
 use crate::constants::DEFAULT_WORKER_ID_PREFIX;
 use crate::cron::CronJob;
-use crate::executor::Executor;
+use crate::runner::Runner;
 use crate::job::{Job, JobStatus};
 use crate::settings::RRQSettings;
 use crate::store::JobStore;
@@ -24,7 +24,7 @@ use crate::store::JobStore;
 #[derive(Debug, Clone)]
 struct RunningJobInfo {
     queue_name: String,
-    executor_name: Option<String>,
+    runner_name: Option<String>,
     request_id: Option<String>,
 }
 
@@ -34,9 +34,9 @@ pub struct RRQWorker {
     worker_id: String,
     job_store: JobStore,
     client: RRQClient,
-    executors: HashMap<String, Arc<dyn Executor>>,
-    default_executor_name: String,
-    executor_routes: HashMap<String, String>,
+    runners: HashMap<String, Arc<dyn Runner>>,
+    default_runner_name: String,
+    runner_routes: HashMap<String, String>,
     worker_concurrency: usize,
     semaphore: Arc<Semaphore>,
     running_jobs: Arc<Mutex<HashMap<String, RunningJobInfo>>>,
@@ -53,18 +53,18 @@ impl RRQWorker {
         settings: RRQSettings,
         queues: Option<Vec<String>>,
         worker_id: Option<String>,
-        executors: HashMap<String, Arc<dyn Executor>>,
+        runners: HashMap<String, Arc<dyn Runner>>,
         burst: bool,
         worker_concurrency: usize,
     ) -> Result<Self> {
-        if executors.is_empty() {
-            return Err(anyhow::anyhow!("RRQWorker requires at least one executor"));
+        if runners.is_empty() {
+            return Err(anyhow::anyhow!("RRQWorker requires at least one runner"));
         }
-        let default_executor_name = settings.default_executor_name.clone();
-        if !executors.contains_key(&default_executor_name) {
+        let default_runner_name = settings.default_runner_name.clone();
+        if !runners.contains_key(&default_runner_name) {
             return Err(anyhow::anyhow!(
-                "default executor '{}' is not configured",
-                default_executor_name
+                "default runner '{}' is not configured",
+                default_runner_name
             ));
         }
         let worker_concurrency = if worker_concurrency == 0 {
@@ -72,7 +72,7 @@ impl RRQWorker {
         } else {
             worker_concurrency
         };
-        let executor_routes = settings.executor_routes.clone();
+        let runner_routes = settings.runner_routes.clone();
         let job_store = JobStore::new(settings.clone()).await?;
         let client = RRQClient::new(settings.clone(), job_store.clone());
         let queues = queues.unwrap_or_else(|| vec![settings.default_queue_name.clone()]);
@@ -96,9 +96,9 @@ impl RRQWorker {
             worker_id,
             job_store,
             client,
-            executors,
-            default_executor_name,
-            executor_routes,
+            runners,
+            default_runner_name,
+            runner_routes,
             worker_concurrency,
             semaphore: Arc::new(Semaphore::new(worker_concurrency)),
             running_jobs: Arc::new(Mutex::new(HashMap::new())),
@@ -127,10 +127,10 @@ impl RRQWorker {
         self.shutdown.clone()
     }
 
-    pub async fn close_executors(&self) {
-        for executor in self.executors.values() {
-            if let Err(err) = executor.close().await {
-                tracing::debug!("executor close error: {err}");
+    pub async fn close_runners(&self) {
+        for runner in self.runners.values() {
+            if let Err(err) = runner.close().await {
+                tracing::debug!("runner close error: {err}");
             }
         }
     }
@@ -303,9 +303,9 @@ impl RRQWorker {
 
                     let permit = self.semaphore.clone().acquire_owned().await?;
                     let job_store = self.job_store.clone();
-                    let executors = self.executors.clone();
-                    let executor_routes = self.executor_routes.clone();
-                    let default_executor_name = self.default_executor_name.clone();
+                    let runners = self.runners.clone();
+                    let runner_routes = self.runner_routes.clone();
+                    let default_runner_name = self.default_runner_name.clone();
                     let settings = self.settings.clone();
                     let worker_id = self.worker_id.clone();
                     let running_jobs = self.running_jobs.clone();
@@ -319,7 +319,7 @@ impl RRQWorker {
                             job.id.clone(),
                             RunningJobInfo {
                                 queue_name: queue_name.clone(),
-                                executor_name: None,
+                                runner_name: None,
                                 request_id: None,
                             },
                         );
@@ -330,9 +330,9 @@ impl RRQWorker {
                         let context = ExecuteJobContext {
                             settings,
                             job_store,
-                            executors,
-                            default_executor_name,
-                            executor_routes,
+                            runners,
+                            default_runner_name,
+                            runner_routes,
                             worker_id,
                             running_jobs,
                             running_aborts,
@@ -374,14 +374,14 @@ impl RRQWorker {
         let running = self.running_jobs.lock().await.clone();
         let aborts = self.running_aborts.lock().await.clone();
         for (job_id, info) in &running {
-            let resolved_executor = info.executor_name.clone().unwrap_or_else(|| {
-                self.executor_routes
+            let resolved_runner = info.runner_name.clone().unwrap_or_else(|| {
+                self.runner_routes
                     .get(&info.queue_name)
                     .cloned()
-                    .unwrap_or_else(|| self.default_executor_name.clone())
+                    .unwrap_or_else(|| self.default_runner_name.clone())
             });
-            if let Some(executor) = self.executors.get(&resolved_executor) {
-                let _ = executor.cancel(job_id, info.request_id.as_deref()).await;
+            if let Some(runner) = self.runners.get(&resolved_runner) {
+                let _ = runner.cancel(job_id, info.request_id.as_deref()).await;
             }
         }
         for (_job_id, abort) in aborts {
@@ -431,17 +431,17 @@ impl RRQWorker {
     }
 }
 
-fn split_executor_name(function_name: &str) -> (Option<String>, String) {
+fn split_runner_name(function_name: &str) -> (Option<String>, String) {
     if let Some((prefix, handler)) = function_name.split_once('#') {
         if handler.is_empty() {
             return (Some(prefix.to_string()), String::new());
         }
-        let executor = if prefix.is_empty() {
+        let runner = if prefix.is_empty() {
             None
         } else {
             Some(prefix.to_string())
         };
-        return (executor, handler.to_string());
+        return (runner, handler.to_string());
     }
     (None, function_name.to_string())
 }
@@ -449,9 +449,9 @@ fn split_executor_name(function_name: &str) -> (Option<String>, String) {
 struct ExecuteJobContext {
     settings: RRQSettings,
     job_store: JobStore,
-    executors: HashMap<String, Arc<dyn Executor>>,
-    default_executor_name: String,
-    executor_routes: HashMap<String, String>,
+    runners: HashMap<String, Arc<dyn Runner>>,
+    default_runner_name: String,
+    runner_routes: HashMap<String, String>,
     worker_id: String,
     running_jobs: Arc<Mutex<HashMap<String, RunningJobInfo>>>,
     running_aborts: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
@@ -472,9 +472,9 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
     let ExecuteJobContext {
         settings,
         mut job_store,
-        executors,
-        default_executor_name,
-        executor_routes,
+        runners,
+        default_runner_name,
+        runner_routes,
         worker_id,
         running_jobs,
         running_aborts,
@@ -506,7 +506,7 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
     let attempt = job.current_retries + 1;
     let deadline = Utc::now() + chrono::Duration::seconds(job_timeout);
 
-    let (executor_name, handler_name) = split_executor_name(&job.function_name);
+    let (runner_name, handler_name) = split_runner_name(&job.function_name);
     if handler_name.is_empty() {
         handle_fatal_job_error(&job, &queue_name, "Handler name is missing", &mut job_store)
             .await?;
@@ -521,25 +521,25 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
         return Ok(());
     }
 
-    let resolved_executor = match executor_name {
+    let resolved_runner = match runner_name {
         Some(name) => name,
-        None => executor_routes
+        None => runner_routes
             .get(&queue_name)
             .cloned()
-            .unwrap_or(default_executor_name.clone()),
+            .unwrap_or(default_runner_name.clone()),
     };
     {
         let mut running = running_jobs.lock().await;
         if let Some(info) = running.get_mut(&job.id) {
-            info.executor_name = Some(resolved_executor.clone());
+            info.runner_name = Some(resolved_runner.clone());
         }
     }
 
-    let executor = executors.get(&resolved_executor).cloned();
-    let executor = match executor {
+    let runner = runners.get(&resolved_runner).cloned();
+    let runner = match runner {
         Some(exec) => exec,
         None => {
-            let message = format!("No executor configured for '{resolved_executor}'.");
+            let message = format!("No runner configured for '{resolved_runner}'.");
             handle_fatal_job_error(&job, &queue_name, &message, &mut job_store).await?;
             cleanup_running(
                 &job.id,
@@ -585,7 +585,7 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
 
     let exec_result = timeout(
         Duration::from_secs(job_timeout as u64),
-        executor.execute(request),
+        runner.execute(request),
     )
     .await;
 
@@ -594,11 +594,11 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
             handle_execution_outcome(&job, &queue_name, &settings, &mut job_store, outcome).await
         }
         Ok(Err(err)) => {
-            let message = format!("Executor transport error: {err}");
+            let message = format!("Runner transport error: {err}");
             process_failure_job(&job, &queue_name, &settings, &mut job_store, &message).await
         }
         Err(_) => {
-            let _ = executor.cancel(&job.id, Some(request_id.as_str())).await;
+            let _ = runner.cancel(&job.id, Some(request_id.as_str())).await;
             let message = format!("Job timed out after {}s.", job_timeout);
             handle_job_timeout(&job, &queue_name, &mut job_store, &message).await
         }
@@ -1162,7 +1162,7 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct StaticExecutor {
+    struct StaticRunner {
         outcome: TestOutcome,
         delay: Duration,
         last_request_id: Arc<TokioMutex<Option<String>>>,
@@ -1170,12 +1170,12 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct BlockingExecutor {
+    struct BlockingRunner {
         gate: Arc<Notify>,
         started_queues: Arc<TokioMutex<Vec<String>>>,
     }
 
-    impl BlockingExecutor {
+    impl BlockingRunner {
         fn new() -> Self {
             Self {
                 gate: Arc::new(Notify::new()),
@@ -1185,7 +1185,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl Executor for BlockingExecutor {
+    impl Runner for BlockingRunner {
         async fn execute(&self, request: ExecutionRequest) -> Result<ExecutionOutcome> {
             {
                 let mut guard = self.started_queues.lock().await;
@@ -1204,7 +1204,7 @@ mod tests {
         }
     }
 
-    impl StaticExecutor {
+    impl StaticRunner {
         fn new(outcome: TestOutcome, delay: Duration) -> Self {
             Self {
                 outcome,
@@ -1216,7 +1216,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl Executor for StaticExecutor {
+    impl Runner for StaticRunner {
         async fn execute(&self, request: ExecutionRequest) -> Result<ExecutionOutcome> {
             {
                 let mut guard = self.last_request_id.lock().await;
@@ -1274,20 +1274,20 @@ mod tests {
     }
 
     #[test]
-    fn split_executor_name_variants() {
-        let (exec, handler) = split_executor_name("exec#handler");
+    fn split_runner_name_variants() {
+        let (exec, handler) = split_runner_name("exec#handler");
         assert_eq!(exec, Some("exec".to_string()));
         assert_eq!(handler, "handler");
 
-        let (exec, handler) = split_executor_name("#handler");
+        let (exec, handler) = split_runner_name("#handler");
         assert_eq!(exec, None);
         assert_eq!(handler, "handler");
 
-        let (exec, handler) = split_executor_name("exec#");
+        let (exec, handler) = split_runner_name("exec#");
         assert_eq!(exec, Some("exec".to_string()));
         assert!(handler.is_empty());
 
-        let (exec, handler) = split_executor_name("plain");
+        let (exec, handler) = split_runner_name("plain");
         assert_eq!(exec, None);
         assert_eq!(handler, "plain");
     }
@@ -1554,12 +1554,12 @@ mod tests {
     #[tokio::test]
     async fn poll_for_jobs_distributes_across_queues() {
         let mut ctx = RedisTestContext::new().await.unwrap();
-        ctx.settings.default_executor_name = "test".to_string();
-        let executor = Arc::new(BlockingExecutor::new());
-        let gate = executor.gate.clone();
-        let started = executor.started_queues.clone();
-        let mut executors: HashMap<String, Arc<dyn Executor>> = HashMap::new();
-        executors.insert("test".to_string(), executor);
+        ctx.settings.default_runner_name = "test".to_string();
+        let runner = Arc::new(BlockingRunner::new());
+        let gate = runner.gate.clone();
+        let started = runner.started_queues.clone();
+        let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+        runners.insert("test".to_string(), runner);
         let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
         let queue_a = "queue-a".to_string();
         let queue_b = "queue-b".to_string();
@@ -1591,7 +1591,7 @@ mod tests {
             ctx.settings.clone(),
             Some(vec![queue_a.clone(), queue_b.clone()]),
             Some("worker-1".to_string()),
-            executors,
+            runners,
             true,
             2,
         )
@@ -1610,7 +1610,7 @@ mod tests {
                 drop(guard);
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            Err(anyhow::anyhow!("executor did not start expected jobs"))
+            Err(anyhow::anyhow!("runner did not start expected jobs"))
         }
 
         let started_queues = wait_for_started(&started).await.unwrap();
@@ -1628,18 +1628,18 @@ mod tests {
     #[tokio::test]
     async fn calculate_jittered_delay_handles_non_positive_base() {
         let mut ctx = RedisTestContext::new().await.unwrap();
-        ctx.settings.default_executor_name = "test".to_string();
-        let executor = Arc::new(StaticExecutor::new(
+        ctx.settings.default_runner_name = "test".to_string();
+        let runner = Arc::new(StaticRunner::new(
             TestOutcome::Success(json!({"ok": true})),
             Duration::from_millis(0),
         ));
-        let mut executors: HashMap<String, Arc<dyn Executor>> = HashMap::new();
-        executors.insert("test".to_string(), executor);
+        let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+        runners.insert("test".to_string(), runner);
         let worker = RRQWorker::new(
             ctx.settings.clone(),
             None,
             Some("worker-1".to_string()),
-            executors,
+            runners,
             true,
             1,
         )
@@ -1665,13 +1665,13 @@ mod tests {
     #[tokio::test]
     async fn worker_processes_success_job() {
         let mut ctx = RedisTestContext::new().await.unwrap();
-        ctx.settings.default_executor_name = "test".to_string();
-        let executor = Arc::new(StaticExecutor::new(
+        ctx.settings.default_runner_name = "test".to_string();
+        let runner = Arc::new(StaticRunner::new(
             TestOutcome::Success(json!({"ok": true})),
             Duration::from_millis(0),
         ));
-        let mut executors: HashMap<String, Arc<dyn Executor>> = HashMap::new();
-        executors.insert("test".to_string(), executor);
+        let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+        runners.insert("test".to_string(), runner);
         let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
         let job = client
             .enqueue(
@@ -1686,7 +1686,7 @@ mod tests {
             ctx.settings.clone(),
             None,
             Some("worker-1".to_string()),
-            executors,
+            runners,
             true,
             1,
         )
@@ -1709,13 +1709,13 @@ mod tests {
     #[tokio::test]
     async fn worker_processes_retry_job() {
         let mut ctx = RedisTestContext::new().await.unwrap();
-        ctx.settings.default_executor_name = "test".to_string();
-        let executor = Arc::new(StaticExecutor::new(
+        ctx.settings.default_runner_name = "test".to_string();
+        let runner = Arc::new(StaticRunner::new(
             TestOutcome::Retry,
             Duration::from_millis(0),
         ));
-        let mut executors: HashMap<String, Arc<dyn Executor>> = HashMap::new();
-        executors.insert("test".to_string(), executor);
+        let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+        runners.insert("test".to_string(), runner);
         let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
         let job = client
             .enqueue(
@@ -1730,7 +1730,7 @@ mod tests {
             ctx.settings.clone(),
             None,
             Some("worker-1".to_string()),
-            executors,
+            runners,
             true,
             1,
         )
@@ -1754,15 +1754,15 @@ mod tests {
     #[tokio::test]
     async fn worker_timeout_triggers_cancel() {
         let mut ctx = RedisTestContext::new().await.unwrap();
-        ctx.settings.default_executor_name = "test".to_string();
-        let executor = Arc::new(StaticExecutor::new(
+        ctx.settings.default_runner_name = "test".to_string();
+        let runner = Arc::new(StaticRunner::new(
             TestOutcome::Success(json!({"ok": true})),
             Duration::from_millis(1500),
         ));
-        let last_request_id = executor.last_request_id.clone();
-        let cancelled = executor.cancelled.clone();
-        let mut executors: HashMap<String, Arc<dyn Executor>> = HashMap::new();
-        executors.insert("test".to_string(), executor);
+        let last_request_id = runner.last_request_id.clone();
+        let cancelled = runner.cancelled.clone();
+        let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+        runners.insert("test".to_string(), runner);
         let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
         let options = EnqueueOptions {
             job_timeout_seconds: Some(1),
@@ -1776,7 +1776,7 @@ mod tests {
             ctx.settings.clone(),
             None,
             Some("worker-1".to_string()),
-            executors,
+            runners,
             true,
             1,
         )

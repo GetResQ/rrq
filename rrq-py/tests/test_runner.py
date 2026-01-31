@@ -3,12 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import pytest
 
-from rrq.executor import ExecutionContext, ExecutionRequest, PythonExecutor
+from rrq.runner import ExecutionContext, ExecutionRequest, PythonRunner
 from rrq.registry import JobRegistry
 
 
 @pytest.mark.asyncio
-async def test_python_executor_context_includes_trace_and_deadline() -> None:
+async def test_python_runner_context_includes_trace_and_deadline() -> None:
     registry = JobRegistry()
     captured: dict[str, object] = {}
 
@@ -17,7 +17,7 @@ async def test_python_executor_context_includes_trace_and_deadline() -> None:
         return {"ok": True}
 
     registry.register("echo", handler)
-    executor = PythonExecutor(
+    runner = PythonRunner(
         job_registry=registry,
         worker_id="worker-orchestrator",
     )
@@ -39,7 +39,7 @@ async def test_python_executor_context_includes_trace_and_deadline() -> None:
         ),
     )
 
-    outcome = await executor.execute(request)
+    outcome = await runner.execute(request)
 
     assert outcome.status == "success"
     assert outcome.request_id == "req-ctx"

@@ -1,16 +1,16 @@
 import { describe, expect, it } from "bun:test";
 
-type ExecutorMessage = { type: string; payload: Record<string, unknown> };
+type RunnerMessage = { type: string; payload: Record<string, unknown> };
 
-function encodeMessage(message: ExecutorMessage): Buffer {
+function encodeMessage(message: RunnerMessage): Buffer {
   const payload = Buffer.from(JSON.stringify(message));
   const header = Buffer.alloc(4);
   header.writeUInt32BE(payload.length, 0);
   return Buffer.concat([header, payload]);
 }
 
-function decodeMessage(buffer: Buffer): ExecutorMessage {
-  return JSON.parse(buffer.toString("utf-8")) as ExecutorMessage;
+function decodeMessage(buffer: Buffer): RunnerMessage {
+  return JSON.parse(buffer.toString("utf-8")) as RunnerMessage;
 }
 
 describe("protocol framing", () => {

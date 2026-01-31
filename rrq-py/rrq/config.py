@@ -46,9 +46,9 @@ def _normalize_toml_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     payload.pop("worker_concurrency", None)
     payload.pop("routing", None)
-    payload.pop("executor_routes", None)
-    payload.pop("executors", None)
-    payload.pop("default_executor_name", None)
+    payload.pop("runner_routes", None)
+    payload.pop("runners", None)
+    payload.pop("default_runner_name", None)
     return payload
 
 

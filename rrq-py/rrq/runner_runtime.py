@@ -1,4 +1,4 @@
-"""Python TCP executor runtime for RRQ."""
+"""Python TCP runner runtime for RRQ."""
 
 from __future__ import annotations
 
@@ -15,16 +15,16 @@ from datetime import datetime, timezone
 from ipaddress import ip_address
 from pydantic import BaseModel, Field
 
-from .executor import ExecutionError, ExecutionOutcome, ExecutionRequest, PythonExecutor
-from .executor_settings import PythonExecutorSettings
+from .runner import ExecutionError, ExecutionOutcome, ExecutionRequest, PythonRunner
+from .runner_settings import PythonRunnerSettings
 from .protocol import read_message, write_message
 from .registry import JobRegistry
 
 logger = logging.getLogger(__name__)
 
 
-ENV_EXECUTOR_SETTINGS = "RRQ_EXECUTOR_SETTINGS"
-ENV_EXECUTOR_TCP_SOCKET = "RRQ_EXECUTOR_TCP_SOCKET"
+ENV_RUNNER_SETTINGS = "RRQ_RUNNER_SETTINGS"
+ENV_RUNNER_TCP_SOCKET = "RRQ_RUNNER_TCP_SOCKET"
 _LOCALHOST_ALIASES = {"localhost", "127.0.0.1", "::1"}
 MAX_IN_FLIGHT_PER_CONNECTION = 64
 
@@ -168,11 +168,11 @@ async def _write_outcome(
         try:
             await write_message(writer, "response", outcome.model_dump(mode="json"))
         except Exception:
-            logger.warning("executor response write failed", exc_info=True)
+            logger.warning("runner response write failed", exc_info=True)
 
 
 async def _execute_and_respond(
-    executor: PythonExecutor,
+    runner: PythonRunner,
     request: ExecutionRequest,
     writer: asyncio.StreamWriter,
     write_lock: asyncio.Lock,
@@ -183,7 +183,7 @@ async def _execute_and_respond(
 ) -> None:
     try:
         try:
-            outcome = await _execute_with_deadline(executor, request)
+            outcome = await _execute_with_deadline(runner, request)
         except asyncio.CancelledError:
             outcome = ExecutionOutcome(
                 job_id=request.job_id,
@@ -214,30 +214,30 @@ async def _execute_and_respond(
 
 
 async def _execute_with_deadline(
-    executor: PythonExecutor,
+    runner: PythonRunner,
     request: ExecutionRequest,
 ) -> ExecutionOutcome:
     deadline = request.context.deadline
     if deadline is None:
-        return await executor.execute(request)
+        return await runner.execute(request)
     if deadline.tzinfo is None:
         deadline = deadline.replace(tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
     remaining = (deadline - now).total_seconds()
     if remaining <= 0:
         raise asyncio.TimeoutError("Job deadline exceeded")
-    return await asyncio.wait_for(executor.execute(request), timeout=remaining)
+    return await asyncio.wait_for(runner.execute(request), timeout=remaining)
 
 
-def load_executor_settings(
+def load_runner_settings(
     settings_object_path: str | None,
-) -> PythonExecutorSettings:
+) -> PythonRunnerSettings:
     if settings_object_path is None:
-        settings_object_path = os.getenv(ENV_EXECUTOR_SETTINGS)
+        settings_object_path = os.getenv(ENV_RUNNER_SETTINGS)
     if settings_object_path is None:
         raise ValueError(
-            "Python executor settings not provided. Use --settings or "
-            f"{ENV_EXECUTOR_SETTINGS}."
+            "Python runner settings not provided. Use --settings or "
+            f"{ENV_RUNNER_SETTINGS}."
         )
 
     parts = settings_object_path.split(".")
@@ -249,8 +249,8 @@ def load_executor_settings(
     settings_object_module_path = ".".join(parts[:-1])
     settings_object_module = importlib.import_module(settings_object_module_path)
     settings_object = getattr(settings_object_module, settings_object_name)
-    if not isinstance(settings_object, PythonExecutorSettings):
-        raise ValueError("settings_object is not a PythonExecutorSettings instance")
+    if not isinstance(settings_object, PythonRunnerSettings):
+        raise ValueError("settings_object is not a PythonRunnerSettings instance")
     return settings_object
 
 
@@ -295,12 +295,12 @@ def _parse_tcp_socket(tcp_socket: str) -> tuple[str, int]:
 
 def resolve_tcp_socket(tcp_socket: str | None) -> tuple[str, int]:
     if tcp_socket is None:
-        tcp_socket = os.getenv(ENV_EXECUTOR_TCP_SOCKET)
+        tcp_socket = os.getenv(ENV_RUNNER_TCP_SOCKET)
     if tcp_socket:
         return _parse_tcp_socket(tcp_socket)
     raise ValueError(
-        "Executor TCP socket not provided. Use --tcp-socket or set "
-        f"{ENV_EXECUTOR_TCP_SOCKET}."
+        "Runner TCP socket not provided. Use --tcp-socket or set "
+        f"{ENV_RUNNER_TCP_SOCKET}."
     )
 
 
@@ -317,7 +317,7 @@ async def _call_hook(
 async def _handle_connection(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
-    executor: PythonExecutor,
+    runner: PythonRunner,
     ready_event: asyncio.Event,
     tracker: _InflightTracker,
 ) -> None:
@@ -360,7 +360,7 @@ async def _handle_connection(
                         request_id=request.request_id,
                         status="error",
                         error=ExecutionError(
-                            message="Executor busy: too many in-flight requests"
+                            message="Runner busy: too many in-flight requests"
                         ),
                     )
                     await _write_outcome(writer, outcome, write_lock)
@@ -368,7 +368,7 @@ async def _handle_connection(
 
                 task = asyncio.create_task(
                     _execute_and_respond(
-                        executor,
+                        runner,
                         request,
                         writer,
                         write_lock,
@@ -377,7 +377,7 @@ async def _handle_connection(
                         connection_jobs,
                         connection_lock,
                     ),
-                    name=f"rrq-executor-{request.request_id}",
+                    name=f"rrq-runner-{request.request_id}",
                 )
                 await tracker.track_start(request.request_id, request.job_id, task)
                 continue
@@ -408,19 +408,19 @@ async def _handle_connection(
             await writer.wait_closed()
 
 
-async def run_python_executor(
+async def run_python_runner(
     settings_object_path: str | None,
     tcp_socket: str | None = None,
 ) -> None:
-    executor_settings = load_executor_settings(settings_object_path)
+    runner_settings = load_runner_settings(settings_object_path)
     host, port = resolve_tcp_socket(tcp_socket)
-    job_registry = executor_settings.job_registry
+    job_registry = runner_settings.job_registry
     if not isinstance(job_registry, JobRegistry):
         raise RuntimeError(
-            "PythonExecutorSettings.job_registry must be a JobRegistry instance"
+            "PythonRunnerSettings.job_registry must be a JobRegistry instance"
         )
 
-    executor = PythonExecutor(
+    runner = PythonRunner(
         job_registry=job_registry,
         worker_id=None,
     )
@@ -432,11 +432,11 @@ async def run_python_executor(
     try:
         await tracker.start()
         server = await asyncio.start_server(
-            lambda r, w: _handle_connection(r, w, executor, ready_event, tracker),
+            lambda r, w: _handle_connection(r, w, runner, ready_event, tracker),
             host=host,
             port=port,
         )
-        await _call_hook(executor_settings.on_startup)
+        await _call_hook(runner_settings.on_startup)
         startup_completed = True
         ready_event.set()
         async with server:
@@ -448,21 +448,21 @@ async def run_python_executor(
                 await server.wait_closed()
         await tracker.close()
         if startup_completed:
-            await _call_hook(executor_settings.on_shutdown)
-        await executor.close()
+            await _call_hook(runner_settings.on_shutdown)
+        await runner.close()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="RRQ Python executor runtime (TCP socket)"
+        description="RRQ Python runner runtime (TCP socket)"
     )
     parser.add_argument(
         "--settings",
         dest="settings_object_path",
         help=(
-            "PythonExecutorSettings object path "
-            "(e.g., myapp.executor_config.python_executor_settings). "
-            f"Defaults to {ENV_EXECUTOR_SETTINGS} if unset."
+            "PythonRunnerSettings object path "
+            "(e.g., myapp.runner_config.python_runner_settings). "
+            f"Defaults to {ENV_RUNNER_SETTINGS} if unset."
         ),
     )
     parser.add_argument(
@@ -470,14 +470,14 @@ def main() -> None:
         dest="tcp_socket",
         help=(
             "TCP socket in host:port form (localhost only). Defaults to "
-            f"{ENV_EXECUTOR_TCP_SOCKET} if unset."
+            f"{ENV_RUNNER_TCP_SOCKET} if unset."
         ),
     )
     args = parser.parse_args()
-    asyncio.run(run_python_executor(args.settings_object_path, args.tcp_socket))
+    asyncio.run(run_python_runner(args.settings_object_path, args.tcp_socket))
 
 
-__all__ = ["run_python_executor", "load_executor_settings", "main"]
+__all__ = ["run_python_runner", "load_runner_settings", "main"]
 
 
 if __name__ == "__main__":

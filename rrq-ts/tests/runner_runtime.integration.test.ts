@@ -2,9 +2,9 @@ import net from "node:net";
 
 import { describe, expect, it } from "bun:test";
 
-import { ExecutorRuntime, Registry } from "../src/executor_runtime.js";
+import { RunnerRuntime, Registry } from "../src/runner_runtime.js";
 
-type ExecutorMessage =
+type RunnerMessage =
   | { type: "request"; payload: Record<string, unknown> }
   | { type: "response"; payload: Record<string, unknown> }
   | { type: "cancel"; payload: Record<string, unknown> };
@@ -27,7 +27,7 @@ type ExecutionRequestPayload = {
   };
 };
 
-function encodeMessage(message: ExecutorMessage): Buffer {
+function encodeMessage(message: RunnerMessage): Buffer {
   const payload = Buffer.from(JSON.stringify(message));
   const header = Buffer.alloc(4);
   header.writeUInt32BE(payload.length, 0);
@@ -37,28 +37,28 @@ function encodeMessage(message: ExecutorMessage): Buffer {
 class FrameParser {
   private buffer = Buffer.alloc(0);
 
-  push(chunk: Buffer): ExecutorMessage[] {
+  push(chunk: Buffer): RunnerMessage[] {
     this.buffer = Buffer.concat([this.buffer, chunk]);
-    const messages: ExecutorMessage[] = [];
+    const messages: RunnerMessage[] = [];
     while (this.buffer.length >= 4) {
       const length = this.buffer.readUInt32BE(0);
       if (length === 0) {
-        throw new Error("executor message payload cannot be empty");
+        throw new Error("runner message payload cannot be empty");
       }
       if (this.buffer.length < 4 + length) {
         break;
       }
       const payload = this.buffer.subarray(4, 4 + length);
       this.buffer = this.buffer.subarray(4 + length);
-      messages.push(JSON.parse(payload.toString("utf-8")) as ExecutorMessage);
+      messages.push(JSON.parse(payload.toString("utf-8")) as RunnerMessage);
     }
     return messages;
   }
 }
 
-async function waitForMessages(socket: net.Socket, count: number): Promise<ExecutorMessage[]> {
+async function waitForMessages(socket: net.Socket, count: number): Promise<RunnerMessage[]> {
   const parser = new FrameParser();
-  const messages: ExecutorMessage[] = [];
+  const messages: RunnerMessage[] = [];
   return await new Promise((resolve, reject) => {
     const onData = (chunk: Buffer) => {
       try {
@@ -119,11 +119,11 @@ function buildRequest(overrides?: Partial<ExecutionRequestPayload>): ExecutionRe
   };
 }
 
-describe("ExecutorRuntime integration", () => {
+describe("RunnerRuntime integration", () => {
   it("executes request with future deadline", async () => {
     const registry = new Registry();
     registry.register("handler", async () => ({ ok: true }));
-    const runtime = new ExecutorRuntime(registry);
+    const runtime = new RunnerRuntime(registry);
     const { server, port } = await withServer(registry, (socket) =>
       (runtime as any).handleConnection(socket),
     );
@@ -149,7 +149,7 @@ describe("ExecutorRuntime integration", () => {
   it("returns timeout when deadline is in the past", async () => {
     const registry = new Registry();
     registry.register("handler", async () => ({ ok: true }));
-    const runtime = new ExecutorRuntime(registry);
+    const runtime = new RunnerRuntime(registry);
     const { server, port } = await withServer(registry, (socket) =>
       (runtime as any).handleConnection(socket),
     );
@@ -185,7 +185,7 @@ describe("ExecutorRuntime integration", () => {
       });
       return { ok: true };
     });
-    const runtime = new ExecutorRuntime(registry);
+    const runtime = new RunnerRuntime(registry);
     const { server, port } = await withServer(registry, (socket) =>
       (runtime as any).handleConnection(socket),
     );
@@ -238,7 +238,7 @@ describe("ExecutorRuntime integration", () => {
       });
       return { ok: true };
     });
-    const runtime = new ExecutorRuntime(registry);
+    const runtime = new RunnerRuntime(registry);
     const { server, port } = await withServer(registry, (socket) =>
       (runtime as any).handleConnection(socket),
     );
@@ -266,7 +266,7 @@ describe("ExecutorRuntime integration", () => {
       expect(busyResponse.type).toBe("response");
       expect(busyResponse.payload.request_id).toBe("req-busy");
       expect(busyResponse.payload.status).toBe("error");
-      expect(busyResponse.payload.error?.message).toMatch(/Executor busy/);
+      expect(busyResponse.payload.error?.message).toMatch(/Runner busy/);
 
       client.write(
         encodeMessage({

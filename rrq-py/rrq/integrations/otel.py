@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from ..job import Job
-from ..telemetry import ExecutorSpan, EnqueueSpan, JobSpan, Telemetry, configure
+from ..telemetry import RunnerSpan, EnqueueSpan, JobSpan, Telemetry, configure
 
 
 def enable(*, service_name: str = "rrq") -> None:
@@ -207,7 +207,7 @@ class _OtelJobSpan(JobSpan):
         return
 
 
-class _OtelExecutorSpan(ExecutorSpan):
+class _OtelRunnerSpan(RunnerSpan):
     def __init__(
         self,
         *,
@@ -231,7 +231,7 @@ class _OtelExecutorSpan(ExecutorSpan):
         self._span_cm: Optional[AbstractContextManager[Any]] = None
         self._span = None
 
-    def __enter__(self) -> "_OtelExecutorSpan":
+    def __enter__(self) -> "_OtelRunnerSpan":
         from opentelemetry import propagate  # type: ignore[import-not-found]
         from opentelemetry.trace import SpanKind  # type: ignore[import-not-found]
 
@@ -244,11 +244,11 @@ class _OtelExecutorSpan(ExecutorSpan):
 
         if context is not None:
             self._span_cm = self._tracer.start_as_current_span(
-                "rrq.executor", context=context, kind=SpanKind.INTERNAL
+                "rrq.runner", context=context, kind=SpanKind.INTERNAL
             )
         else:
             self._span_cm = self._tracer.start_as_current_span(
-                "rrq.executor", kind=SpanKind.INTERNAL
+                "rrq.runner", kind=SpanKind.INTERNAL
             )
         self._span = self._span_cm.__enter__()
 
@@ -377,7 +377,7 @@ class OtelTelemetry(Telemetry):
             timeout_seconds=timeout_seconds,
         )
 
-    def executor_span(
+    def runner_span(
         self,
         *,
         job_id: str,
@@ -386,8 +386,8 @@ class OtelTelemetry(Telemetry):
         attempt: int,
         trace_context: Optional[dict[str, str]],
         worker_id: Optional[str],
-    ) -> ExecutorSpan:
-        return _OtelExecutorSpan(
+    ) -> RunnerSpan:
+        return _OtelRunnerSpan(
             tracer=self._tracer,
             service_name=self._service_name,
             job_id=job_id,

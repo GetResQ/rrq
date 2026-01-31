@@ -25,7 +25,7 @@ pub struct ExecutionContext {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum ExecutorMessage {
+pub enum RunnerMessage {
     Request { payload: ExecutionRequest },
     Response { payload: ExecutionOutcome },
     Cancel { payload: CancelRequest },
@@ -213,7 +213,7 @@ impl From<serde_json::Error> for FrameError {
     }
 }
 
-pub fn encode_frame(message: &ExecutorMessage) -> Result<Vec<u8>, FrameError> {
+pub fn encode_frame(message: &RunnerMessage) -> Result<Vec<u8>, FrameError> {
     let payload = serde_json::to_vec(message)?;
     let length = u32::try_from(payload.len()).map_err(|_| FrameError::InvalidLength)?;
     let mut framed = Vec::with_capacity(FRAME_HEADER_LEN + payload.len());
@@ -222,7 +222,7 @@ pub fn encode_frame(message: &ExecutorMessage) -> Result<Vec<u8>, FrameError> {
     Ok(framed)
 }
 
-pub fn decode_frame(frame: &[u8]) -> Result<ExecutorMessage, FrameError> {
+pub fn decode_frame(frame: &[u8]) -> Result<RunnerMessage, FrameError> {
     if frame.len() < FRAME_HEADER_LEN {
         return Err(FrameError::InvalidLength);
     }
@@ -276,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn executor_message_round_trip() {
+    fn runner_message_round_trip() {
         let request = ExecutionRequest {
             protocol_version: PROTOCOL_VERSION.to_string(),
             request_id: "req-1".to_string(),
@@ -294,10 +294,10 @@ mod tests {
                 worker_id: None,
             },
         };
-        let msg = ExecutorMessage::Request { payload: request };
+        let msg = RunnerMessage::Request { payload: request };
         let serialized = serde_json::to_string(&msg).unwrap();
-        let decoded: ExecutorMessage = serde_json::from_str(&serialized).unwrap();
-        let ExecutorMessage::Request { payload } = decoded else {
+        let decoded: RunnerMessage = serde_json::from_str(&serialized).unwrap();
+        let RunnerMessage::Request { payload } = decoded else {
             panic!("unexpected message type")
         };
         assert_eq!(payload.protocol_version, PROTOCOL_VERSION);
@@ -312,10 +312,10 @@ mod tests {
             request_id: Some("req-1".to_string()),
             hard_kill: true,
         };
-        let msg = ExecutorMessage::Cancel { payload: cancel };
+        let msg = RunnerMessage::Cancel { payload: cancel };
         let serialized = serde_json::to_string(&msg).unwrap();
-        let decoded: ExecutorMessage = serde_json::from_str(&serialized).unwrap();
-        let ExecutorMessage::Cancel { payload } = decoded else {
+        let decoded: RunnerMessage = serde_json::from_str(&serialized).unwrap();
+        let RunnerMessage::Cancel { payload } = decoded else {
             panic!("unexpected message type")
         };
         assert_eq!(payload.protocol_version, PROTOCOL_VERSION);
@@ -326,10 +326,10 @@ mod tests {
     #[test]
     fn frame_round_trip() {
         let outcome = ExecutionOutcome::success("job-1", "req-1", json!({"ok": true}));
-        let message = ExecutorMessage::Response { payload: outcome };
+        let message = RunnerMessage::Response { payload: outcome };
         let framed = encode_frame(&message).expect("frame encode failed");
         let decoded = decode_frame(&framed).expect("frame decode failed");
-        let ExecutorMessage::Response { payload } = decoded else {
+        let RunnerMessage::Response { payload } = decoded else {
             panic!("unexpected message variant")
         };
         assert_eq!(payload.status, OutcomeStatus::Success);

@@ -15,21 +15,21 @@ Env vars:
 - `RRQ_FUNCTION` (default: `quick_task`)
 - `RRQ_COUNT` (default: `5`)
 
-## Executor (consumer)
+## Runner (consumer)
 
-The reference Rust socket executor is available via the `rrq-executor` crate.
+The reference Rust runner is available via the `rrq-runner` crate.
 You can run the example binary from crates.io:
 
 ```
-cargo install rrq-executor --example socket_executor
-RRQ_EXECUTOR_TCP_SOCKET=127.0.0.1:9000 socket_executor
+cargo install rrq-runner --example socket_runner
+RRQ_RUNNER_TCP_SOCKET=127.0.0.1:9000 socket_runner
 ```
 
 Then point your worker config to the binary:
 
 ```toml
-[rrq.executors.rust]
+[rrq.runners.rust]
 type = "socket"
-cmd = ["/path/to/socket_executor"]
+cmd = ["/path/to/socket_runner"]
 tcp_socket = "127.0.0.1:9000"
 ```

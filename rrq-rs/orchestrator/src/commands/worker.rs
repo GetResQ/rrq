@@ -9,8 +9,8 @@ use tokio::sync::mpsc;
 use tokio::time::Duration;
 
 use rrq::config::{load_toml_settings, resolve_config_source};
-use rrq::executor::{
-    build_executors_from_settings, resolve_executor_max_in_flight, resolve_executor_pool_sizes,
+use rrq::runner::{
+    build_runners_from_settings, resolve_runner_max_in_flight, resolve_runner_pool_sizes,
 };
 use rrq::worker::RRQWorker;
 
@@ -27,16 +27,16 @@ pub(crate) async fn run_worker(
         println!("missing RRQ config (provide --config or RRQ_CONFIG).");
     }
     let settings = load_toml_settings(config.as_deref())?;
-    let pool_sizes = resolve_executor_pool_sizes(&settings, watch_mode, None)?;
-    let max_in_flight = resolve_executor_max_in_flight(&settings, watch_mode)?;
+    let pool_sizes = resolve_runner_pool_sizes(&settings, watch_mode, None)?;
+    let max_in_flight = resolve_runner_max_in_flight(&settings, watch_mode)?;
     let mut effective_concurrency = 0usize;
     for (name, pool_size) in &pool_sizes {
         let in_flight = max_in_flight.get(name).copied().unwrap_or(1);
         effective_concurrency += pool_size.saturating_mul(in_flight);
     }
     let effective_concurrency = std::cmp::max(1, effective_concurrency);
-    let executors =
-        build_executors_from_settings(&settings, Some(&pool_sizes), Some(&max_in_flight)).await?;
+    let runners =
+        build_runners_from_settings(&settings, Some(&pool_sizes), Some(&max_in_flight)).await?;
     let queues = if queues.is_empty() {
         None
     } else {
@@ -46,7 +46,7 @@ pub(crate) async fn run_worker(
         settings,
         queues,
         None,
-        executors,
+        runners,
         burst,
         effective_concurrency,
     )
@@ -86,7 +86,7 @@ async fn run_worker_loop(mut worker: RRQWorker) -> Result<()> {
             }
         }
     };
-    worker.close_executors().await;
+    worker.close_runners().await;
     Ok(())
 }
 
@@ -267,8 +267,8 @@ pub(crate) async fn run_worker_watch(
             Some(settings) => settings,
             None => load_toml_settings(config.as_deref())?,
         };
-        let pool_sizes = resolve_executor_pool_sizes(&settings, true, None)?;
-        let max_in_flight = resolve_executor_max_in_flight(&settings, true)?;
+        let pool_sizes = resolve_runner_pool_sizes(&settings, true, None)?;
+        let max_in_flight = resolve_runner_max_in_flight(&settings, true)?;
         let mut effective_concurrency = 0usize;
         for (name, pool_size) in &pool_sizes {
             let in_flight = max_in_flight.get(name).copied().unwrap_or(1);
@@ -277,8 +277,8 @@ pub(crate) async fn run_worker_watch(
         let effective_concurrency = std::cmp::max(1, effective_concurrency);
         let mut settings = settings;
         settings.worker_shutdown_grace_period_seconds = 0.0;
-        let executors =
-            build_executors_from_settings(&settings, Some(&pool_sizes), Some(&max_in_flight))
+        let runners =
+            build_runners_from_settings(&settings, Some(&pool_sizes), Some(&max_in_flight))
                 .await?;
         let queue_arg = if queues.is_empty() {
             None
@@ -289,7 +289,7 @@ pub(crate) async fn run_worker_watch(
             settings,
             queue_arg,
             None,
-            executors,
+            runners,
             false,
             effective_concurrency,
         )
@@ -359,7 +359,7 @@ pub(crate) async fn run_worker_watch(
                 continue;
             }
         };
-        worker.close_executors().await;
+        worker.close_runners().await;
         if exit_loop {
             break;
         }
@@ -515,14 +515,14 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    async fn write_executor_script(dir: &Path) -> Result<PathBuf> {
-        let script_path = dir.join("rrq-dummy-executor.py");
+    async fn write_runner_script(dir: &Path) -> Result<PathBuf> {
+        let script_path = dir.join("rrq-dummy-runner.py");
         let script = r#"#!/usr/bin/env python3
 import os
 import socket
 import time
 
-tcp_socket = os.environ.get("RRQ_EXECUTOR_TCP_SOCKET")
+tcp_socket = os.environ.get("RRQ_RUNNER_TCP_SOCKET")
 if not tcp_socket:
     raise SystemExit(1)
 host, _, port_str = tcp_socket.rpartition(":")
@@ -556,7 +556,7 @@ while True:
         let path = std::env::temp_dir().join(format!("rrq-worker-{}.toml", Uuid::new_v4()));
         let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let payload = format!(
-            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_executor_name = \"python\"\n\n[rrq.executors.python]\ncmd = [\"python3\", \"{}\"]\ntcp_socket = \"127.0.0.1:{}\"\npool_size = 1\nmax_in_flight = 1\n",
+            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_runner_name = \"python\"\n\n[rrq.runners.python]\ncmd = [\"python3\", \"{}\"]\ntcp_socket = \"127.0.0.1:{}\"\npool_size = 1\nmax_in_flight = 1\n",
             settings.redis_dsn,
             settings.default_queue_name,
             settings.default_dlq_name,
@@ -572,7 +572,7 @@ while True:
         let ctx = RedisTestContext::new().await?;
         let temp_dir = std::env::temp_dir().join(format!("rrq-worker-{}", Uuid::new_v4()));
         tokio_fs::create_dir_all(&temp_dir).await?;
-        let script_path = write_executor_script(&temp_dir).await?;
+        let script_path = write_runner_script(&temp_dir).await?;
         let config_path = write_worker_config(&ctx.settings, &script_path).await?;
 
         run_worker(
@@ -596,7 +596,7 @@ while True:
         tokio_fs::create_dir_all(&temp_dir).await?;
         let watch_root = temp_dir.join("watch");
         tokio_fs::create_dir_all(&watch_root).await?;
-        let script_path = write_executor_script(&temp_dir).await?;
+        let script_path = write_runner_script(&temp_dir).await?;
         let config_path = write_worker_config(&ctx.settings, &script_path).await?;
 
         let handle = tokio::spawn(run_worker_watch(

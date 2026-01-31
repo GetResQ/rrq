@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::constants::{
-    DEFAULT_DLQ_NAME, DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS, DEFAULT_JOB_TIMEOUT_SECONDS,
+    DEFAULT_DLQ_NAME, DEFAULT_RUNNER_CONNECT_TIMEOUT_MS, DEFAULT_JOB_TIMEOUT_SECONDS,
     DEFAULT_LOCK_TIMEOUT_EXTENSION_SECONDS, DEFAULT_MAX_RETRIES, DEFAULT_POLL_DELAY_SECONDS,
     DEFAULT_QUEUE_NAME, DEFAULT_RESULT_TTL_SECONDS, DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
 };
@@ -11,15 +11,15 @@ use crate::cron::CronJob;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum ExecutorType {
+pub enum RunnerType {
     #[default]
     Socket,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ExecutorConfig {
-    #[serde(default = "default_executor_type", rename = "type")]
-    pub executor_type: ExecutorType,
+pub struct RunnerConfig {
+    #[serde(default = "default_runner_type", rename = "type")]
+    pub runner_type: RunnerType,
     pub cmd: Option<Vec<String>>,
     pub pool_size: Option<usize>,
     pub max_in_flight: Option<usize>,
@@ -29,8 +29,8 @@ pub struct ExecutorConfig {
     pub response_timeout_seconds: Option<f64>,
 }
 
-fn default_executor_type() -> ExecutorType {
-    ExecutorType::Socket
+fn default_runner_type() -> RunnerType {
+    RunnerType::Socket
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -53,11 +53,11 @@ pub struct RRQSettings {
     pub default_lock_timeout_extension_seconds: i64,
     pub default_result_ttl_seconds: i64,
     pub default_poll_delay_seconds: f64,
-    pub executor_connect_timeout_ms: i64,
+    pub runner_connect_timeout_ms: i64,
     pub default_unique_job_lock_ttl_seconds: i64,
-    pub default_executor_name: String,
-    pub executors: HashMap<String, ExecutorConfig>,
-    pub executor_routes: HashMap<String, String>,
+    pub default_runner_name: String,
+    pub runners: HashMap<String, RunnerConfig>,
+    pub runner_routes: HashMap<String, String>,
     pub worker_health_check_interval_seconds: f64,
     pub worker_health_check_ttl_buffer_seconds: f64,
     pub base_retry_delay_seconds: f64,
@@ -79,11 +79,11 @@ impl Default for RRQSettings {
             default_lock_timeout_extension_seconds: DEFAULT_LOCK_TIMEOUT_EXTENSION_SECONDS,
             default_result_ttl_seconds: DEFAULT_RESULT_TTL_SECONDS,
             default_poll_delay_seconds: DEFAULT_POLL_DELAY_SECONDS,
-            executor_connect_timeout_ms: DEFAULT_EXECUTOR_CONNECT_TIMEOUT_MS,
+            runner_connect_timeout_ms: DEFAULT_RUNNER_CONNECT_TIMEOUT_MS,
             default_unique_job_lock_ttl_seconds: DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
-            default_executor_name: "python".to_string(),
-            executors: HashMap::new(),
-            executor_routes: HashMap::new(),
+            default_runner_name: "python".to_string(),
+            runners: HashMap::new(),
+            runner_routes: HashMap::new(),
             worker_health_check_interval_seconds: 60.0,
             worker_health_check_ttl_buffer_seconds: 10.0,
             base_retry_delay_seconds: 5.0,

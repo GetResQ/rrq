@@ -219,7 +219,7 @@ let producer = Producer::new("rediss://my-cluster.cache.amazonaws.com:6379").awa
 | Crate | Description |
 |-------|-------------|
 | [`rrq`](https://crates.io/crates/rrq) | Job queue orchestrator (worker) |
-| [`rrq-executor`](https://crates.io/crates/rrq-executor) | Executor runtime for job handlers |
+| [`rrq-runner`](https://crates.io/crates/rrq-runner) | Runner runtime for job handlers |
 | [`rrq-protocol`](https://crates.io/crates/rrq-protocol) | Protocol definitions |
 
 ## License

@@ -1,14 +1,14 @@
 [package]
-name = "rrq-executor"
+name = "rrq-runner"
 version = "0.9.9"
 edition = "2024"
 license = "Apache-2.0"
-description = "RRQ socket executor runtime for Rust."
+description = "RRQ runner runtime for Rust."
 repository = "https://github.com/getresq/rrq"
 homepage = "https://github.com/getresq/rrq"
-documentation = "https://docs.rs/rrq-executor"
+documentation = "https://docs.rs/rrq-runner"
 readme = "README.md"
-keywords = ["rrq", "redis", "queue", "jobs", "executor"]
+keywords = ["rrq", "redis", "queue", "jobs", "runner"]
 categories = ["asynchronous"]
 
 [dependencies]

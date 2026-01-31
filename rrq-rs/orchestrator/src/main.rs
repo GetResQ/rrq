@@ -8,7 +8,7 @@ mod commands;
 use commands::{
     DlqListOptions, DlqRequeueOptions, check_workers, debug_clear, debug_generate_jobs,
     debug_generate_workers, debug_stress_test, debug_submit, dlq_inspect, dlq_list, dlq_requeue,
-    dlq_stats, executor_python, job_cancel, job_list, job_replay, job_show, job_trace,
+    dlq_stats, runner_python, job_cancel, job_list, job_replay, job_show, job_trace,
     queue_inspect, queue_list, queue_stats, run_worker, run_worker_watch,
 };
 
@@ -47,9 +47,9 @@ enum Commands {
         #[command(subcommand)]
         command: DebugCommand,
     },
-    Executor {
+    Runner {
         #[command(subcommand)]
-        command: ExecutorCommand,
+        command: RunnerCommand,
     },
 }
 
@@ -259,7 +259,7 @@ enum DebugCommand {
 }
 
 #[derive(Subcommand)]
-enum ExecutorCommand {
+enum RunnerCommand {
     Python {
         #[arg(long)]
         settings: Option<String>,
@@ -451,12 +451,12 @@ async fn dispatch_command(command: Commands) -> Result<()> {
                 debug_stress_test(config, jobs_per_second, duration, queues).await?;
             }
         },
-        Commands::Executor { command } => match command {
-            ExecutorCommand::Python {
+        Commands::Runner { command } => match command {
+            RunnerCommand::Python {
                 settings,
                 tcp_socket,
             } => {
-                executor_python(settings, tcp_socket).await?;
+                runner_python(settings, tcp_socket).await?;
             }
         },
     }
@@ -534,14 +534,14 @@ mod tests {
         }
     }
 
-    async fn write_executor_script(dir: &Path) -> Result<PathBuf> {
-        let script_path = dir.join("rrq-dummy-executor.py");
+    async fn write_runner_script(dir: &Path) -> Result<PathBuf> {
+        let script_path = dir.join("rrq-dummy-runner.py");
         let script = r#"#!/usr/bin/env python3
 import os
 import socket
 import time
 
-tcp_socket = os.environ.get("RRQ_EXECUTOR_TCP_SOCKET")
+tcp_socket = os.environ.get("RRQ_RUNNER_TCP_SOCKET")
 if not tcp_socket:
     raise SystemExit(1)
 host, _, port_str = tcp_socket.rpartition(":")
@@ -575,7 +575,7 @@ while True:
         let path = std::env::temp_dir().join(format!("rrq-main-{}.toml", Uuid::new_v4()));
         let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let payload = format!(
-            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_executor_name = \"python\"\n\n[rrq.executors.python]\ncmd = [\"python3\", \"{}\"]\ntcp_socket = \"127.0.0.1:{}\"\npool_size = 1\nmax_in_flight = 1\n",
+            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_runner_name = \"python\"\n\n[rrq.runners.python]\ncmd = [\"python3\", \"{}\"]\ntcp_socket = \"127.0.0.1:{}\"\npool_size = 1\nmax_in_flight = 1\n",
             settings.redis_dsn,
             settings.default_queue_name,
             settings.default_dlq_name,
@@ -586,8 +586,8 @@ while True:
         Ok(path)
     }
 
-    async fn write_rrq_executor_script(dir: &Path) -> Result<PathBuf> {
-        let script_path = dir.join("rrq-executor");
+    async fn write_rrq_runner_script(dir: &Path) -> Result<PathBuf> {
+        let script_path = dir.join("rrq-runner");
         tokio_fs::write(&script_path, "#!/bin/sh\nexit 0\n").await?;
         let mut perms = tokio_fs::metadata(&script_path).await?.permissions();
         perms.set_mode(0o755);
@@ -600,9 +600,9 @@ while True:
         let mut ctx = RedisTestContext::new().await?;
         let temp_dir = std::env::temp_dir().join(format!("rrq-main-{}", Uuid::new_v4()));
         tokio_fs::create_dir_all(&temp_dir).await?;
-        let script_path = write_executor_script(&temp_dir).await?;
+        let script_path = write_runner_script(&temp_dir).await?;
         let config_path = write_worker_config(&ctx.settings, &script_path).await?;
-        let rrq_executor = write_rrq_executor_script(&temp_dir).await?;
+        let rrq_runner = write_rrq_runner_script(&temp_dir).await?;
         let path_guard = EnvGuard::set(
             "PATH",
             format!(
@@ -798,8 +798,8 @@ while True:
         })
         .await?;
 
-        dispatch_command(Commands::Executor {
-            command: ExecutorCommand::Python {
+        dispatch_command(Commands::Runner {
+            command: RunnerCommand::Python {
                 settings: None,
                 tcp_socket: None,
             },
@@ -816,7 +816,7 @@ while True:
         .await?;
 
         drop(path_guard);
-        let _ = tokio_fs::remove_file(&rrq_executor).await;
+        let _ = tokio_fs::remove_file(&rrq_runner).await;
         let _ = tokio_fs::remove_file(&config_path).await;
         let _ = tokio_fs::remove_file(&script_path).await;
         let _ = tokio_fs::remove_dir_all(&temp_dir).await;

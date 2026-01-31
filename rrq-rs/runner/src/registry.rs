@@ -63,7 +63,7 @@ impl Registry {
         request: ExecutionRequest,
         telemetry: &T,
     ) -> ExecutionOutcome {
-        let span = telemetry.executor_span(&request);
+        let span = telemetry.runner_span(&request);
         let start = Instant::now();
         let function_name = request.function_name.clone();
         let outcome = match self.get(&function_name) {

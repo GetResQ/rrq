@@ -4,13 +4,13 @@
 [![Documentation](https://docs.rs/rrq-protocol/badge.svg)](https://docs.rs/rrq-protocol)
 [![License](https://img.shields.io/crates/l/rrq-protocol.svg)](LICENSE)
 
-Protocol definitions for communication between the [RRQ](https://crates.io/crates/rrq) orchestrator and executor processes.
+Protocol definitions for communication between the [RRQ](https://crates.io/crates/rrq) orchestrator and runner processes.
 
 ## Overview
 
 This crate defines the wire protocol used for socket communication between:
-- **RRQ Orchestrator** - dispatches jobs to executor processes
-- **RRQ Executor** - receives and executes job handlers
+- **RRQ Orchestrator** - dispatches jobs to runner processes
+- **RRQ Runner** - receives and executes job handlers
 
 The protocol uses length-prefixed JSON frames over TCP connections.
 
@@ -25,7 +25,7 @@ rrq-protocol = "0.9"
 
 ### ExecutionRequest
 
-Sent from orchestrator to executor when dispatching a job:
+Sent from orchestrator to runner when dispatching a job:
 
 ```rust
 use rrq_protocol::{ExecutionRequest, ExecutionContext};
@@ -51,7 +51,7 @@ let request = ExecutionRequest {
 
 ### ExecutionOutcome
 
-Returned from executor to orchestrator after job execution:
+Returned from runner to orchestrator after job execution:
 
 ```rust
 use rrq_protocol::ExecutionOutcome;
@@ -81,7 +81,7 @@ let outcome = ExecutionOutcome::retry_after(
 
 ### CancelRequest
 
-Sent to executor to cancel an in-flight job:
+Sent to runner to cancel an in-flight job:
 
 ```rust
 use rrq_protocol::CancelRequest;
@@ -106,26 +106,26 @@ Messages are encoded as length-prefixed JSON:
 ```
 
 ```rust
-use rrq_protocol::{encode_frame, ExecutorMessage, ExecutionRequest};
+use rrq_protocol::{encode_frame, RunnerMessage, ExecutionRequest};
 
-let message = ExecutorMessage::Request {
+let message = RunnerMessage::Request {
     payload: request,
 };
 let frame: Vec<u8> = encode_frame(&message)?;
 // frame = [length_bytes...][json_bytes...]
 ```
 
-## Executor Message Envelope
+## Runner Message Envelope
 
-All messages are wrapped in an `ExecutorMessage` enum:
+All messages are wrapped in an `RunnerMessage` enum:
 
 ```rust
-use rrq_protocol::ExecutorMessage;
+use rrq_protocol::RunnerMessage;
 
 // Three variants:
-let msg = ExecutorMessage::Request { payload: request };
-let msg = ExecutorMessage::Response { payload: outcome };
-let msg = ExecutorMessage::Cancel { payload: cancel };
+let msg = RunnerMessage::Request { payload: request };
+let msg = RunnerMessage::Response { payload: outcome };
+let msg = RunnerMessage::Cancel { payload: cancel };
 ```
 
 ## Outcome Types
@@ -147,7 +147,7 @@ The `outcome_type` field indicates how the job completed:
 |-------|-------------|
 | [`rrq`](https://crates.io/crates/rrq) | Job queue orchestrator |
 | [`rrq-producer`](https://crates.io/crates/rrq-producer) | Client for enqueuing jobs |
-| [`rrq-executor`](https://crates.io/crates/rrq-executor) | Executor runtime implementation |
+| [`rrq-runner`](https://crates.io/crates/rrq-runner) | Runner runtime implementation |
 
 ## License
 

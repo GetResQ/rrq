@@ -1,4 +1,4 @@
-"""Example handlers for RRQ Python executor."""
+"""Example handlers for RRQ Python runner."""
 
 from __future__ import annotations
 

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from ..job import Job
-from ..telemetry import ExecutorSpan, EnqueueSpan, JobSpan, Telemetry, configure
+from ..telemetry import RunnerSpan, EnqueueSpan, JobSpan, Telemetry, configure
 
 
 def enable(
@@ -265,7 +265,7 @@ class _DdtraceJobSpan(JobSpan):
             pass
 
 
-class _DdtraceExecutorSpan(ExecutorSpan):
+class _DdtraceRunnerSpan(RunnerSpan):
     def __init__(
         self,
         *,
@@ -294,10 +294,10 @@ class _DdtraceExecutorSpan(ExecutorSpan):
         self._version = version
         self._span = None
 
-    def __enter__(self) -> "_DdtraceExecutorSpan":
+    def __enter__(self) -> "_DdtraceRunnerSpan":
         span = _trace_with_parent(
             self._tracer,
-            name="rrq.executor",
+            name="rrq.runner",
             service=self._service,
             resource=self._function_name,
             span_type="worker",
@@ -501,7 +501,7 @@ class DdtraceTelemetry(Telemetry):
             version=self._version,
         )
 
-    def executor_span(
+    def runner_span(
         self,
         *,
         job_id: str,
@@ -510,11 +510,11 @@ class DdtraceTelemetry(Telemetry):
         attempt: int,
         trace_context: Optional[dict[str, str]],
         worker_id: Optional[str],
-    ) -> ExecutorSpan:
+    ) -> RunnerSpan:
         parent_context = None
         if self._propagator is not None and trace_context:
             parent_context = _ddtrace_extract(self._propagator, dict(trace_context))
-        return _DdtraceExecutorSpan(
+        return _DdtraceRunnerSpan(
             tracer=self._tracer,
             service=self._service,
             component=self._component,

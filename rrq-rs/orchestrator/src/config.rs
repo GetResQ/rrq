@@ -64,7 +64,7 @@ fn normalize_toml_payload(mut payload: Value) -> Result<Value> {
 
     if let Value::Object(mut map) = payload {
         if let Some(routing) = map.remove("routing") {
-            map.insert("executor_routes".to_string(), routing);
+            map.insert("runner_routes".to_string(), routing);
         }
         map.remove("worker_concurrency");
         return Ok(Value::Object(map));
@@ -101,8 +101,8 @@ fn env_overrides() -> Result<Value> {
     )?;
     set_env_int(
         &mut payload,
-        "executor_connect_timeout_ms",
-        "RRQ_EXECUTOR_CONNECT_TIMEOUT_MS",
+        "runner_connect_timeout_ms",
+        "RRQ_RUNNER_CONNECT_TIMEOUT_MS",
     )?;
     set_env_int(
         &mut payload,
@@ -116,8 +116,8 @@ fn env_overrides() -> Result<Value> {
     )?;
     set_env_string(
         &mut payload,
-        "default_executor_name",
-        "RRQ_DEFAULT_EXECUTOR_NAME",
+        "default_runner_name",
+        "RRQ_DEFAULT_RUNNER_NAME",
     );
     set_env_float(
         &mut payload,
@@ -282,7 +282,7 @@ alpha = "beta"
         let settings = load_toml_settings(Some(tmp_path.to_str().unwrap())).unwrap();
         assert_eq!(settings.default_queue_name, "from_env");
         assert_eq!(
-            settings.executor_routes.get("alpha"),
+            settings.runner_routes.get("alpha"),
             Some(&"beta".to_string())
         );
         assert_eq!(settings.worker_health_check_ttl_buffer_seconds, 12.5);
