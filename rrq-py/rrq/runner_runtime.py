@@ -421,6 +421,8 @@ async def run_python_runner(
         )
         async with server:
             await server.serve_forever()
+    except asyncio.CancelledError:
+        pass  # Graceful shutdown on Ctrl+C
     finally:
         if server is not None:
             server.close()
