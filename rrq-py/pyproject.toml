@@ -62,7 +62,7 @@ include = ["rrq/bin/*"]
 [tool.cibuildwheel]
 build = "cp311-*"
 skip = "pp* *-musllinux* *-manylinux_i686 *-win32"
-before-build = "python scripts/build_rust_binary.py"
+before-build = "python {package}/scripts/build_rust_binary.py"
 environment = { CARGO_TERM_COLOR = "always" }
 
 [dependency-groups]
