@@ -16,3 +16,6 @@ rrq-ts/*.tsbuildinfo
 rrq-ts/bin/*.so
 rrq-ts/bin/*.dylib
 rrq-ts/bin/*.dll
+rrq-ts/bin/linux-*/
+rrq-ts/bin/darwin-*/
+rrq-ts/.npmrc

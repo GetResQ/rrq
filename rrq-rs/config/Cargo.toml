@@ -9,7 +9,7 @@ homepage = "https://github.com/getresq/rrq"
 documentation = "https://docs.rs/rrq-config"
 readme = "README.md"
 keywords = ["rrq", "config", "toml", "redis", "queue"]
-categories = ["configuration"]
+categories = ["config"]
 
 [dependencies]
 anyhow = "1.0.100"
