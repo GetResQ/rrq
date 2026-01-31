@@ -431,8 +431,15 @@ async def run_python_runner(
 
 
 def main() -> None:
+    from importlib.metadata import version
+
     parser = argparse.ArgumentParser(
         description="RRQ Python runner runtime (TCP socket)"
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {version('rrq')}",
     )
     parser.add_argument(
         "--settings",
@@ -452,7 +459,10 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
-    asyncio.run(run_python_runner(args.settings_object_path, args.tcp_socket))
+    try:
+        asyncio.run(run_python_runner(args.settings_object_path, args.tcp_socket))
+    except KeyboardInterrupt:
+        pass
 
 
 __all__ = ["run_python_runner", "load_runner_settings", "main"]

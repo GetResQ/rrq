@@ -14,6 +14,7 @@ use commands::{
 
 #[derive(Parser)]
 #[command(name = "rrq")]
+#[command(version)]
 #[command(about = "RRQ Rust orchestrator", long_about = None)]
 struct Cli {
     #[command(subcommand)]

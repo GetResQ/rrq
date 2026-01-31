@@ -348,6 +348,17 @@ pub extern "C" fn rrq_producer_free(handle: *mut ProducerHandle) {
     }));
 }
 
+/// Returns the RRQ producer library version as a C string.
+///
+/// The returned pointer must be freed with `rrq_string_free`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rrq_producer_version() -> *mut c_char {
+    const VERSION: &str = env!("CARGO_PKG_VERSION");
+    CString::new(VERSION)
+        .map(|s| s.into_raw())
+        .unwrap_or(ptr::null_mut())
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn rrq_producer_constants(error_out: *mut *mut c_char) -> *mut c_char {
     with_unwind(error_out, || {

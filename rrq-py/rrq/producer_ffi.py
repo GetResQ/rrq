@@ -152,6 +152,8 @@ def _configure_library(lib: ctypes.CDLL) -> None:
     lib.rrq_producer_new_from_toml.restype = ctypes.c_void_p
     lib.rrq_producer_free.argtypes = [ctypes.c_void_p]
     lib.rrq_producer_free.restype = None
+    lib.rrq_producer_version.argtypes = []
+    lib.rrq_producer_version.restype = ctypes.c_void_p
     lib.rrq_producer_constants.argtypes = [ctypes.POINTER(ctypes.c_char_p)]
     lib.rrq_producer_constants.restype = ctypes.c_void_p
     lib.rrq_producer_config_from_toml.argtypes = [
@@ -199,6 +201,19 @@ def _take_error(err_ptr: ctypes.c_char_p | None) -> None:
     finally:
         _get_library().rrq_string_free(err_ptr)
     raise RustProducerError(message)
+
+
+@functools.lru_cache(maxsize=1)
+def get_producer_version() -> str:
+    """Return the RRQ producer library version."""
+    lib = _get_library()
+    result_ptr = lib.rrq_producer_version()
+    if not result_ptr:
+        raise RustProducerError("Failed to get producer version")
+    try:
+        return ctypes.string_at(result_ptr).decode("utf-8", errors="replace")
+    finally:
+        lib.rrq_string_free(result_ptr)
 
 
 @functools.lru_cache(maxsize=1)

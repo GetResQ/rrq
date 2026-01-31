@@ -283,7 +283,7 @@ impl SocketRunnerPool {
                 tokio::spawn(async move {
                     let mut reader = BufReader::new(stdout).lines();
                     while let Ok(Some(line)) = reader.next_line().await {
-                        tracing::warn!("[runner:stdout] {}", line);
+                        tracing::info!("[runner:stdout] {}", line);
                     }
                 })
             });
@@ -291,7 +291,7 @@ impl SocketRunnerPool {
                 tokio::spawn(async move {
                     let mut reader = BufReader::new(stderr).lines();
                     while let Ok(Some(line)) = reader.next_line().await {
-                        tracing::warn!("[runner:stderr] {}", line);
+                        tracing::error!("[runner:stderr] {}", line);
                     }
                 })
             });
