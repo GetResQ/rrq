@@ -21,7 +21,12 @@ describe("RRQClient producer integration", () => {
     redis = createClient({ url: redisUrl });
     await redis.connect();
     await redis.flushDb();
-    client = new RRQClient({ redisDsn: redisUrl, defaultQueueName: TEST_QUEUE_NAME });
+    client = new RRQClient({
+      config: {
+        redisDsn: redisUrl,
+        queueName: TEST_QUEUE_NAME,
+      },
+    });
   });
 
   afterEach(async () => {
@@ -78,5 +83,20 @@ describe("RRQClient producer integration", () => {
       rateLimitSeconds: 5,
     });
     expect(job2).toBeNull();
+  });
+
+  it("returns job status when present", async () => {
+    const jobId = "job-status-1";
+    const jobKey = `${CONSTANTS.job_key_prefix}${jobId}`;
+    const payload = { ok: true };
+    await redis.hSet(jobKey, {
+      status: "COMPLETED",
+      result: JSON.stringify(payload),
+    });
+
+    const status = await client.getJobStatus(jobId);
+    expect(status).not.toBeNull();
+    expect(status?.status).toBe("COMPLETED");
+    expect(status?.result).toEqual(payload);
   });
 });

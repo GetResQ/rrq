@@ -2,16 +2,18 @@
 
 This directory is a Cargo workspace containing:
 
+- `rrq-config`: TOML loader + settings types shared by all components
 - `rrq-protocol`: shared protocol types for runners
 - `rrq-producer`: minimal producer that writes jobs to Redis
 - `rrq-runner`: runner reference implementation
-- `rrq` (in `rrq-orchestrator/`): Rust scheduler/orchestrator (worker) implementation
+- `rrq` (in `orchestrator/`): Rust scheduler/orchestrator (worker) implementation
 
 ## Git dependency example
 
 ```toml
 [dependencies]
 rrq-protocol = { git = "https://github.com/getresq/rrq", package = "rrq-protocol", rev = "<sha>" }
+rrq-config = { git = "https://github.com/getresq/rrq", package = "rrq-config", rev = "<sha>" }
 rrq-producer = { git = "https://github.com/getresq/rrq", package = "rrq-producer", rev = "<sha>" }
 ```
 

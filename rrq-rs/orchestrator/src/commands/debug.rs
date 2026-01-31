@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use tokio::io::{self as tokio_io, AsyncBufReadExt, BufReader};
 use tokio::time::Duration;
 
-use rrq::config::load_toml_settings;
+use rrq::load_toml_settings;
 use rrq::store::JobStore;
 use rrq::{EnqueueOptions, Job, JobStatus, RRQClient};
 

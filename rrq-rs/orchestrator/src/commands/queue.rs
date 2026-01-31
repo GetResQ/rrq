@@ -1,8 +1,8 @@
 use anyhow::Result;
 
 use crate::cli_utils;
-use rrq::config::load_toml_settings;
 use rrq::constants::QUEUE_KEY_PREFIX;
+use rrq::load_toml_settings;
 use rrq::store::JobStore;
 
 use super::shared::queue_matches;

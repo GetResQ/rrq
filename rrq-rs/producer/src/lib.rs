@@ -13,6 +13,10 @@ use chrono::{DateTime, Utc};
 use redis::AsyncCommands;
 use redis::Script;
 use redis::aio::ConnectionManager;
+use rrq_config::defaults::{
+    DEFAULT_JOB_TIMEOUT_SECONDS, DEFAULT_MAX_RETRIES, DEFAULT_QUEUE_NAME,
+    DEFAULT_RESULT_TTL_SECONDS, DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
+};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::Once;
@@ -38,12 +42,6 @@ const QUEUE_KEY_PREFIX: &str = "rrq:queue:";
 const IDEMPOTENCY_KEY_PREFIX: &str = "rrq:idempotency:";
 const RATE_LIMIT_KEY_PREFIX: &str = "rrq:rate_limit:";
 const DEBOUNCE_KEY_PREFIX: &str = "rrq:debounce:";
-
-const DEFAULT_QUEUE_NAME: &str = "rrq:queue:default";
-const DEFAULT_MAX_RETRIES: i64 = 5;
-const DEFAULT_JOB_TIMEOUT_SECONDS: i64 = 300;
-const DEFAULT_RESULT_TTL_SECONDS: i64 = 60 * 60 * 24;
-const DEFAULT_IDEMPOTENCY_TTL_SECONDS: i64 = 6 * 60 * 60;
 
 /// Job status as stored in Redis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,14 +101,6 @@ pub trait ProducerHandle: Send + Sync {
         kwargs: Map<String, Value>,
         options: EnqueueOptions,
     ) -> Result<String>;
-
-    /// Wait for a job to complete, polling at the given interval.
-    async fn wait_for_result(
-        &self,
-        job_id: &str,
-        timeout: Duration,
-        poll_interval: Duration,
-    ) -> Result<JobResult>;
 }
 
 /// RRQ Producer with auto-reconnecting Redis connection.
@@ -144,7 +134,7 @@ impl Default for ProducerConfig {
             max_retries: DEFAULT_MAX_RETRIES,
             job_timeout_seconds: DEFAULT_JOB_TIMEOUT_SECONDS,
             result_ttl_seconds: DEFAULT_RESULT_TTL_SECONDS,
-            idempotency_ttl_seconds: DEFAULT_IDEMPOTENCY_TTL_SECONDS,
+            idempotency_ttl_seconds: DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
         }
     }
 }
@@ -456,61 +446,6 @@ impl Producer {
         }
     }
 
-    /// Wait for a job to complete, polling at the given interval.
-    ///
-    /// Returns when the job reaches COMPLETED or FAILED status, or when timeout is reached.
-    pub async fn wait_for_result(
-        &self,
-        job_id: &str,
-        timeout: Duration,
-        poll_interval: Duration,
-    ) -> Result<JobResult> {
-        let job_key = format!("{JOB_KEY_PREFIX}{job_id}");
-        let deadline = tokio::time::Instant::now() + timeout;
-
-        loop {
-            if tokio::time::Instant::now() >= deadline {
-                anyhow::bail!("timeout waiting for job {job_id}");
-            }
-
-            let mut conn = self.manager.clone();
-            let (status, result, last_error): (Option<String>, Option<String>, Option<String>) =
-                redis::cmd("HMGET")
-                    .arg(&job_key)
-                    .arg("status")
-                    .arg("result")
-                    .arg("last_error")
-                    .query_async(&mut conn)
-                    .await?;
-
-            let status = match status {
-                Some(status) => JobStatus::from_str(&status),
-                None => anyhow::bail!("job {job_id} not found"),
-            };
-
-            match status {
-                JobStatus::Completed => {
-                    let parsed = result.as_deref().and_then(parse_result);
-                    return Ok(JobResult {
-                        status,
-                        result: parsed,
-                        last_error: None,
-                    });
-                }
-                JobStatus::Failed => {
-                    return Ok(JobResult {
-                        status,
-                        result: None,
-                        last_error,
-                    });
-                }
-                _ => {
-                    tokio::time::sleep(poll_interval).await;
-                }
-            }
-        }
-    }
-
     /// Get the current status of a job without waiting.
     pub async fn get_job_status(&self, job_id: &str) -> Result<Option<JobResult>> {
         let job_key = format!("{JOB_KEY_PREFIX}{job_id}");
@@ -547,15 +482,6 @@ impl ProducerHandle for Producer {
         options: EnqueueOptions,
     ) -> Result<String> {
         self.enqueue(function_name, args, kwargs, options).await
-    }
-
-    async fn wait_for_result(
-        &self,
-        job_id: &str,
-        timeout: Duration,
-        poll_interval: Duration,
-    ) -> Result<JobResult> {
-        self.wait_for_result(job_id, timeout, poll_interval).await
     }
 }
 

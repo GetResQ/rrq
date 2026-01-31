@@ -95,20 +95,16 @@ tcp_socket = "127.0.0.1:9000"
 
 ```python
 # runner_config.py
-from rrq.config import load_toml_settings
 from rrq.runner_settings import PythonRunnerSettings
-from rrq.registry import JobRegistry
+from rrq.registry import Registry
 
 from . import handlers
 
-job_registry = JobRegistry()
-job_registry.register("process_message", handlers.process_message)
-
-rrq_settings = load_toml_settings("rrq.toml")
+registry = Registry()
+registry.register("process_message", handlers.process_message)
 
 python_runner_settings = PythonRunnerSettings(
-    rrq_settings=rrq_settings,
-    job_registry=job_registry,
+    registry=registry,
 )
 ```
 
@@ -129,12 +125,10 @@ rrq worker run --config rrq.toml
 ```python
 import asyncio
 from rrq.client import RRQClient
-from rrq.config import load_toml_settings
 
 async def main():
-    settings = load_toml_settings("rrq.toml")
-    client = RRQClient(settings=settings)
-    await client.enqueue("process_message", "hello")
+    client = RRQClient(config_path="rrq.toml")
+    await client.enqueue("process_message", {"args": ["hello"]})
     await client.close()
 
 asyncio.run(main())
@@ -153,7 +147,9 @@ npm install rrq-ts
 ```ts
 import { RRQClient } from "rrq-ts";
 
-const client = new RRQClient({ redisDsn: "redis://localhost:6379/1" });
+const client = new RRQClient({
+  config: { redisDsn: "redis://localhost:6379/1" },
+});
 await client.enqueue("process_message", { args: ["hello"] });
 await client.close();
 ```
@@ -178,6 +174,14 @@ await runtime.runFromEnv();
 The TypeScript producer uses the Rust `rrq_producer` shared library via FFI.
 See `rrq-ts/README.md` for how to provide the shared library in local dev or
 published packages.
+
+For packaging details (wheels + npm), see `docs/FFI_PACKAGING.md`.
+
+## Telemetry
+
+RRQ runners can emit OpenTelemetry spans (`rrq.runner`). Producers can attach
+`trace_context` on enqueue to link traces from producer → runner. See
+`docs/TELEMETRY.md` for end-to-end examples with Python/TypeScript/Rust.
 
 ## Configuration
 

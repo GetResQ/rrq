@@ -2,48 +2,48 @@ from typing import Any, cast
 
 import pytest
 
-from rrq.registry import JobRegistry
+from rrq.registry import Registry
 
 
 # --- Dummy Handler Functions for Testing ---
-async def dummy_handler_1(ctx, *args, **kwargs):
-    return "handler1", args, kwargs
+async def dummy_handler_1(request):
+    return "handler1", request
 
 
-async def dummy_handler_2(ctx, param1):
-    return "handler2", param1
+async def dummy_handler_2(request):
+    return "handler2", request
 
 
-def sync_handler(ctx):
+def sync_handler(request):
     return "sync"
 
 
 @pytest.fixture
 def registry():
-    """Provides a clean JobRegistry instance for each test."""
-    reg = JobRegistry()
+    """Provides a clean Registry instance for each test."""
+    reg = Registry()
     yield reg
     reg.clear()  # Ensure cleanup after test
 
 
-def test_register_and_get_handler(registry: JobRegistry):
+def test_register_and_get_handler(registry: Registry):
     registry.register("task1", dummy_handler_1)
     handler = registry.get_handler("task1")
     assert handler is dummy_handler_1
 
 
-def test_get_non_existent_handler(registry: JobRegistry):
+def test_get_non_existent_handler(registry: Registry):
     handler = registry.get_handler("non_existent_task")
     assert handler is None
 
 
-def test_register_duplicate_handler_raises_error(registry: JobRegistry):
+def test_register_duplicate_handler_raises_error(registry: Registry):
     registry.register("task1", dummy_handler_1)
     with pytest.raises(ValueError, match="already registered"):
         registry.register("task1", dummy_handler_2)  # Registering same name again
 
 
-def test_register_non_callable_raises_error(registry: JobRegistry):
+def test_register_non_callable_raises_error(registry: Registry):
     with pytest.raises(ValueError, match="Handler for 'task_bad' must be a callable."):
         registry.register("task_bad", cast(Any, 123))  # Not a callable
 
@@ -55,7 +55,7 @@ def test_register_non_callable_raises_error(registry: JobRegistry):
 #         registry.register("sync_task", sync_handler)
 
 
-def test_unregister_handler(registry: JobRegistry):
+def test_unregister_handler(registry: Registry):
     registry.register("task1", dummy_handler_1)
     assert registry.get_handler("task1") is dummy_handler_1
     registry.unregister("task1")
@@ -64,7 +64,7 @@ def test_unregister_handler(registry: JobRegistry):
     registry.unregister("non_existent_task")
 
 
-def test_get_registered_functions(registry: JobRegistry):
+def test_get_registered_functions(registry: Registry):
     assert registry.get_registered_functions() == []
     registry.register("task1", dummy_handler_1)
     registry.register("task2", dummy_handler_2)
@@ -74,7 +74,7 @@ def test_get_registered_functions(registry: JobRegistry):
     assert "task2" in registered
 
 
-def test_clear_registry(registry: JobRegistry):
+def test_clear_registry(registry: Registry):
     registry.register("task1", dummy_handler_1)
     registry.register("task2", dummy_handler_2)
     assert len(registry.get_registered_functions()) == 2

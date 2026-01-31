@@ -1,7 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
 import { RRQClient } from "../src/producer.js";
-import { DEFAULT_SETTINGS } from "../src/settings.js";
 import { RustProducer, RustProducerError } from "../src/producer_ffi.js";
 
 class StubProducer {
@@ -23,7 +22,7 @@ class StubProducer {
 describe("RRQClient producer requests", () => {
   it("omits mode when uniqueKey is provided", async () => {
     const stub = new StubProducer({ job_id: "job-1" });
-    const client = new RRQClient(DEFAULT_SETTINGS, stub as unknown as RustProducer);
+    const client = new RRQClient({ producer: stub as unknown as RustProducer });
 
     await client.enqueue("handler", { uniqueKey: "user-1" });
 
@@ -33,7 +32,7 @@ describe("RRQClient producer requests", () => {
 
   it("returns null when rate limited", async () => {
     const stub = new StubProducer({ status: "rate_limited" });
-    const client = new RRQClient(DEFAULT_SETTINGS, stub as unknown as RustProducer);
+    const client = new RRQClient({ producer: stub as unknown as RustProducer });
 
     const result = await client.enqueueWithRateLimit("handler", {
       rateLimitKey: "user-1",
@@ -48,7 +47,7 @@ describe("RRQClient producer requests", () => {
 
   it("sends debounce fields without client-side deferral pruning", async () => {
     const stub = new StubProducer({ job_id: "job-2" });
-    const client = new RRQClient(DEFAULT_SETTINGS, stub as unknown as RustProducer);
+    const client = new RRQClient({ producer: stub as unknown as RustProducer });
 
     await client.enqueueWithDebounce("handler", {
       debounceKey: "user-2",
@@ -65,14 +64,14 @@ describe("RRQClient producer requests", () => {
 
   it("throws if producer returns no job_id", async () => {
     const stub = new StubProducer({});
-    const client = new RRQClient(DEFAULT_SETTINGS, stub as unknown as RustProducer);
+    const client = new RRQClient({ producer: stub as unknown as RustProducer });
 
     await expect(client.enqueue("handler")).rejects.toBeInstanceOf(RustProducerError);
   });
 
   it("rejects invalid deferUntil timestamps", async () => {
     const stub = new StubProducer({ job_id: "job-3" });
-    const client = new RRQClient(DEFAULT_SETTINGS, stub as unknown as RustProducer);
+    const client = new RRQClient({ producer: stub as unknown as RustProducer });
 
     await expect(
       client.enqueue("handler", { deferUntil: new Date("invalid") }),
@@ -81,7 +80,7 @@ describe("RRQClient producer requests", () => {
 
   it("omits unique_ttl_seconds unless provided", async () => {
     const stub = new StubProducer({ job_id: "job-4" });
-    const client = new RRQClient(DEFAULT_SETTINGS, stub as unknown as RustProducer);
+    const client = new RRQClient({ producer: stub as unknown as RustProducer });
 
     await client.enqueue("handler", { uniqueKey: "user-ttl" });
 

@@ -5,11 +5,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib
-import inspect
 import os
 import logging
 from dataclasses import dataclass
-from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import datetime, timezone
 from ipaddress import ip_address
@@ -18,7 +16,7 @@ from pydantic import BaseModel, Field
 from .runner import ExecutionError, ExecutionOutcome, ExecutionRequest, PythonRunner
 from .runner_settings import PythonRunnerSettings
 from .protocol import read_message, write_message
-from .registry import JobRegistry
+from .registry import Registry
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +194,10 @@ async def _execute_and_respond(
                 job_id=request.job_id,
                 request_id=request.request_id,
                 status="timeout",
-                error=ExecutionError(message=str(exc) or "Job execution timed out."),
+                error=ExecutionError(
+                    message=str(exc) or "Job execution timed out.",
+                    type="timeout",
+                ),
             )
         except Exception as exc:
             outcome = ExecutionOutcome(
@@ -304,21 +305,10 @@ def resolve_tcp_socket(tcp_socket: str | None) -> tuple[str, int]:
     )
 
 
-async def _call_hook(
-    hook: Callable[[], Awaitable[None] | None] | None,
-) -> None:
-    if hook is None:
-        return
-    result = hook()
-    if inspect.isawaitable(result):
-        await result
-
-
 async def _handle_connection(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     runner: PythonRunner,
-    ready_event: asyncio.Event,
     tracker: _InflightTracker,
 ) -> None:
     write_lock = asyncio.Lock()
@@ -333,9 +323,6 @@ async def _handle_connection(
             message_type, payload = message
             if message_type == "request":
                 request = ExecutionRequest.model_validate(payload)
-
-                if not ready_event.is_set():
-                    await ready_event.wait()
 
                 if request.protocol_version != "1":
                     outcome = ExecutionOutcome(
@@ -414,31 +401,24 @@ async def run_python_runner(
 ) -> None:
     runner_settings = load_runner_settings(settings_object_path)
     host, port = resolve_tcp_socket(tcp_socket)
-    job_registry = runner_settings.job_registry
-    if not isinstance(job_registry, JobRegistry):
-        raise RuntimeError(
-            "PythonRunnerSettings.job_registry must be a JobRegistry instance"
-        )
+    registry = runner_settings.registry
+    if not isinstance(registry, Registry):
+        raise RuntimeError("PythonRunnerSettings.registry must be a Registry instance")
 
     runner = PythonRunner(
-        job_registry=job_registry,
+        job_registry=registry,
         worker_id=None,
     )
-    startup_completed = False
-    ready_event = asyncio.Event()
     tracker = _InflightTracker()
     server: asyncio.AbstractServer | None = None
 
     try:
         await tracker.start()
         server = await asyncio.start_server(
-            lambda r, w: _handle_connection(r, w, runner, ready_event, tracker),
+            lambda r, w: _handle_connection(r, w, runner, tracker),
             host=host,
             port=port,
         )
-        await _call_hook(runner_settings.on_startup)
-        startup_completed = True
-        ready_event.set()
         async with server:
             await server.serve_forever()
     finally:
@@ -447,8 +427,6 @@ async def run_python_runner(
             with suppress(Exception):
                 await server.wait_closed()
         await tracker.close()
-        if startup_completed:
-            await _call_hook(runner_settings.on_shutdown)
         await runner.close()
 
 

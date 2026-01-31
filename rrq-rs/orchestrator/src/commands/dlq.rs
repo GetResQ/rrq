@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use crate::cli_utils;
 use rrq::JobStatus;
-use rrq::config::load_toml_settings;
+use rrq::load_toml_settings;
 use rrq::store::JobStore;
 
 use super::shared::{queue_matches, top_counts};

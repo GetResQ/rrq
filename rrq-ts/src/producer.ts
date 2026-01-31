@@ -1,7 +1,20 @@
 import { z } from "zod";
 
-import { RustProducer, RustProducerError } from "./producer_ffi.js";
-import { DEFAULT_SETTINGS, resolveSettings, RRQSettings } from "./settings.js";
+import {
+  JobResult,
+  JobStatusResponse,
+  RustProducer,
+  RustProducerError,
+} from "./producer_ffi.js";
+
+export interface ProducerConfig {
+  redisDsn: string;
+  queueName?: string;
+  maxRetries?: number;
+  jobTimeoutSeconds?: number;
+  resultTtlSeconds?: number;
+  idempotencyTtlSeconds?: number;
+}
 
 export interface EnqueueOptions {
   args?: unknown[];
@@ -70,35 +83,24 @@ const ProducerResponseSchema = z
   .strict();
 
 export class RRQClient {
-  private settings: RRQSettings;
   private producer: RustProducer;
-  private settingsOverrides: Partial<RRQSettings>;
 
-  constructor(settings?: Partial<RRQSettings>, producer?: RustProducer) {
-    this.settingsOverrides = settings ?? {};
-    this.settings = resolveSettings(this.settingsOverrides);
-    this.producer =
-      producer ??
-      RustProducer.fromConfig({
-        redis_dsn: this.settings.redisDsn,
-        ...(this.settingsOverrides.defaultQueueName !== undefined
-          ? { queue_name: this.settingsOverrides.defaultQueueName }
-          : {}),
-        ...(this.settingsOverrides.defaultMaxRetries !== undefined
-          ? { max_retries: this.settingsOverrides.defaultMaxRetries }
-          : {}),
-        ...(this.settingsOverrides.defaultJobTimeoutSeconds !== undefined
-          ? { job_timeout_seconds: this.settingsOverrides.defaultJobTimeoutSeconds }
-          : {}),
-        ...(this.settingsOverrides.defaultResultTtlSeconds !== undefined
-          ? { result_ttl_seconds: this.settingsOverrides.defaultResultTtlSeconds }
-          : {}),
-        ...(this.settingsOverrides.defaultUniqueJobLockTtlSeconds !== undefined
-          ? {
-              idempotency_ttl_seconds: this.settingsOverrides.defaultUniqueJobLockTtlSeconds,
-            }
-          : {}),
-      });
+  constructor(
+    options: { config?: ProducerConfig; configPath?: string; producer?: RustProducer } = {},
+  ) {
+    const { config, configPath, producer } = options;
+    if (config && configPath) {
+      throw new RustProducerError("Provide either config or configPath, not both.");
+    }
+    if (producer) {
+      this.producer = producer;
+      return;
+    }
+    if (config) {
+      this.producer = RustProducer.fromConfig(toProducerConfig(config));
+      return;
+    }
+    this.producer = RustProducer.fromToml(configPath);
   }
 
   async close(): Promise<void> {
@@ -133,6 +135,16 @@ export class RRQClient {
 
   async enqueueDeferred(functionName: string, options: EnqueueOptions): Promise<string> {
     return this.enqueue(functionName, options);
+  }
+
+  async getJobStatus(jobId: string): Promise<JobResult | null> {
+    const response = (await this.producer.getJobStatus({
+      job_id: jobId,
+    })) as JobStatusResponse;
+    if (!response.found || !response.job) {
+      return null;
+    }
+    return response.job;
   }
 
   private async callProducer(
@@ -207,7 +219,6 @@ export class RRQClient {
   }
 }
 
-export { DEFAULT_SETTINGS };
 export { RustProducerError };
 
 function formatDeferUntil(value: Date): string {
@@ -215,4 +226,15 @@ function formatDeferUntil(value: Date): string {
     throw new RustProducerError("Invalid deferUntil timestamp");
   }
   return value.toISOString();
+}
+
+function toProducerConfig(config: ProducerConfig): Record<string, unknown> {
+  return {
+    redis_dsn: config.redisDsn,
+    queue_name: config.queueName,
+    max_retries: config.maxRetries,
+    job_timeout_seconds: config.jobTimeoutSeconds,
+    result_ttl_seconds: config.resultTtlSeconds,
+    idempotency_ttl_seconds: config.idempotencyTtlSeconds,
+  };
 }

@@ -17,14 +17,14 @@ from rrq.runner_runtime import (
     resolve_tcp_socket,
 )
 from rrq.protocol import read_message, write_message
-from rrq.registry import JobRegistry
+from rrq.registry import Registry
 
 
 @pytest.mark.asyncio
 async def test_execute_with_deadline_allows_future_deadline() -> None:
-    registry = JobRegistry()
+    registry = Registry()
 
-    async def handler(ctx, *args, **kwargs):  # type: ignore[no-untyped-def]
+    async def handler(request: ExecutionRequest) -> dict[str, bool]:
         await asyncio.sleep(0)
         return {"ok": True}
 
@@ -56,9 +56,9 @@ async def test_execute_with_deadline_allows_future_deadline() -> None:
 
 @pytest.mark.asyncio
 async def test_execute_with_deadline_raises_for_past_deadline() -> None:
-    registry = JobRegistry()
+    registry = Registry()
 
-    async def handler(ctx, *args, **kwargs):  # type: ignore[no-untyped-def]
+    async def handler(request: ExecutionRequest) -> dict[str, bool]:
         return {"ok": True}
 
     registry.register("echo", handler)
@@ -86,10 +86,10 @@ async def test_execute_with_deadline_raises_for_past_deadline() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_connection_waits_for_ready_event() -> None:
-    registry = JobRegistry()
+async def test_handle_connection_processes_request() -> None:
+    registry = Registry()
 
-    async def handler(ctx, *args, **kwargs):  # type: ignore[no-untyped-def]
+    async def handler(request: ExecutionRequest) -> dict[str, bool]:
         return {"ok": True}
 
     registry.register("echo", handler)
@@ -97,11 +97,10 @@ async def test_handle_connection_waits_for_ready_event() -> None:
         job_registry=registry,
         worker_id=None,
     )
-    ready_event = asyncio.Event()
     tracker = _InflightTracker()
     await tracker.start()
     server = await asyncio.start_server(
-        lambda r, w: _handle_connection(r, w, runner, ready_event, tracker),
+        lambda r, w: _handle_connection(r, w, runner, tracker),
         host="127.0.0.1",
         port=0,
     )
@@ -125,8 +124,6 @@ async def test_handle_connection_waits_for_ready_event() -> None:
             ),
         )
         await write_message(writer, "request", request.model_dump(mode="json"))
-        await asyncio.sleep(0)
-        ready_event.set()
         message = await asyncio.wait_for(read_message(reader), timeout=1)
         assert message is not None
         message_type, payload = message
@@ -146,10 +143,10 @@ async def test_handle_connection_returns_busy_when_inflight_limit_reached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("rrq.runner_runtime.MAX_IN_FLIGHT_PER_CONNECTION", 1)
-    registry = JobRegistry()
+    registry = Registry()
     blocker = asyncio.Event()
 
-    async def handler(ctx, *args, **kwargs):  # type: ignore[no-untyped-def]
+    async def handler(request: ExecutionRequest) -> dict[str, bool]:
         await blocker.wait()
         return {"ok": True}
 
@@ -158,12 +155,10 @@ async def test_handle_connection_returns_busy_when_inflight_limit_reached(
         job_registry=registry,
         worker_id=None,
     )
-    ready_event = asyncio.Event()
-    ready_event.set()
     tracker = _InflightTracker()
     await tracker.start()
     server = await asyncio.start_server(
-        lambda r, w: _handle_connection(r, w, runner, ready_event, tracker),
+        lambda r, w: _handle_connection(r, w, runner, tracker),
         host="127.0.0.1",
         port=0,
     )
@@ -231,10 +226,10 @@ async def test_handle_connection_returns_busy_when_inflight_limit_reached(
 
 @pytest.mark.asyncio
 async def test_cancel_by_job_id_cancels_all_requests() -> None:
-    registry = JobRegistry()
+    registry = Registry()
     blocker = asyncio.Event()
 
-    async def handler(ctx, *args, **kwargs):  # type: ignore[no-untyped-def]
+    async def handler(request: ExecutionRequest) -> dict[str, bool]:
         await blocker.wait()
         return {"ok": True}
 
@@ -243,12 +238,10 @@ async def test_cancel_by_job_id_cancels_all_requests() -> None:
         job_registry=registry,
         worker_id=None,
     )
-    ready_event = asyncio.Event()
-    ready_event.set()
     tracker = _InflightTracker()
     await tracker.start()
     server = await asyncio.start_server(
-        lambda r, w: _handle_connection(r, w, runner, ready_event, tracker),
+        lambda r, w: _handle_connection(r, w, runner, tracker),
         host="127.0.0.1",
         port=0,
     )
@@ -337,9 +330,9 @@ async def test_cancel_by_job_id_cancels_all_requests() -> None:
 async def test_execute_and_respond_cleans_inflight_on_write_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    registry = JobRegistry()
+    registry = Registry()
 
-    async def handler(ctx, *args, **kwargs):  # type: ignore[no-untyped-def]
+    async def handler(request: ExecutionRequest) -> dict[str, bool]:
         return {"ok": True}
 
     registry.register("echo", handler)

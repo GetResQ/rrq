@@ -21,9 +21,10 @@ cmd = ["rrq-runner", "--settings", "myapp.runner_config.python_runner_settings"]
 
 ## [rrq]
 
-Core settings shared by the orchestrator, producers, and runners. The Rust
-orchestrator consumes all fields; the Python SDK ignores fields it does not
-understand (for example, `cron_jobs` and `watch`).
+Core settings shared by the orchestrator, producers, and runners. All producers
+(Rust, Python, TypeScript) use the shared Rust `rrq-config` loader, so TOML and
+environment handling are consistent across languages. Producer bindings read
+only the fields they need (for example, `redis_dsn` and default queue settings).
 
 | Key | Type | Default | Env override | Notes |
 | --- | --- | --- | --- | --- |
@@ -69,7 +70,7 @@ other).
 | `env` | table | — | Extra environment variables for the runner process. |
 | `cwd` | string | — | Working directory for the runner process. |
 | `tcp_socket` | string | required | Localhost TCP socket in `host:port` or `[host]:port` form. |
-| `response_timeout_seconds` | float | — | Max wait for an runner response. |
+| `response_timeout_seconds` | float | — | Max wait for a runner response. |
 
 Notes:
 - `cmd` must be present for runners; RRQ will start one process per

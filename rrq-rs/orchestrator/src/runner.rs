@@ -9,6 +9,7 @@ use std::sync::{
 use crate::constants::DEFAULT_RUNNER_CONNECT_TIMEOUT_MS;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use rrq_config::RRQSettings;
 use rrq_protocol::{
     CancelRequest, ExecutionOutcome, ExecutionRequest, FRAME_HEADER_LEN, PROTOCOL_VERSION,
     RunnerMessage, encode_frame,
@@ -671,7 +672,7 @@ struct InFlightRequest {
 }
 
 pub fn resolve_runner_pool_sizes(
-    settings: &crate::settings::RRQSettings,
+    settings: &RRQSettings,
     watch_mode: bool,
     default_pool_size: Option<usize>,
 ) -> Result<HashMap<String, usize>> {
@@ -695,7 +696,7 @@ pub fn resolve_runner_pool_sizes(
 }
 
 pub fn resolve_runner_max_in_flight(
-    settings: &crate::settings::RRQSettings,
+    settings: &RRQSettings,
     watch_mode: bool,
 ) -> Result<HashMap<String, usize>> {
     let mut max_in_flight = HashMap::new();
@@ -717,7 +718,7 @@ pub fn resolve_runner_max_in_flight(
 }
 
 pub async fn build_runners_from_settings(
-    settings: &crate::settings::RRQSettings,
+    settings: &RRQSettings,
     pool_sizes: Option<&HashMap<String, usize>>,
     max_in_flight: Option<&HashMap<String, usize>>,
 ) -> Result<HashMap<String, Arc<dyn Runner>>> {
@@ -804,7 +805,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::{RRQSettings, RunnerConfig, RunnerType};
+    use rrq_config::{RRQSettings, RunnerConfig, RunnerType};
     use std::net::TcpListener as StdTcpListener;
     use tokio::net::TcpListener as TokioTcpListener;
     use tokio::process::Command;

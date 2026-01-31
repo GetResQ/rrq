@@ -1,4 +1,5 @@
 from .client import RRQClient
+from .job import JobResult, JobStatus
 from .runner import (
     ExecutionContext,
     ExecutionError,
@@ -7,13 +8,13 @@ from .runner import (
     PythonRunner,
 )
 from .runner_settings import PythonRunnerSettings
-from .registry import JobRegistry
-from .settings import RRQSettings
+from .registry import Registry
 
 __all__ = [
     "RRQClient",
-    "RRQSettings",
-    "JobRegistry",
+    "Registry",
+    "JobResult",
+    "JobStatus",
     "PythonRunnerSettings",
     "ExecutionContext",
     "ExecutionError",

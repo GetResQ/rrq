@@ -4,16 +4,18 @@ from datetime import datetime, timezone
 import pytest
 
 from rrq.runner import ExecutionContext, ExecutionRequest, PythonRunner
-from rrq.registry import JobRegistry
+from rrq.registry import Registry
 
 
 @pytest.mark.asyncio
 async def test_python_runner_context_includes_trace_and_deadline() -> None:
-    registry = JobRegistry()
+    registry = Registry()
     captured: dict[str, object] = {}
 
-    async def handler(ctx, *args, **kwargs):  # type: ignore[no-untyped-def]
-        captured.update(ctx)
+    async def handler(request):  # type: ignore[no-untyped-def]
+        captured["trace_context"] = request.context.trace_context
+        captured["deadline"] = request.context.deadline
+        captured["worker_id"] = request.context.worker_id
         return {"ok": True}
 
     registry.register("echo", handler)

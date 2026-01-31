@@ -85,13 +85,17 @@ as needed.
 
 ### Tracing
 `trace_context` carries the producer's trace propagation headers. Runners can
-use it to continue traces in their own runtime. The Python runner runtime
-will emit `rrq.runner` spans when telemetry is enabled.
+use it to continue traces in their own runtime. The Rust, Python, and
+TypeScript runner runtimes emit `rrq.runner` spans when OpenTelemetry is
+enabled.
 
 The Rust reference runner supports OpenTelemetry with W3C
-`traceparent`/`tracestate` headers when built with the `otel` feature.
+`traceparent`/`tracestate` headers when built with the `otel` feature. The
+Python and TypeScript runtimes rely on the OpenTelemetry propagator configured
+in your application (typically W3C Trace Context).
 
-For cross-language tracing, all runtimes must use the same propagation format.
+For cross-language tracing, all runtimes must use the same propagation format
+and producers must attach `trace_context` on enqueue.
 
 ## ExecutionOutcome (payload)
 ```json

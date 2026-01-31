@@ -4,8 +4,8 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::cli_utils;
-use rrq::config::load_toml_settings;
 use rrq::constants::JOB_KEY_PREFIX;
+use rrq::load_toml_settings;
 use rrq::store::JobStore;
 use rrq::{EnqueueOptions, JobStatus, RRQClient};
 

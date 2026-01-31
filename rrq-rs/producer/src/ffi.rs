@@ -2,6 +2,7 @@
 
 use crate::{EnqueueOptions, Producer, ProducerConfig};
 use chrono::{DateTime, Utc};
+use rrq_config::{ProducerSettings, load_producer_settings};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::any::Any;
@@ -81,6 +82,24 @@ struct EnqueueResponsePayload {
     job_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct JobStatusRequestPayload {
+    job_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct JobResultPayload {
+    status: String,
+    result: Option<Value>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct JobStatusResponsePayload {
+    found: bool,
+    job: Option<JobResultPayload>,
+}
+
 fn infer_mode(options: &EnqueueOptionsPayload) -> Result<EnqueueMode, String> {
     let has_rate_limit = options.rate_limit_key.is_some() || options.rate_limit_seconds.is_some();
     let has_debounce = options.debounce_key.is_some() || options.debounce_seconds.is_some();
@@ -151,6 +170,25 @@ fn parse_duration_seconds(value: f64, label: &str) -> Result<Duration, String> {
     Ok(Duration::from_millis(millis as u64))
 }
 
+fn job_status_string(status: crate::JobStatus) -> &'static str {
+    match status {
+        crate::JobStatus::Pending => "PENDING",
+        crate::JobStatus::Active => "ACTIVE",
+        crate::JobStatus::Completed => "COMPLETED",
+        crate::JobStatus::Failed => "FAILED",
+        crate::JobStatus::Retrying => "RETRYING",
+        crate::JobStatus::Unknown => "UNKNOWN",
+    }
+}
+
+fn job_result_payload(result: crate::JobResult) -> JobResultPayload {
+    JobResultPayload {
+        status: job_status_string(result.status).to_string(),
+        result: result.result,
+        last_error: result.last_error,
+    }
+}
+
 fn block_on_runtime<T, F>(runtime: &tokio::runtime::Runtime, future: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -185,6 +223,16 @@ fn with_unwind<T>(
             set_error(error_out, format!("panic: {}", panic_message(panic)));
             None
         }
+    }
+}
+
+fn producer_config_from_settings(settings: &ProducerSettings) -> ProducerConfig {
+    ProducerConfig {
+        queue_name: settings.queue_name.clone(),
+        max_retries: settings.max_retries,
+        job_timeout_seconds: settings.job_timeout_seconds,
+        result_ttl_seconds: settings.result_ttl_seconds,
+        idempotency_ttl_seconds: settings.idempotency_ttl_seconds,
     }
 }
 
@@ -232,6 +280,58 @@ pub extern "C" fn rrq_producer_new(
             runtime,
             producer,
         })))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rrq_producer_new_from_toml(
+    config_path: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut ProducerHandle {
+    with_unwind(error_out, || {
+        let config_path = if config_path.is_null() {
+            None
+        } else {
+            Some(take_cstr(config_path)?)
+        };
+        let settings =
+            load_producer_settings(config_path.as_deref()).map_err(|err| err.to_string())?;
+        let redis_dsn = settings.redis_dsn.clone();
+        let config = producer_config_from_settings(&settings);
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| err.to_string())?;
+
+        let producer = block_on_runtime(&runtime, Producer::with_config(redis_dsn, config))?
+            .map_err(|err| err.to_string())?;
+
+        Ok(Box::into_raw(Box::new(ProducerHandle {
+            runtime,
+            producer,
+        })))
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rrq_producer_config_from_toml(
+    config_path: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    with_unwind(error_out, || {
+        let config_path = if config_path.is_null() {
+            None
+        } else {
+            Some(take_cstr(config_path)?)
+        };
+        let settings =
+            load_producer_settings(config_path.as_deref()).map_err(|err| err.to_string())?;
+        let json = serde_json::to_string(&settings).map_err(|err| err.to_string())?;
+        let cstr = CString::new(json).map_err(|err| err.to_string())?;
+        Ok(cstr.into_raw())
     })
     .unwrap_or(ptr::null_mut())
 }
@@ -437,6 +537,49 @@ pub extern "C" fn rrq_producer_enqueue(
         };
 
         let json = serde_json::to_string(&response).map_err(|err| err.to_string())?;
+        let cstr = CString::new(json).map_err(|err| err.to_string())?;
+        Ok(cstr.into_raw())
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rrq_producer_get_job_status(
+    handle: *mut ProducerHandle,
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    with_unwind(error_out, || {
+        if handle.is_null() {
+            return Err("producer handle is null".to_string());
+        }
+
+        let payload = take_cstr(request_json)?;
+        let request: JobStatusRequestPayload =
+            serde_json::from_str(&payload).map_err(|err| err.to_string())?;
+
+        let producer_handle = unsafe { &*handle };
+        let producer = producer_handle.producer.clone();
+        let job_id = request.job_id;
+        let response = block_on_runtime(&producer_handle.runtime, async move {
+            producer.get_job_status(&job_id).await
+        })?;
+
+        let payload = match response {
+            Ok(Some(result)) => JobStatusResponsePayload {
+                found: true,
+                job: Some(job_result_payload(result)),
+            },
+            Ok(None) => JobStatusResponsePayload {
+                found: false,
+                job: None,
+            },
+            Err(err) => {
+                return Err(err.to_string());
+            }
+        };
+
+        let json = serde_json::to_string(&payload).map_err(|err| err.to_string())?;
         let cstr = CString::new(json).map_err(|err| err.to_string())?;
         Ok(cstr.into_raw())
     })

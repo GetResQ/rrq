@@ -17,9 +17,12 @@ let loadedBun: BunLibrary | null = null;
 type BunLibrary = {
   symbols: {
     rrq_producer_new: (config: unknown, errorOut: number) => number;
+    rrq_producer_new_from_toml: (path: number, errorOut: number) => number;
     rrq_producer_free: (handle: number) => void;
     rrq_producer_constants: (errorOut: number) => number;
+    rrq_producer_config_from_toml: (path: number, errorOut: number) => number;
     rrq_producer_enqueue: (handle: number, request: unknown, errorOut: number) => number;
+    rrq_producer_get_job_status: (handle: number, request: unknown, errorOut: number) => number;
     rrq_string_free: (ptr: number) => void;
   };
   CString: new (input: string | number) => { toString(): string };
@@ -28,9 +31,16 @@ type BunLibrary = {
 
 type NodeLibrary = {
   rrq_producer_new: (config: string, errorOut: Array<unknown>) => unknown;
+  rrq_producer_new_from_toml: (path: string | null, errorOut: Array<unknown>) => unknown;
   rrq_producer_free: (handle: unknown) => void;
   rrq_producer_constants: (errorOut: Array<unknown>) => unknown;
+  rrq_producer_config_from_toml: (path: string | null, errorOut: Array<unknown>) => unknown;
   rrq_producer_enqueue: (handle: unknown, request: string, errorOut: Array<unknown>) => unknown;
+  rrq_producer_get_job_status: (
+    handle: unknown,
+    request: string,
+    errorOut: Array<unknown>,
+  ) => unknown;
   rrq_string_free: (ptr: unknown) => void;
   decode: (ptr: unknown, type: string) => string;
 };
@@ -104,18 +114,30 @@ function loadNodeLibrary(): NodeLibrary {
   const rrq_producer_new = lib.func(
     "void * rrq_producer_new(const char *config_json, _Out_ void **error_out)",
   );
+  const rrq_producer_new_from_toml = lib.func(
+    "void * rrq_producer_new_from_toml(const char *config_path, _Out_ void **error_out)",
+  );
   const rrq_producer_free = lib.func("void rrq_producer_free(void *handle)");
   const rrq_producer_constants = lib.func("void * rrq_producer_constants(_Out_ void **error_out)");
+  const rrq_producer_config_from_toml = lib.func(
+    "void * rrq_producer_config_from_toml(const char *config_path, _Out_ void **error_out)",
+  );
   const rrq_producer_enqueue = lib.func(
     "void * rrq_producer_enqueue(void *handle, const char *request_json, _Out_ void **error_out)",
+  );
+  const rrq_producer_get_job_status = lib.func(
+    "void * rrq_producer_get_job_status(void *handle, const char *request_json, _Out_ void **error_out)",
   );
   const rrq_string_free = lib.func("void rrq_string_free(void *ptr)");
 
   return {
     rrq_producer_new,
+    rrq_producer_new_from_toml,
     rrq_producer_free,
     rrq_producer_constants,
+    rrq_producer_config_from_toml,
     rrq_producer_enqueue,
+    rrq_producer_get_job_status,
     rrq_string_free,
     decode: koffi.decode,
   };
@@ -149,9 +171,15 @@ function loadBunLibrary(): BunLibrary {
   const libPath = findLibraryPath();
   const lib = dlopen(libPath, {
     rrq_producer_new: { args: [FFIType.cstring, FFIType.ptr], returns: FFIType.ptr },
+    rrq_producer_new_from_toml: { args: [FFIType.cstring, FFIType.ptr], returns: FFIType.ptr },
     rrq_producer_free: { args: [FFIType.ptr], returns: FFIType.void },
     rrq_producer_constants: { args: [FFIType.ptr], returns: FFIType.ptr },
+    rrq_producer_config_from_toml: { args: [FFIType.cstring, FFIType.ptr], returns: FFIType.ptr },
     rrq_producer_enqueue: {
+      args: [FFIType.ptr, FFIType.cstring, FFIType.ptr],
+      returns: FFIType.ptr,
+    },
+    rrq_producer_get_job_status: {
       args: [FFIType.ptr, FFIType.cstring, FFIType.ptr],
       returns: FFIType.ptr,
     },
@@ -247,6 +275,74 @@ export function getProducerConstants(): Record<string, unknown> {
   }
 }
 
+export interface ProducerSettings {
+  redis_dsn: string;
+  queue_name: string;
+  max_retries: number;
+  job_timeout_seconds: number;
+  result_ttl_seconds: number;
+  idempotency_ttl_seconds: number;
+}
+
+export interface JobResult {
+  status: string;
+  result?: unknown | null;
+  last_error?: string | null;
+}
+
+export interface JobStatusResponse {
+  found: boolean;
+  job?: JobResult | null;
+}
+
+export function loadProducerSettings(configPath?: string): ProducerSettings {
+  if (isBunRuntime()) {
+    const lib = getBunLibrary();
+    const errOut = bunAllocErrorOut();
+    const payload = configPath ? encodeCString(configPath) : new Uint8Array(0);
+    const ptr = configPath ? lib.ptr(payload) : 0;
+    const resultPtr = lib.symbols.rrq_producer_config_from_toml(ptr, lib.ptr(errOut));
+    if (!resultPtr) {
+      const message = bunTakeError(lib, errOut);
+      throw new RustProducerError(message ?? "Failed to load producer settings");
+    }
+    let json: string;
+    try {
+      json = new lib.CString(resultPtr).toString();
+    } finally {
+      lib.symbols.rrq_string_free(resultPtr);
+    }
+    try {
+      return JSON.parse(json) as ProducerSettings;
+    } catch (error) {
+      throw new RustProducerError(`Invalid response from producer: ${String(error)}`);
+    }
+  }
+
+  const lib = getLibrary();
+  const errOut: Array<unknown> = [null];
+  const resultPtr = lib.rrq_producer_config_from_toml(configPath ?? null, errOut);
+  if (!resultPtr) {
+    const errPtr = errOut[0];
+    const message = errPtr ? lib.decode(errPtr, "char *") : null;
+    if (errPtr) {
+      lib.rrq_string_free(errPtr);
+    }
+    throw new RustProducerError(message ?? "Failed to load producer settings");
+  }
+  let json: string;
+  try {
+    json = lib.decode(resultPtr, "char *");
+  } finally {
+    lib.rrq_string_free(resultPtr);
+  }
+  try {
+    return JSON.parse(json) as ProducerSettings;
+  } catch (error) {
+    throw new RustProducerError(`Invalid response from producer: ${String(error)}`);
+  }
+}
+
 export class RustProducer {
   private handle: unknown | number | null;
   private backend: "node" | "bun";
@@ -273,6 +369,34 @@ export class RustProducer {
     const payload = JSON.stringify(config);
     const errOut: Array<unknown> = [null];
     const handle = lib.rrq_producer_new(payload, errOut);
+    if (!handle) {
+      const errPtr = errOut[0];
+      const message = errPtr ? lib.decode(errPtr, "char *") : null;
+      if (errPtr) {
+        lib.rrq_string_free(errPtr);
+      }
+      throw new RustProducerError(message ?? "Failed to create producer");
+    }
+    return new RustProducer(handle, "node");
+  }
+
+  static fromToml(configPath?: string): RustProducer {
+    if (isBunRuntime()) {
+      const lib = getBunLibrary();
+      const errOut = bunAllocErrorOut();
+      const payload = configPath ? encodeCString(configPath) : new Uint8Array(0);
+      const ptr = configPath ? lib.ptr(payload) : 0;
+      const handle = lib.symbols.rrq_producer_new_from_toml(ptr, lib.ptr(errOut));
+      if (!handle) {
+        const message = bunTakeError(lib, errOut);
+        throw new RustProducerError(message ?? "Failed to create producer");
+      }
+      return new RustProducer(handle, "bun");
+    }
+
+    const lib = getLibrary();
+    const errOut: Array<unknown> = [null];
+    const handle = lib.rrq_producer_new_from_toml(configPath ?? null, errOut);
     if (!handle) {
       const errPtr = errOut[0];
       const message = errPtr ? lib.decode(errPtr, "char *") : null;
@@ -364,6 +488,75 @@ export class RustProducer {
           lib.rrq_string_free(resultPtr);
         }
         resolve(JSON.parse(json) as Record<string, unknown>);
+      } catch (err) {
+        reject(new RustProducerError(`Invalid response from producer: ${String(err)}`));
+      }
+    });
+  }
+
+  getJobStatus(request: Record<string, unknown>): Promise<JobStatusResponse> {
+    if (this.backend === "bun") {
+      if (typeof this.handle !== "number" || this.handle === 0) {
+        return Promise.reject(new RustProducerError("Producer handle is closed"));
+      }
+      const lib = getBunLibrary();
+      const payload = encodeCString(JSON.stringify(request));
+      const errOut = bunAllocErrorOut();
+      let resultPtr: number;
+      try {
+        resultPtr = lib.symbols.rrq_producer_get_job_status(
+          this.handle,
+          lib.ptr(payload),
+          lib.ptr(errOut),
+        );
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      if (!resultPtr) {
+        const message = bunTakeError(lib, errOut);
+        return Promise.reject(new RustProducerError(message ?? "Failed to get job status"));
+      }
+      let json: string;
+      try {
+        json = new lib.CString(resultPtr).toString();
+      } finally {
+        lib.symbols.rrq_string_free(resultPtr);
+      }
+      try {
+        return Promise.resolve(JSON.parse(json) as JobStatusResponse);
+      } catch (error) {
+        return Promise.reject(
+          new RustProducerError(`Invalid response from producer: ${String(error)}`),
+        );
+      }
+    }
+
+    if (!this.handle) {
+      return Promise.reject(new RustProducerError("Producer handle is closed"));
+    }
+    const lib = getLibrary();
+    const payload = JSON.stringify(request);
+
+    return new Promise((resolve, reject) => {
+      try {
+        const errOut: Array<unknown> = [null];
+        const resultPtr = lib.rrq_producer_get_job_status(this.handle, payload, errOut);
+        if (!resultPtr) {
+          const errPtr = errOut[0];
+          const message = errPtr ? lib.decode(errPtr, "char *") : null;
+          if (errPtr) {
+            lib.rrq_string_free(errPtr);
+          }
+          reject(new RustProducerError(message ?? "Failed to get job status"));
+          return;
+        }
+        let json: string;
+        try {
+          json = lib.decode(resultPtr, "char *");
+        } finally {
+          lib.rrq_string_free(resultPtr);
+        }
+        resolve(JSON.parse(json) as JobStatusResponse);
       } catch (err) {
         reject(new RustProducerError(`Invalid response from producer: ${String(err)}`));
       }

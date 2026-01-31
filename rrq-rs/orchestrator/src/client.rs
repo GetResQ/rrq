@@ -3,8 +3,8 @@ use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 
 use crate::job::{Job, JobStatus};
-use crate::settings::RRQSettings;
 use crate::store::JobStore;
+use rrq_config::RRQSettings;
 
 #[derive(Debug, Clone, Default)]
 pub struct EnqueueOptions {

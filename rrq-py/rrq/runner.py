@@ -11,7 +11,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, Field
 
 from .exc import RetryJob
-from .registry import JobRegistry
+from .registry import Registry
 from .telemetry import get_telemetry
 
 logger = logging.getLogger(__name__)
@@ -73,12 +73,12 @@ class Runner(Protocol):
 
 
 class PythonRunner:
-    """Executes Python handlers registered in JobRegistry."""
+    """Executes Python handlers registered in the Registry."""
 
     def __init__(
         self,
         *,
-        job_registry: JobRegistry,
+        job_registry: Registry,
         worker_id: str | None,
     ) -> None:
         self.job_registry = job_registry
@@ -97,27 +97,12 @@ class PythonRunner:
                 ),
             )
 
-        worker_id = request.context.worker_id or self.worker_id
-        context = {
-            "job_id": request.context.job_id,
-            "job_try": request.context.attempt,
-            "enqueue_time": request.context.enqueue_time,
-            "worker_id": worker_id,
-            "queue_name": request.context.queue_name,
-            "deadline": request.context.deadline,
-            "trace_context": request.context.trace_context,
-        }
+        if request.context.worker_id is None and self.worker_id is not None:
+            request.context.worker_id = self.worker_id
 
         telemetry = get_telemetry()
         start_time = time.monotonic()
-        span_cm = telemetry.runner_span(
-            job_id=request.context.job_id,
-            function_name=request.function_name,
-            queue_name=request.context.queue_name,
-            attempt=request.context.attempt,
-            trace_context=request.context.trace_context,
-            worker_id=worker_id,
-        )
+        span_cm = telemetry.runner_span(request)
 
         with span_cm as span:
             try:
@@ -126,10 +111,13 @@ class PythonRunner:
                     request.function_name,
                     request.job_id,
                 )
-                result = await handler(context, *request.args, **request.kwargs)
+                result = await handler(request)
                 logger.debug(
                     "Handler for job %s returned successfully.", request.job_id
                 )
+                if isinstance(result, ExecutionOutcome):
+                    span.success(duration_seconds=time.monotonic() - start_time)
+                    return result
                 span.success(duration_seconds=time.monotonic() - start_time)
                 return ExecutionOutcome(
                     job_id=request.job_id,
@@ -165,7 +153,7 @@ class PythonRunner:
                     job_id=request.job_id,
                     request_id=request.request_id,
                     status="timeout",
-                    error=ExecutionError(message=error_message),
+                    error=ExecutionError(message=error_message, type="timeout"),
                 )
             except Exception as exc:
                 logger.error(

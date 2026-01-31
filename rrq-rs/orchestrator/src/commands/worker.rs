@@ -8,11 +8,11 @@ use notify::{Event, EventKind, RecursiveMode, Watcher, event::ModifyKind, recomm
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 
-use rrq::config::{load_toml_settings, resolve_config_source};
 use rrq::runner::{
     build_runners_from_settings, resolve_runner_max_in_flight, resolve_runner_pool_sizes,
 };
 use rrq::worker::RRQWorker;
+use rrq::{load_toml_settings, resolve_config_source};
 
 pub(crate) async fn run_worker(
     config: Option<String>,

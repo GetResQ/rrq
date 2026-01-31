@@ -21,12 +21,21 @@ class JobStatus(str, Enum):
     )
     RETRYING = "RETRYING"  # Job failed, an attempt will be made to re-process it after a delay.
     CANCELLED = "CANCELLED"  # Job cancelled before completion.
+    UNKNOWN = "UNKNOWN"  # Unrecognized status or missing status field.
     # NOT_FOUND might be a status for queries, but not stored on the job itself typically
 
 
 def new_job_id() -> str:
     """Generates a new unique job ID (UUID4)."""
     return str(uuid.uuid4())
+
+
+class JobResult(BaseModel):
+    """Result status for a job without fetching the full job record."""
+
+    status: JobStatus
+    result: Any | None = None
+    last_error: str | None = None
 
 
 class Job(BaseModel):

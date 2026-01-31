@@ -14,8 +14,10 @@ const functionName = process.env.RRQ_FUNCTION ?? "quick_task";
 const count = parseCount(process.env.RRQ_COUNT, 5);
 
 const client = new RRQClient({
-  redisDsn,
-  defaultQueueName: queueName,
+  config: {
+    redisDsn,
+    queueName,
+  },
 });
 
 try {

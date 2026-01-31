@@ -8,6 +8,40 @@ const MAX_IN_FLIGHT_PER_CONNECTION = 64;
 
 export type OutcomeStatus = "success" | "retry" | "timeout" | "error";
 
+export interface RunnerSpan {
+  success: (durationSeconds: number) => void;
+  retry: (durationSeconds: number, delaySeconds?: number | null, reason?: string | null) => void;
+  timeout: (
+    durationSeconds: number,
+    timeoutSeconds?: number | null,
+    errorMessage?: string | null,
+  ) => void;
+  error: (durationSeconds: number, error?: unknown) => void;
+  cancelled: (durationSeconds: number, reason?: string | null) => void;
+  close: () => void;
+}
+
+export interface Telemetry {
+  runnerSpan: (request: ExecutionRequest) => RunnerSpan;
+}
+
+class NoopRunnerSpan implements RunnerSpan {
+  success(): void {}
+  retry(): void {}
+  timeout(): void {}
+  error(): void {}
+  cancelled(): void {}
+  close(): void {}
+}
+
+export class NoopTelemetry implements Telemetry {
+  private span = new NoopRunnerSpan();
+
+  runnerSpan(): RunnerSpan {
+    return this.span;
+  }
+}
+
 export interface ExecutionContext {
   job_id: string;
   attempt: number;
@@ -104,11 +138,13 @@ interface InFlightTask {
 
 export class RunnerRuntime {
   private registry: Registry;
+  private telemetry: Telemetry;
   private inFlight = new Map<string, InFlightTask>();
   private jobIndex = new Map<string, Set<string>>();
 
-  constructor(registry: Registry) {
+  constructor(registry: Registry, telemetry: Telemetry = new NoopTelemetry()) {
     this.registry = registry;
+    this.telemetry = telemetry;
   }
 
   async runFromEnv(): Promise<void> {
@@ -139,7 +175,11 @@ export class RunnerRuntime {
     let writeChain = Promise.resolve();
 
     const enqueueWrite = (message: RunnerMessage): Promise<void> => {
-      writeChain = writeChain.then(() => writeFrame(socket, message));
+      writeChain = writeChain
+        .then(() => writeFrame(socket, message))
+        .catch((error) => {
+          console.error("runner response write failed:", error);
+        });
       return writeChain;
     };
 
@@ -241,33 +281,54 @@ export class RunnerRuntime {
     request: ExecutionRequest,
     controller: AbortController,
   ): Promise<ExecutionOutcome> {
+    const span = this.telemetry.runnerSpan(request);
+    const start = Date.now();
     const signal = controller.signal;
     const deadline = request.context.deadline;
     if (!deadline) {
-      return this.registry.execute(request, signal);
+      const outcome = await this.registry.execute(request, signal);
+      recordOutcome(span, outcome, (Date.now() - start) / 1000);
+      span.close();
+      return outcome;
     }
 
     const deadlineDate = new Date(deadline);
     if (Number.isNaN(deadlineDate.getTime())) {
-      return errorOutcome(request, undefined, "Invalid deadline timestamp");
+      const outcome = errorOutcome(request, undefined, "Invalid deadline timestamp");
+      recordOutcome(span, outcome, (Date.now() - start) / 1000);
+      span.close();
+      return outcome;
     }
     const remainingMs = deadlineDate.getTime() - Date.now();
     if (remainingMs <= 0) {
-      return timeoutOutcome(request, "Job deadline exceeded");
+      const outcome = timeoutOutcome(request, "Job deadline exceeded");
+      recordOutcome(span, outcome, (Date.now() - start) / 1000);
+      span.close();
+      return outcome;
     }
 
     try {
-      return await withTimeout(this.registry.execute(request, signal), remainingMs, signal, () =>
-        controller.abort(),
+      const outcome = await withTimeout(
+        this.registry.execute(request, signal),
+        remainingMs,
+        signal,
+        () => controller.abort(),
       );
+      recordOutcome(span, outcome, (Date.now() - start) / 1000);
+      span.close();
+      return outcome;
     } catch (error) {
+      let outcome: ExecutionOutcome;
       if (isAbortError(error)) {
-        return errorOutcome(request, "cancelled", "Job cancelled");
+        outcome = errorOutcome(request, "cancelled", "Job cancelled");
+      } else if (error instanceof TimeoutError) {
+        outcome = timeoutOutcome(request, "Job execution timed out");
+      } else {
+        outcome = errorOutcome(request, undefined, asErrorMessage(error));
       }
-      if (error instanceof TimeoutError) {
-        return timeoutOutcome(request, "Job execution timed out");
-      }
-      return errorOutcome(request, undefined, asErrorMessage(error));
+      recordOutcome(span, outcome, (Date.now() - start) / 1000, error);
+      span.close();
+      return outcome;
     }
   }
 
@@ -425,6 +486,38 @@ function timeoutOutcome(request: ExecutionRequest, message: string): ExecutionOu
       type: "timeout",
     },
   };
+}
+
+function recordOutcome(
+  span: RunnerSpan,
+  outcome: ExecutionOutcome,
+  durationSeconds: number,
+  error?: unknown,
+): void {
+  switch (outcome.status) {
+    case "success":
+      span.success(durationSeconds);
+      return;
+    case "retry":
+      span.retry(
+        durationSeconds,
+        outcome.retry_after_seconds ?? undefined,
+        outcome.error?.message ?? undefined,
+      );
+      return;
+    case "timeout":
+      span.timeout(durationSeconds, undefined, outcome.error?.message ?? undefined);
+      return;
+    case "error":
+      if (outcome.error?.type === "cancelled") {
+        span.cancelled(durationSeconds, outcome.error?.message ?? undefined);
+        return;
+      }
+      span.error(durationSeconds, error ?? outcome.error?.message);
+      return;
+    default:
+      return;
+  }
 }
 
 function isExecutionOutcome(value: unknown): value is ExecutionOutcome {

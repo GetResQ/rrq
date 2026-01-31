@@ -11,7 +11,7 @@ use crate::constants::{
     JOB_KEY_PREFIX, LOCK_KEY_PREFIX, QUEUE_KEY_PREFIX, UNIQUE_JOB_LOCK_PREFIX,
 };
 use crate::job::{Job, JobStatus};
-use crate::settings::RRQSettings;
+use rrq_config::RRQSettings;
 
 fn summarize_redis_dsn(dsn: &str) -> String {
     let (scheme, rest) = dsn.split_once("://").unwrap_or(("", dsn));

@@ -29,7 +29,7 @@
   },
   "scripts": {
     "build:types": "tsc -p tsconfig.json --emitDeclarationOnly",
-    "build:bundle": "bun build src/index.ts src/producer.ts src/runner_runtime.ts src/settings.ts src/constants.ts --outdir dist --format esm --target node --external koffi --external bun:ffi",
+    "build:bundle": "bun build src/index.ts src/producer.ts src/runner_runtime.ts src/constants.ts src/otel.ts --outdir dist --format esm --target node --external koffi --external bun:ffi",
     "build": "bun run build:bundle && bun run build:types",
     "lint": "tsc -p tsconfig.json --noEmit",
     "oxlint": "oxlint src tests",
@@ -41,6 +41,7 @@
     "test:watch": "bun test --watch"
   },
   "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
     "koffi": "^2.10.0",
     "zod": "^3.23.8"
   },

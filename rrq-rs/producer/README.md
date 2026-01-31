@@ -83,36 +83,6 @@ let options = EnqueueOptions {
 };
 ```
 
-## Waiting for Job Results
-
-Poll for job completion with timeout:
-
-```rust
-use rrq_producer::{Producer, JobStatus};
-use std::time::Duration;
-
-let producer = Producer::new("redis://localhost:6379/0").await?;
-
-// Enqueue and wait for result
-let job_id = producer.enqueue("process_data", args, kwargs, options).await?;
-
-let result = producer.wait_for_result(
-    &job_id,
-    Duration::from_secs(30),      // timeout
-    Duration::from_millis(100),   // poll interval
-).await?;
-
-match result.status {
-    JobStatus::Completed => {
-        println!("Success: {:?}", result.result);
-    }
-    JobStatus::Failed => {
-        println!("Failed: {:?}", result.last_error);
-    }
-    _ => unreachable!(),
-}
-```
-
 ## Check Job Status (Non-blocking)
 
 ```rust
@@ -167,18 +137,6 @@ impl ProducerHandle for MockProducer {
         Ok("mock-job-id".to_string())
     }
 
-    async fn wait_for_result(
-        &self,
-        job_id: &str,
-        timeout: std::time::Duration,
-        poll_interval: std::time::Duration,
-    ) -> anyhow::Result<JobResult> {
-        Ok(JobResult {
-            status: rrq_producer::JobStatus::Completed,
-            result: Some(serde_json::json!({"mock": true})),
-            last_error: None,
-        })
-    }
 }
 ```
 

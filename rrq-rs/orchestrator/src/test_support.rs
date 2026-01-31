@@ -7,8 +7,8 @@ use tokio::fs;
 use tokio::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
-use crate::settings::RRQSettings;
 use crate::store::JobStore;
+use rrq_config::RRQSettings;
 
 static REDIS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 

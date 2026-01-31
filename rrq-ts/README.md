@@ -20,7 +20,9 @@ npm install rrq-ts
 import { RRQClient } from "rrq-ts";
 
 const client = new RRQClient({
-  redisDsn: "redis://localhost:6379/0",
+  config: {
+    redisDsn: "redis://localhost:6379/0",
+  },
 });
 
 const jobId = await client.enqueue("send_email", {
@@ -50,6 +52,12 @@ To build the library from this repo:
 
 ```bash
 cargo build -p rrq-producer --release
+```
+
+### Producer config from rrq.toml
+
+```ts
+const client = new RRQClient({ configPath: "rrq.toml" });
 ```
 
 ### Producer options
@@ -91,14 +99,20 @@ const debouncedId = await client.enqueueWithDebounce("sync_user", {
 });
 ```
 
+### Job status + results
+
+```ts
+const status = await client.getJobStatus(jobId);
+```
+
 ## Runner runtime usage
 
 ```ts
 import { RunnerRuntime, Registry } from "rrq-ts";
 
 const registry = new Registry();
-registry.register("send_email", async (request) => {
-  // handle request.args / request.kwargs
+registry.register("send_email", async (request, signal) => {
+  // handle request.args / request.kwargs; use signal for cancellation
   return {
     job_id: request.job_id,
     request_id: request.request_id,
@@ -117,6 +131,19 @@ can also run the runtime directly:
 ```bash
 RRQ_RUNNER_TCP_SOCKET=127.0.0.1:9000 node dist/runner_runtime.js
 ```
+
+### OpenTelemetry (runner)
+
+```ts
+import { RunnerRuntime, Registry } from "rrq-ts";
+import { OtelTelemetry } from "rrq-ts";
+
+const registry = new Registry();
+const runtime = new RunnerRuntime(registry, new OtelTelemetry());
+await runtime.runFromEnv();
+```
+
+See `docs/TELEMETRY.md` for end-to-end producer → runner tracing.
 
 ## Build
 

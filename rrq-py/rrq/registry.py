@@ -1,14 +1,14 @@
-"""This module provides the JobRegistry class for managing and retrieving job handler functions."""
+"""Registry for runner handlers."""
 
 from typing import Any, Callable, Optional
 
 
-class JobRegistry:
+class Registry:
     """Manages the registration and retrieval of job handler functions.
 
     Handlers are asynchronous functions that perform the actual work of a job.
-    They are registered with a unique name, which is used by the RRQClient to
-    enqueue jobs and by the Python runner runtime to look up the appropriate handler for execution.
+    They are registered with a unique name, which is used by the producer to
+    enqueue jobs and by the runner runtime to look up the appropriate handler.
     """
 
     def __init__(self) -> None:
@@ -23,8 +23,8 @@ class JobRegistry:
         Args:
             name: The unique name for this handler. Used when enqueuing jobs.
             handler: The asynchronous callable function that will execute the job.
-                     It should typically accept a context dictionary as its first argument,
-                     followed by job-specific arguments and keyword arguments.
+                     It should accept an ExecutionRequest and return an ExecutionOutcome
+                     or a raw result that will be wrapped as success.
             replace: If True, an existing handler with the same name will be replaced.
                      If False (default) and a handler with the same name exists,
                      a ValueError is raised.

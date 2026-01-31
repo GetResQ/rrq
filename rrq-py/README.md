@@ -11,7 +11,8 @@ run the orchestrator or build native producers/runners.
 
 ## Project Components
 
-- **Python package (this)**: producer SDK, Python runner runtime, integrations.
+- **Python package (this)**: producer SDK, Python runner runtime, OpenTelemetry
+  runner integration.
 - **Rust orchestrator (`rrq` crate)**: scheduling, retries, timeouts, DLQ, cron.
 - **Rust producer (`rrq-producer` crate)**: native producer for Rust apps.
 - **Rust runner (`rrq-runner` crate)**: runner runtime + example.
@@ -72,6 +73,9 @@ tests from the repo, use the helper script to build the library and set
 sh scripts/with-producer-lib.sh -- sh -c "cd rrq-py && uv run pytest"
 ```
 
+Published wheels include `rrq/bin/librrq_producer.*` so no extra setup is
+required in production unless you want to override the library path.
+
 ## Quickstart
 
 ### 1) Install
@@ -98,20 +102,16 @@ tcp_socket = "127.0.0.1:9000"
 
 ```python
 # runner_config.py
-from rrq.config import load_toml_settings
 from rrq.runner_settings import PythonRunnerSettings
-from rrq.registry import JobRegistry
+from rrq.registry import Registry
 
 from . import handlers
 
-job_registry = JobRegistry()
-job_registry.register("process_message", handlers.process_message)
-
-rrq_settings = load_toml_settings("rrq.toml")
+registry = Registry()
+registry.register("process_message", handlers.process_message)
 
 python_runner_settings = PythonRunnerSettings(
-    rrq_settings=rrq_settings,
-    job_registry=job_registry,
+    registry=registry,
 )
 ```
 
@@ -132,16 +132,30 @@ rrq worker run --config rrq.toml
 ```python
 import asyncio
 from rrq.client import RRQClient
-from rrq.config import load_toml_settings
 
 async def main():
-    settings = load_toml_settings("rrq.toml")
-    client = RRQClient(settings=settings)
-    await client.enqueue("process_message", "hello")
+    client = RRQClient(config_path="rrq.toml")
+    await client.enqueue("process_message", {"args": ["hello"]})
     await client.close()
 
 asyncio.run(main())
 ```
+
+### Job status + results
+
+```python
+status = await client.get_job_status(job_id)
+```
+
+### OpenTelemetry (runner)
+
+```python
+from rrq.integrations import otel
+
+otel.enable(service_name="my-runner")
+```
+
+See `docs/TELEMETRY.md` for end-to-end tracing from producer → runner.
 
 ## Configuration
 

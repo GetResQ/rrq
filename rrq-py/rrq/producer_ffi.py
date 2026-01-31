@@ -28,6 +28,17 @@ class ProducerConfigModel(BaseModel):
     idempotency_ttl_seconds: int | None = None
 
 
+class ProducerSettingsModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    redis_dsn: str = Field(min_length=1)
+    queue_name: str
+    max_retries: int
+    job_timeout_seconds: int
+    result_ttl_seconds: int
+    idempotency_ttl_seconds: int
+
+
 class EnqueueOptionsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -76,6 +87,27 @@ class EnqueueResponseModel(BaseModel):
     job_id: str | None = None
 
 
+class JobResultModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    result: Any | None = None
+    last_error: str | None = None
+
+
+class JobStatusRequestModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str = Field(min_length=1)
+
+
+class JobStatusResponseModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    found: bool
+    job: JobResultModel | None = None
+
+
 class ProducerConstantsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -114,16 +146,32 @@ def _load_library() -> ctypes.CDLL:
 def _configure_library(lib: ctypes.CDLL) -> None:
     lib.rrq_producer_new.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_char_p)]
     lib.rrq_producer_new.restype = ctypes.c_void_p
+    lib.rrq_producer_new_from_toml.argtypes = [
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_char_p),
+    ]
+    lib.rrq_producer_new_from_toml.restype = ctypes.c_void_p
     lib.rrq_producer_free.argtypes = [ctypes.c_void_p]
     lib.rrq_producer_free.restype = None
     lib.rrq_producer_constants.argtypes = [ctypes.POINTER(ctypes.c_char_p)]
     lib.rrq_producer_constants.restype = ctypes.c_void_p
+    lib.rrq_producer_config_from_toml.argtypes = [
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_char_p),
+    ]
+    lib.rrq_producer_config_from_toml.restype = ctypes.c_void_p
     lib.rrq_producer_enqueue.argtypes = [
         ctypes.c_void_p,
         ctypes.c_char_p,
         ctypes.POINTER(ctypes.c_char_p),
     ]
     lib.rrq_producer_enqueue.restype = ctypes.c_void_p
+    lib.rrq_producer_get_job_status.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_char_p),
+    ]
+    lib.rrq_producer_get_job_status.restype = ctypes.c_void_p
     lib.rrq_string_free.argtypes = [ctypes.c_void_p]
     lib.rrq_string_free.restype = None
 
@@ -174,6 +222,26 @@ def get_producer_constants() -> ProducerConstantsModel:
         raise RustProducerError(f"Invalid response from producer: {exc}") from exc
 
 
+def load_producer_settings(config_path: str | None = None) -> ProducerSettingsModel:
+    lib = _get_library()
+    err = ctypes.c_char_p()
+    path_bytes = config_path.encode("utf-8") if config_path is not None else None
+    result_ptr = lib.rrq_producer_config_from_toml(path_bytes, ctypes.byref(err))
+    if not result_ptr:
+        _take_error(err)
+        raise RustProducerError("Failed to load producer settings")
+    try:
+        result_json = ctypes.string_at(result_ptr).decode("utf-8", errors="replace")
+    finally:
+        _get_library().rrq_string_free(result_ptr)
+    try:
+        return ProducerSettingsModel.model_validate_json(result_json)
+    except json.JSONDecodeError as exc:
+        raise RustProducerError(f"Invalid response from producer: {exc}") from exc
+    except ValidationError as exc:
+        raise RustProducerError(f"Invalid response from producer: {exc}") from exc
+
+
 class RustProducer:
     def __init__(self, handle: int) -> None:
         self._handle = handle
@@ -188,6 +256,17 @@ class RustProducer:
         payload = validated.model_dump_json().encode("utf-8")
         err = ctypes.c_char_p()
         handle = lib.rrq_producer_new(payload, ctypes.byref(err))
+        if not handle:
+            _take_error(err)
+            raise RustProducerError("Failed to create producer")
+        return cls(handle)
+
+    @classmethod
+    def from_toml(cls, config_path: str | None = None) -> "RustProducer":
+        lib = _get_library()
+        err = ctypes.c_char_p()
+        path_bytes = config_path.encode("utf-8") if config_path is not None else None
+        handle = lib.rrq_producer_new_from_toml(path_bytes, ctypes.byref(err))
         if not handle:
             _take_error(err)
             raise RustProducerError("Failed to create producer")
@@ -218,6 +297,27 @@ class RustProducer:
         try:
             response = EnqueueResponseModel.model_validate_json(result_json)
             return response.model_dump()
+        except json.JSONDecodeError as exc:
+            raise RustProducerError(f"Invalid response from producer: {exc}") from exc
+        except ValidationError as exc:
+            raise RustProducerError(f"Invalid response from producer: {exc}") from exc
+
+    def get_job_status(self, job_id: str) -> JobStatusResponseModel:
+        request = JobStatusRequestModel(job_id=job_id)
+        payload = request.model_dump_json().encode("utf-8")
+        err = ctypes.c_char_p()
+        result_ptr = _get_library().rrq_producer_get_job_status(
+            self._handle, payload, ctypes.byref(err)
+        )
+        if not result_ptr:
+            _take_error(err)
+            raise RustProducerError("Failed to get job status")
+        try:
+            result_json = ctypes.string_at(result_ptr).decode("utf-8", errors="replace")
+        finally:
+            _get_library().rrq_string_free(result_ptr)
+        try:
+            return JobStatusResponseModel.model_validate_json(result_json)
         except json.JSONDecodeError as exc:
             raise RustProducerError(f"Invalid response from producer: {exc}") from exc
         except ValidationError as exc:

@@ -1,7 +1,7 @@
 use anyhow::Result;
 
-use rrq::config::load_toml_settings;
 use rrq::constants::HEALTH_KEY_PREFIX;
+use rrq::load_toml_settings;
 use rrq::store::JobStore;
 
 pub(crate) async fn check_workers(config: Option<String>) -> Result<()> {
