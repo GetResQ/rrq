@@ -18,6 +18,7 @@ pub enum RunnerType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RunnerConfig {
     #[serde(default = "default_runner_type", rename = "type")]
     pub runner_type: RunnerType,

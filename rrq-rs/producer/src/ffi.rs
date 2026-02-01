@@ -243,8 +243,8 @@ pub extern "C" fn rrq_producer_new(
 ) -> *mut ProducerHandle {
     with_unwind(error_out, || {
         let payload = take_cstr(config_json)?;
-        let config_payload: ProducerConfigPayload =
-            serde_json::from_str(&payload).map_err(|err| err.to_string())?;
+        let config_payload: ProducerConfigPayload = serde_json::from_str(&payload)
+            .map_err(|err| format!("invalid producer config: {err}"))?;
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -387,8 +387,8 @@ pub extern "C" fn rrq_producer_enqueue(
         }
 
         let payload = take_cstr(request_json)?;
-        let request: EnqueueRequestPayload =
-            serde_json::from_str(&payload).map_err(|err| err.to_string())?;
+        let request: EnqueueRequestPayload = serde_json::from_str(&payload)
+            .map_err(|err| format!("invalid enqueue request: {err}"))?;
 
         let args = request.args.unwrap_or_default();
         let kwargs = request.kwargs.unwrap_or_default();
@@ -566,8 +566,8 @@ pub extern "C" fn rrq_producer_get_job_status(
         }
 
         let payload = take_cstr(request_json)?;
-        let request: JobStatusRequestPayload =
-            serde_json::from_str(&payload).map_err(|err| err.to_string())?;
+        let request: JobStatusRequestPayload = serde_json::from_str(&payload)
+            .map_err(|err| format!("invalid job status request: {err}"))?;
 
         let producer_handle = unsafe { &*handle };
         let producer = producer_handle.producer.clone();

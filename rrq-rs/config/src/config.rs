@@ -49,7 +49,11 @@ pub fn load_toml_settings(config_path: Option<&str>) -> Result<RRQSettings> {
     let env_overrides = env_overrides()?;
     let merged = deep_merge(json_value, env_overrides);
 
-    let settings: RRQSettings = serde_json::from_value(merged).context("invalid RRQ config")?;
+    let settings: RRQSettings = serde_json::from_value(merged.clone()).map_err(|err| {
+        let hint = diagnose_config_error(&merged, &err);
+        anyhow::anyhow!("invalid RRQ config: {err}{hint}")
+    })?;
+    validate_runner_configs(&settings)?;
     Ok(settings)
 }
 
@@ -204,6 +208,139 @@ fn deep_merge(base: Value, overlay: Value) -> Value {
         }
         (_, overlay_value) => overlay_value,
     }
+}
+
+fn diagnose_config_error(config: &Value, err: &serde_json::Error) -> String {
+    let err_msg = err.to_string().to_lowercase();
+
+    // Check for unknown field errors in runner configs
+    if err_msg.contains("unknown field")
+        && let Some(runners) = config.get("runners").and_then(|v| v.as_object())
+    {
+        let valid_fields = [
+            "type",
+            "cmd",
+            "pool_size",
+            "max_in_flight",
+            "env",
+            "cwd",
+            "tcp_socket",
+            "response_timeout_seconds",
+        ];
+        for (name, runner) in runners {
+            if let Some(obj) = runner.as_object() {
+                for key in obj.keys() {
+                    if !valid_fields.contains(&key.as_str()) {
+                        return format!(
+                            "\n\nHint: runner '{name}' has unknown field '{key}'. Valid fields are: {}",
+                            valid_fields.join(", ")
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Check for type errors in runner configs
+    if err_msg.contains("invalid type")
+        && let Some(runners) = config.get("runners").and_then(|v| v.as_object())
+    {
+        for (name, runner) in runners {
+            if let Some(obj) = runner.as_object() {
+                if let Some(pool_size) = obj.get("pool_size")
+                    && !pool_size.is_u64()
+                {
+                    return format!(
+                        "\n\nHint: runner '{name}' has invalid pool_size - must be a positive integer, got: {pool_size}"
+                    );
+                }
+                if let Some(max_in_flight) = obj.get("max_in_flight")
+                    && !max_in_flight.is_u64()
+                {
+                    return format!(
+                        "\n\nHint: runner '{name}' has invalid max_in_flight - must be a positive integer, got: {max_in_flight}"
+                    );
+                }
+                if let Some(cmd) = obj.get("cmd")
+                    && !cmd.is_array()
+                {
+                    return format!(
+                        "\n\nHint: runner '{name}' has invalid cmd - must be an array of strings, got: {cmd}"
+                    );
+                }
+            }
+        }
+    }
+
+    String::new()
+}
+
+fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
+    if settings.runners.is_empty() {
+        return Ok(()); // No runners configured is valid (will error at worker startup)
+    }
+
+    for (name, config) in &settings.runners {
+        // Check for missing required fields
+        if config.tcp_socket.is_none() {
+            return Err(anyhow::anyhow!(
+                "runner '{name}' is missing required field 'tcp_socket' (e.g., \"127.0.0.1:9000\")"
+            ));
+        }
+
+        if config.cmd.is_none() {
+            return Err(anyhow::anyhow!(
+                "runner '{name}' is missing required field 'cmd' (e.g., [\"rrq-runner\", \"--settings\", \"myapp.settings\"])"
+            ));
+        }
+
+        // Validate tcp_socket format
+        if let Some(ref socket) = config.tcp_socket
+            && !socket.contains(':')
+        {
+            return Err(anyhow::anyhow!(
+                "runner '{name}' has invalid tcp_socket '{socket}' - must be in 'host:port' format (e.g., \"127.0.0.1:9000\")"
+            ));
+        }
+
+        // Validate pool_size if specified
+        if let Some(pool_size) = config.pool_size
+            && pool_size == 0
+        {
+            return Err(anyhow::anyhow!(
+                "runner '{name}' has invalid pool_size: 0 - must be a positive integer"
+            ));
+        }
+
+        // Validate max_in_flight if specified
+        if let Some(max_in_flight) = config.max_in_flight
+            && max_in_flight == 0
+        {
+            return Err(anyhow::anyhow!(
+                "runner '{name}' has invalid max_in_flight: 0 - must be a positive integer"
+            ));
+        }
+    }
+
+    // Check that default_runner_name references a configured runner
+    if !settings.default_runner_name.is_empty()
+        && !settings.runners.contains_key(&settings.default_runner_name)
+    {
+        let available: Vec<_> = settings.runners.keys().collect();
+        if available.is_empty() {
+            return Err(anyhow::anyhow!(
+                "default_runner_name is '{}' but no runners are configured",
+                settings.default_runner_name
+            ));
+        }
+        return Err(anyhow::anyhow!(
+            "default_runner_name '{}' does not match any configured runner. Available runners: {:?}",
+            settings.default_runner_name,
+            available
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
