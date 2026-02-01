@@ -24,7 +24,7 @@ Most job queues make you choose: either fight with complex distributed systems c
 │     Your Application         │
 │  (Python, TypeScript, Rust)  │
 │                              │
-│   client.enqueue("job", {})  │
+│ client.enqueue("job", {...}) │
 └───────────────┬──────────────┘
                 │ enqueue jobs
                 ▼
@@ -134,10 +134,15 @@ from rrq.client import RRQClient
 async def main():
     client = RRQClient(config_path="rrq.toml")
 
-    job_id = await client.enqueue("send_welcome_email", {
-        "email": "user@example.com",
-        "template": "welcome"
-    })
+    job_id = await client.enqueue(
+        "send_welcome_email",
+        {
+            "params": {
+                "email": "user@example.com",
+                "template": "welcome",
+            }
+        },
+    )
 
     print(f"Enqueued job: {job_id}")
     await client.close()
@@ -153,11 +158,14 @@ Delay job execution:
 
 ```python
 # Run in 5 minutes
-await client.enqueue("cleanup", {}, defer_by_seconds=300)
+await client.enqueue("cleanup", {"defer_by_seconds": 300})
 
 # Run at a specific time
 from datetime import datetime, timezone
-await client.enqueue("report", {}, defer_until=datetime(2024, 1, 1, 9, 0, tzinfo=timezone.utc))
+await client.enqueue(
+    "report",
+    {"defer_until": datetime(2024, 1, 1, 9, 0, tzinfo=timezone.utc)},
+)
 ```
 
 ### Unique Jobs (Idempotency)
@@ -168,8 +176,8 @@ Prevent duplicate jobs:
 # Only one job with this key will be enqueued
 await client.enqueue_with_unique_key(
     "process_order",
-    unique_key="order-123",
-    kwargs={"order_id": "123"}
+    "order-123",
+    {"params": {"order_id": "123"}},
 )
 ```
 
@@ -180,9 +188,11 @@ Limit how often a job can run:
 ```python
 job_id = await client.enqueue_with_rate_limit(
     "sync_user",
-    kwargs={"user_id": "456"},
-    rate_limit_key="user-456",
-    rate_limit_seconds=60
+    {
+        "params": {"user_id": "456"},
+        "rate_limit_key": "user-456",
+        "rate_limit_seconds": 60,
+    },
 )
 if job_id is None:
     print("Rate limited, try again later")
@@ -196,9 +206,11 @@ Delay and deduplicate rapid job submissions:
 # Only the last enqueue within the window will execute
 await client.enqueue_with_debounce(
     "save_document",
-    kwargs={"doc_id": "789"},
-    debounce_key="doc-789",
-    debounce_seconds=5
+    {
+        "params": {"doc_id": "789"},
+        "debounce_key": "doc-789",
+        "debounce_seconds": 5,
+    },
 )
 ```
 

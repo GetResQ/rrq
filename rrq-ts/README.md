@@ -57,7 +57,7 @@ await client.close();
 ### 3. Write job handlers (Runner)
 
 ```typescript
-import { RunnerRuntime, Registry, ExecutionOutcome } from "rrq-ts";
+import { RunnerRuntime, Registry } from "rrq-ts";
 
 const registry = new Registry();
 
@@ -67,11 +67,7 @@ registry.register("send_email", async (request, signal) => {
   // Your email sending logic here
   await sendEmail(to, template);
 
-  return ExecutionOutcome.success(
-    request.job_id,
-    request.request_id,
-    { sent: true, to }
-  );
+  return { sent: true, to };
 });
 
 const runtime = new RunnerRuntime(registry);
@@ -171,22 +167,26 @@ console.log(status);
 type Handler = (
   request: ExecutionRequest,
   signal: AbortSignal
-) => Promise<ExecutionOutcome>;
+) => Promise<ExecutionOutcome | unknown> | ExecutionOutcome | unknown;
 ```
 
 ### Execution Request
 
 ```typescript
 interface ExecutionRequest {
+  protocol_version: string;
   job_id: string;
   request_id: string;
   function_name: string;
   params: Record<string, unknown>;
   context: {
+    job_id: string;
     attempt: number;
     queue_name: string;
     enqueue_time: string;
-    deadline?: string;
+    deadline?: string | null;
+    trace_context?: Record<string, string> | null;
+    worker_id?: string | null;
   };
 }
 ```
@@ -195,13 +195,29 @@ interface ExecutionRequest {
 
 ```typescript
 // Success
-ExecutionOutcome.success(jobId, requestId, { result: "data" });
+const success: ExecutionOutcome = {
+  job_id: jobId,
+  request_id: requestId,
+  status: "success",
+  result: { result: "data" },
+};
 
 // Failure (may be retried)
-ExecutionOutcome.failure(jobId, requestId, "Something went wrong");
+const failure: ExecutionOutcome = {
+  job_id: jobId,
+  request_id: requestId,
+  status: "error",
+  error: { message: "Something went wrong" },
+};
 
 // Explicit retry after delay
-ExecutionOutcome.retryAfter(jobId, requestId, "Rate limited", 60);
+const retry: ExecutionOutcome = {
+  job_id: jobId,
+  request_id: requestId,
+  status: "retry",
+  error: { message: "Rate limited" },
+  retry_after_seconds: 60,
+};
 ```
 
 ### OpenTelemetry

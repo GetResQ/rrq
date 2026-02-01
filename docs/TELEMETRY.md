@@ -27,8 +27,7 @@ propagate.inject(carrier)
 client = RRQClient(config_path="rrq.toml")
 await client.enqueue(
     "process_message",
-    {"message": "hello"},
-    trace_context=carrier,
+    {"params": {"message": "hello"}, "trace_context": carrier},
 )
 ```
 
@@ -54,13 +53,16 @@ await client.enqueue("process_message", {
 use std::collections::HashMap;
 use opentelemetry::global;
 use rrq_producer::{Producer, EnqueueOptions};
+use serde_json::{json, Map, Value};
 
 let mut carrier = HashMap::new();
 global::get_text_map_propagator(|prop| prop.inject(&mut carrier));
 
 let mut options = EnqueueOptions::default();
 options.trace_context = Some(carrier);
-producer.enqueue("process_message", vec![], Default::default(), options).await?;
+let mut params: Map<String, Value> = Map::new();
+params.insert("message".to_string(), json!("hello"));
+producer.enqueue("process_message", params, options).await?;
 ```
 
 ## Runner: enable OpenTelemetry spans

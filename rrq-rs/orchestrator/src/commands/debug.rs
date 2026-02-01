@@ -253,7 +253,7 @@ pub(crate) async fn debug_generate_workers(
 pub(crate) async fn debug_submit(
     function_name: String,
     config: Option<String>,
-    _args: Option<String>,
+    args: Option<String>,
     kwargs: Option<String>,
     queue: Option<String>,
     delay: Option<i64>,
@@ -262,16 +262,31 @@ pub(crate) async fn debug_submit(
     let store = JobStore::new(settings.clone()).await?;
     let mut client = RRQClient::new(settings.clone(), store.clone());
 
-    // Parse params from kwargs JSON (args is deprecated)
+    // Parse params from kwargs JSON (args is deprecated but preserved under params["args"])
     let params_value = kwargs
         .as_deref()
         .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
         .unwrap_or(Value::Object(serde_json::Map::new()));
 
-    let params_map = match params_value {
+    let mut params_map = match params_value {
         Value::Object(map) => map,
         _ => serde_json::Map::new(),
     };
+
+    if let Some(raw) = args.as_deref() {
+        let args_value = serde_json::from_str::<Value>(raw)
+            .map_err(|err| anyhow::anyhow!("--args must be valid JSON array: {err}"))?;
+        let args_vec = match args_value {
+            Value::Array(values) => values,
+            _ => {
+                anyhow::bail!("--args must be a JSON array");
+            }
+        };
+        if params_map.contains_key("args") {
+            anyhow::bail!("--args conflicts with kwargs key 'args'");
+        }
+        params_map.insert("args".to_string(), Value::Array(args_vec));
+    }
 
     let job = client
         .enqueue(

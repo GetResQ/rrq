@@ -23,7 +23,7 @@ Most job queues make you choose: either fight with complex distributed systems c
 │     Your Application         │
 │  (Python, TypeScript, Rust)  │
 │                              │
-│   client.enqueue("job", {})  │
+│ client.enqueue("job", {...}) │
 └───────────────┬──────────────┘
                 │ enqueue jobs
                 ▼
@@ -118,7 +118,7 @@ rrq worker run --config rrq.toml
 from rrq.client import RRQClient
 
 client = RRQClient(config_path="rrq.toml")
-job_id = await client.enqueue("send_email", {"email": "user@example.com"})
+job_id = await client.enqueue("send_email", {"params": {"email": "user@example.com"}})
 ```
 
 ## Quick Start (TypeScript)

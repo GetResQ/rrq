@@ -4,11 +4,10 @@ use serde_json::{json, Map, Value};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let redis_dsn = std::env::var("RRQ_REDIS_DSN")
-        .unwrap_or_else(|_| "redis://localhost:6379/3".to_string());
+    let redis_dsn =
+        std::env::var("RRQ_REDIS_DSN").unwrap_or_else(|_| "redis://localhost:6379/3".to_string());
     let queue_name = std::env::var("RRQ_QUEUE").unwrap_or_else(|_| "default".to_string());
-    let function_name =
-        std::env::var("RRQ_FUNCTION").unwrap_or_else(|_| "quick_task".to_string());
+    let function_name = std::env::var("RRQ_FUNCTION").unwrap_or_else(|_| "quick_task".to_string());
     let count: usize = std::env::var("RRQ_COUNT")
         .ok()
         .and_then(|val| val.parse().ok())
@@ -17,15 +16,14 @@ async fn main() -> Result<()> {
     let producer = Producer::new(redis_dsn).await?;
 
     for i in 0..count {
-        let args = vec![json!(format!("from-rust-{i}"))];
-        let mut kwargs: Map<String, Value> = Map::new();
-        kwargs.insert("source".to_string(), json!("rust"));
+        let mut params: Map<String, Value> = Map::new();
+        params.insert("message".to_string(), json!(format!("from-rust-{i}")));
+        params.insert("source".to_string(), json!("rust"));
 
         producer
             .enqueue(
                 &function_name,
-                args,
-                kwargs,
+                params,
                 EnqueueOptions {
                     queue_name: Some(queue_name.clone()),
                     ..Default::default()

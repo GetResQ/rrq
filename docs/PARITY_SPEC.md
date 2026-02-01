@@ -6,10 +6,14 @@ All language bindings must follow this spec to maintain parity.
 ## Producer API
 
 ### Required operations
-- `enqueue(function_name, args, kwargs, options) -> job_id`
+- `enqueue(function_name, params, options) -> job_id`
 - `enqueue_with_rate_limit(function_name, options) -> job_id | null`
 - `enqueue_with_debounce(function_name, options) -> job_id`
 - `get_job_status(job_id) -> JobResult | null`
+
+`params` is the job payload object. Language bindings may accept it as a
+separate argument (Rust) or as `options.params` (Python/TypeScript), but it
+must serialize to the same `job_params` payload in Redis.
 
 ### Producer config
 All bindings must accept the same producer configuration values:

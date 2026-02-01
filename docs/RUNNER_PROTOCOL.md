@@ -17,7 +17,7 @@ transport is a localhost TCP socket with length-delimited JSON frames.
 - Timestamps are **RFC 3339** (UTC).
 - Field names are **snake_case**.
 
-## Transport (v1)
+## Transport (v2)
 - The orchestrator sets `RRQ_RUNNER_TCP_SOCKET` to a `host:port` value.
 - The runner **binds** a TCP socket on the provided **localhost-only**
   address and accepts connections.
