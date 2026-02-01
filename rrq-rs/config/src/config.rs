@@ -413,4 +413,158 @@ mod tests {
         assert_eq!(path, Some(value));
         assert!(source.contains(ENV_CONFIG_KEY));
     }
+
+    #[test]
+    fn validate_runner_configs_accepts_valid_config() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        default_runner_name = "python"
+        [rrq.runners.python]
+        cmd = ["rrq-runner", "--settings", "myapp.settings"]
+        tcp_socket = "127.0.0.1:9000"
+        pool_size = 2
+        max_in_flight = 10
+        "#;
+        fs::write(&path, config).unwrap();
+        let settings = load_toml_settings(Some(path.to_str().unwrap())).unwrap();
+        assert_eq!(settings.runners.len(), 1);
+        assert!(settings.runners.contains_key("python"));
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_missing_tcp_socket() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        [rrq.runners.python]
+        cmd = ["rrq-runner"]
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(err.to_string().contains("tcp_socket"));
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_missing_cmd() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        [rrq.runners.python]
+        tcp_socket = "127.0.0.1:9000"
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(err.to_string().contains("cmd"));
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_non_loopback() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        [rrq.runners.python]
+        cmd = ["rrq-runner"]
+        tcp_socket = "10.0.0.1:9000"
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        // Error chain includes "loopback" in the cause
+        let full_err = format!("{err:?}");
+        assert!(full_err.contains("loopback"), "error was: {full_err}");
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_zero_pool_size() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        [rrq.runners.python]
+        cmd = ["rrq-runner"]
+        tcp_socket = "127.0.0.1:9000"
+        pool_size = 0
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(err.to_string().contains("pool_size"));
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_zero_max_in_flight() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        [rrq.runners.python]
+        cmd = ["rrq-runner"]
+        tcp_socket = "127.0.0.1:9000"
+        max_in_flight = 0
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(err.to_string().contains("max_in_flight"));
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_mismatched_default_runner() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        default_runner_name = "node"
+        [rrq.runners.python]
+        cmd = ["rrq-runner"]
+        tcp_socket = "127.0.0.1:9000"
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(err.to_string().contains("node"));
+        assert!(err.to_string().contains("python"));
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_unknown_field() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        [rrq.runners.python]
+        cmd = ["rrq-runner"]
+        tcp_socket = "127.0.0.1:9000"
+        pool_siz = 4
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_port_overflow() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        [rrq.runners.python]
+        cmd = ["rrq-runner"]
+        tcp_socket = "127.0.0.1:65535"
+        pool_size = 2
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(err.to_string().contains("port range"));
+    }
 }
