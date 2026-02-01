@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
 use crate::settings::RRQSettings;
+use crate::tcp_socket::parse_tcp_socket;
 
 pub const DEFAULT_CONFIG_FILENAME: &str = "rrq.toml";
 pub const ENV_CONFIG_KEY: &str = "RRQ_CONFIG";
@@ -294,13 +295,22 @@ fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
             ));
         }
 
-        // Validate tcp_socket format
-        if let Some(ref socket) = config.tcp_socket
-            && !socket.contains(':')
-        {
-            return Err(anyhow::anyhow!(
-                "runner '{name}' has invalid tcp_socket '{socket}' - must be in 'host:port' format (e.g., \"127.0.0.1:9000\")"
-            ));
+        // Validate tcp_socket format, host, and port
+        if let Some(ref socket) = config.tcp_socket {
+            let spec = parse_tcp_socket(socket)
+                .with_context(|| format!("runner '{name}' has invalid tcp_socket '{socket}'"))?;
+
+            // Validate port range is sufficient for pool_size
+            let pool_size = config.pool_size.unwrap_or(1);
+            let max_port = spec.port as u32 + pool_size.saturating_sub(1) as u32;
+            if max_port > u16::MAX as u32 {
+                return Err(anyhow::anyhow!(
+                    "runner '{name}' tcp_socket port range insufficient for pool_size {pool_size} \
+                    (port {} + {} would exceed 65535)",
+                    spec.port,
+                    pool_size - 1
+                ));
+            }
         }
 
         // Validate pool_size if specified
