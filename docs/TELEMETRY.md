@@ -25,10 +25,11 @@ carrier: dict[str, str] = {}
 propagate.inject(carrier)
 
 client = RRQClient(config_path="rrq.toml")
-await client.enqueue("process_message", {
-    "args": ["hello"],
-    "trace_context": carrier,
-})
+await client.enqueue(
+    "process_message",
+    {"message": "hello"},
+    trace_context=carrier,
+)
 ```
 
 ### TypeScript
@@ -42,7 +43,7 @@ propagation.inject(context.active(), carrier);
 
 const client = new RRQClient({ configPath: "rrq.toml" });
 await client.enqueue("process_message", {
-  args: ["hello"],
+  params: { message: "hello" },
   traceContext: carrier,
 });
 ```

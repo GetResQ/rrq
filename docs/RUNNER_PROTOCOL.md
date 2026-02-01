@@ -1,8 +1,11 @@
-# RRQ Runner Protocol (v1)
+# RRQ Runner Protocol (v2)
 
 This protocol defines the contract between the RRQ orchestrator (Rust `rrq`
-worker) and runner runtimes (Python, Rust, or any other language). The v1
+worker) and runner runtimes (Python, Rust, or any other language). The v2
 transport is a localhost TCP socket with length-delimited JSON frames.
+
+> **Note**: Protocol v2 replaced `args`/`kwargs` with a single `params` object.
+> The orchestrator and runners must use the same protocol version.
 
 ## Design Goals
 - **Centralized scheduling** in the Rust orchestrator (timeouts, retries, DLQ).
@@ -48,12 +51,11 @@ as needed.
 ## ExecutionRequest (payload)
 ```json
 {
-  "protocol_version": "1",
+  "protocol_version": "2",
   "request_id": "uuid",
   "job_id": "uuid",
   "function_name": "my_handler",
-  "args": [1, "two"],
-  "kwargs": {"flag": true},
+  "params": {"key": "value", "count": 42},
   "context": {
     "job_id": "uuid",
     "attempt": 1,
@@ -67,12 +69,11 @@ as needed.
 ```
 
 ### Fields
-- `protocol_version` (string): Always `"1"` for v1.
+- `protocol_version` (string): Always `"2"` for v2.
 - `request_id` (string): Unique ID for this request/response pair.
 - `job_id` (string): Unique job ID.
 - `function_name` (string): Handler name to execute.
-- `args` (array): Positional arguments.
-- `kwargs` (object): Keyword arguments.
+- `params` (object): Job parameters as key-value pairs.
 - `context` (object):
   - `job_id` (string)
   - `attempt` (int): 1-based attempt number.
@@ -146,7 +147,7 @@ override per policy.
 ## CancelRequest (payload)
 ```json
 {
-  "protocol_version": "1",
+  "protocol_version": "2",
   "job_id": "uuid",
   "request_id": "uuid (optional)",
   "hard_kill": false
@@ -154,7 +155,7 @@ override per policy.
 ```
 
 ### Fields
-- `protocol_version` (string): Always `"1"` for v1.
+- `protocol_version` (string): Always `"2"` for v2.
 - `job_id` (string): Job ID to cancel.
 - `request_id` (string, optional): If present, cancel only the matching
   in-flight request.

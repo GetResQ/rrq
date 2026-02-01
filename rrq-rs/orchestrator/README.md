@@ -4,18 +4,18 @@
 [![Documentation](https://docs.rs/rrq/badge.svg)](https://docs.rs/rrq)
 [![License](https://img.shields.io/crates/l/rrq.svg)](LICENSE)
 
-A high-performance Redis job queue orchestrator written in Rust. RRQ manages job scheduling, worker coordination, and runner process pools for distributed task processing.
+**The orchestrator for RRQ**, a distributed job queue that combines Rust reliability with language-flexible workers.
 
-## Features
+## What is RRQ?
 
-- **Redis-backed job queue** with atomic operations and reliable delivery
-- **Socket-based runner pool** for running jobs in isolated processes
-- **Auto-reconnecting Redis connections** via ConnectionManager
-- **Cron job scheduling** with standard cron syntax
-- **Watch mode** for development with automatic runner restarts
-- **Dead letter queue (DLQ)** for failed jobs
-- **Health checks** and worker heartbeats
-- **OpenTelemetry trace context** propagation
+RRQ (Reliable Redis Queue) separates the hard parts of distributed job processing—scheduling, retries, locking, timeouts—into a single Rust binary. Your job handlers can be written in Python, TypeScript, or Rust, running as isolated processes managed by the orchestrator.
+
+**Why choose RRQ?**
+
+- **Write handlers in any language** - Python, TypeScript, or Rust workers connect via socket protocol
+- **Redis-native** - Atomic operations, predictable semantics, no separate database to manage
+- **Battle-tested Rust core** - The complex distributed systems logic runs in optimized Rust
+- **Production features included** - Retries, DLQ, timeouts, cron scheduling, health checks, distributed tracing
 
 ## Installation
 
@@ -32,7 +32,7 @@ rrq = "0.9"
 
 ## Quick Start
 
-### 1. Create a configuration file (`rrq.toml`)
+### 1. Create configuration (`rrq.toml`)
 
 ```toml
 [rrq]
@@ -41,93 +41,74 @@ default_runner_name = "python"
 
 [rrq.runners.python]
 type = "socket"
-cmd = ["rrq-runner", "--settings", "my_app.runner_settings"]
-pool_size = 2
+cmd = ["rrq-runner", "--settings", "myapp.runner:settings"]
+tcp_socket = "127.0.0.1:9000"
+pool_size = 4
 max_in_flight = 10
 ```
 
-### 2. Run a worker
+### 2. Start the worker
 
 ```bash
 rrq worker run --config rrq.toml
 ```
 
+The orchestrator spawns runner processes, polls Redis for jobs, dispatches work, handles retries, and manages the entire lifecycle.
+
 ### 3. Enqueue jobs
 
-Use the [`rrq-producer`](https://crates.io/crates/rrq-producer) crate to enqueue jobs from Rust:
+Use the [`rrq-producer`](https://crates.io/crates/rrq-producer) crate for Rust, or the Python/TypeScript clients:
 
 ```rust
-use rrq_producer::{Producer, EnqueueOptions};
-use serde_json::json;
+use rrq_producer::Producer;
 
 let producer = Producer::new("redis://localhost:6379/0").await?;
-let job_id = producer.enqueue(
-    "my_handler",
-    vec![json!("arg1"), json!(42)],
-    serde_json::Map::new(),
-    EnqueueOptions::default(),
-).await?;
+let job_id = producer.enqueue("my_handler", json!({"key": "value"})).await?;
 ```
 
 ## CLI Commands
 
-### Worker Commands
+### Worker
 
 ```bash
-# Run worker (production mode)
+# Production mode
 rrq worker run --config rrq.toml
 
-# Run worker in watch mode (restarts on file changes)
+# Watch mode (restarts on file changes)
 rrq worker watch --config rrq.toml --path ./src
 
-# Run worker in burst mode (exit when queue is empty)
+# Burst mode (exit when queue empty)
 rrq worker run --config rrq.toml --burst
 ```
 
-### Queue Commands
+### Queues
 
 ```bash
-# List all queues with job counts
 rrq queue list --config rrq.toml
-
-# Inspect a specific queue
 rrq queue inspect default --config rrq.toml
-
-# Pause/resume a queue
 rrq queue pause default --config rrq.toml
 rrq queue resume default --config rrq.toml
 ```
 
-### Job Commands
+### Jobs
 
 ```bash
-# Get job details
 rrq job get <job-id> --config rrq.toml
-
-# Cancel a running job
 rrq job cancel <job-id> --config rrq.toml
-
-# Retry a failed job
 rrq job retry <job-id> --config rrq.toml
 ```
 
-### Dead Letter Queue Commands
+### Dead Letter Queue
 
 ```bash
-# List jobs in DLQ
 rrq dlq list --config rrq.toml
-
-# Retry all jobs in DLQ
 rrq dlq retry-all --config rrq.toml
-
-# Purge DLQ
 rrq dlq purge --config rrq.toml
 ```
 
-### Health Commands
+### Health
 
 ```bash
-# Check worker health
 rrq health --config rrq.toml
 ```
 
@@ -135,65 +116,41 @@ rrq health --config rrq.toml
 
 ```toml
 [rrq]
-# Redis connection string (required)
-redis_dsn = "redis://localhost:6379/0"
-
-# Default runner for jobs without explicit runner
+redis_dsn = "redis://localhost:6379/0"    # Required
 default_runner_name = "python"
-
-# Worker concurrency is derived from runner pool_size * max_in_flight
-
-# Worker heartbeat interval (seconds)
+default_job_timeout_seconds = 300
+default_max_retries = 3
 heartbeat_interval_seconds = 60
 
-# Connection timeout for runners (milliseconds)
-runner_connect_timeout_ms = 5000
-
-# Default job timeout (seconds)
-default_job_timeout_seconds = 300
-
-# Lock extension beyond job timeout (seconds)
-default_lock_timeout_extension_seconds = 60
-
 [rrq.runners.python]
-# Runner type: "socket" (only supported type currently)
 type = "socket"
-
-# Command to spawn runner process
-cmd = ["rrq-runner", "--settings", "my_app.settings"]
-
-# Number of runner processes in pool
-pool_size = 2
-
-# Max concurrent jobs per runner process
-max_in_flight = 10
-
-# TCP socket address (required)
+cmd = ["rrq-runner", "--settings", "myapp.runner:settings"]
 tcp_socket = "127.0.0.1:9000"
+pool_size = 4           # Runner processes
+max_in_flight = 10      # Concurrent jobs per runner
+cwd = "/app"            # Working directory (optional)
 
-# Optional: Working directory for runner
-cwd = "/app"
-
-# Optional: Environment variables
 [rrq.runners.python.env]
-PYTHONPATH = "/app"
-
-# Optional: Response timeout (seconds)
-response_timeout_seconds = 300.0
+PYTHONPATH = "/app"     # Environment variables (optional)
 
 # Cron jobs
-[[rrq.cron]]
-name = "daily-cleanup"
-schedule = "0 0 * * *"
-function_name = "cleanup_old_records"
+[[rrq.cron_jobs]]
+function_name = "daily_cleanup"
+schedule = "0 0 9 * * *"   # 6-field cron (with seconds)
 queue_name = "maintenance"
+
+# Watch mode settings
+[rrq.watch]
+path = "."
+include_patterns = ["*.py", "*.toml"]
+ignore_patterns = [".venv/**", "dist/**"]
 ```
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                       RRQ Orchestrator                       │
+│                     RRQ Orchestrator                         │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
 │  │   Worker    │  │   Worker    │  │   Cron Scheduler    │  │
 │  │   Loop      │  │   Loop      │  │                     │  │
@@ -208,41 +165,37 @@ queue_name = "maintenance"
 │              ┌───────────┴───────────┐                       │
 │              │                       │                       │
 │      ┌───────▼───────┐       ┌───────▼───────┐              │
-│      │ Runner Pool │       │ Runner Pool │              │
+│      │  Runner Pool  │       │  Runner Pool  │              │
 │      │   (Python)    │       │    (Node)     │              │
-│      └───────┬───────┘       └───────┬───────┘              │
-│              │                       │                       │
-│      ┌───────▼───────┐       ┌───────▼───────┐              │
-│      │  rrq-runner │       │  rrq-runner │              │
-│      │   (process)   │       │   (process)   │              │
 │      └───────────────┘       └───────────────┘              │
 └─────────────────────────────────────────────────────────────┘
 ```
-
-## Related Crates
-
-| Crate | Description |
-|-------|-------------|
-| [`rrq-producer`](https://crates.io/crates/rrq-producer) | Client library for enqueuing jobs |
-| [`rrq-runner`](https://crates.io/crates/rrq-runner) | Runner runtime for Python/custom handlers |
-| [`rrq-protocol`](https://crates.io/crates/rrq-protocol) | Protocol definitions for orchestrator-runner communication |
-
-## Compatibility
-
-RRQ is designed to be compatible with the Python RRQ implementation:
-- Redis schema and key prefixes match the Python implementation
-- Runner protocol is language-agnostic (see `docs/RUNNER_PROTOCOL.md`)
-- Python producers (`rrq.client`) work with the Rust orchestrator
-- Python runners (`rrq.runner_runtime`) work with the Rust orchestrator
 
 ## Environment Variables
 
 | Variable | Description |
 |----------|-------------|
 | `RRQ_CONFIG` | Path to configuration file |
-| `RRQ_REDIS_DSN` | Redis connection string (overrides config) |
+| `RRQ_REDIS_DSN` | Redis connection (overrides config) |
 | `RRQ_LOG_LEVEL` | Log level: trace, debug, info, warn, error |
-| `RRQ_RUNNER_TCP_SOCKET` | TCP socket address (set by orchestrator for runners) |
+
+## Related Crates
+
+| Crate | Purpose |
+|-------|---------|
+| [`rrq-producer`](https://crates.io/crates/rrq-producer) | Enqueue jobs from Rust |
+| [`rrq-runner`](https://crates.io/crates/rrq-runner) | Build Rust job handlers |
+| [`rrq-protocol`](https://crates.io/crates/rrq-protocol) | Wire protocol types |
+| [`rrq-config`](https://crates.io/crates/rrq-config) | Configuration types |
+
+## Cross-Language Compatibility
+
+The orchestrator works seamlessly with:
+- Python workers via [rrq](https://pypi.org/project/rrq/)
+- TypeScript workers via [rrq-ts](https://www.npmjs.com/package/rrq-ts)
+- Rust workers via [rrq-runner](https://crates.io/crates/rrq-runner)
+
+All use the same Redis schema and socket protocol.
 
 ## License
 
