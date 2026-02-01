@@ -744,11 +744,7 @@ mod tests {
 
         let producer = Producer::new(&dsn).await.unwrap();
         let job_id = producer
-            .enqueue(
-                "work",
-                serde_json::Map::new(),
-                EnqueueOptions::default(),
-            )
+            .enqueue("work", serde_json::Map::new(), EnqueueOptions::default())
             .await
             .unwrap();
 
@@ -779,11 +775,7 @@ mod tests {
         };
         let producer = Producer::with_config(&dsn, config).await.unwrap();
         let job_id = producer
-            .enqueue(
-                "work",
-                serde_json::Map::new(),
-                EnqueueOptions::default(),
-            )
+            .enqueue("work", serde_json::Map::new(), EnqueueOptions::default())
             .await
             .unwrap();
 
@@ -1043,11 +1035,7 @@ mod tests {
 
         let producer = Producer::new(&dsn).await.unwrap();
         let job_id = producer
-            .enqueue(
-                "work",
-                serde_json::Map::new(),
-                EnqueueOptions::default(),
-            )
+            .enqueue("work", serde_json::Map::new(), EnqueueOptions::default())
             .await
             .unwrap();
 

@@ -1106,11 +1106,7 @@ async fn cron_loop(
                     job_id: None,
                 };
                 if let Err(err) = client
-                    .enqueue(
-                        &due.function_name,
-                        due.params.clone(),
-                        options,
-                    )
+                    .enqueue(&due.function_name, due.params.clone(), options)
                     .await
                 {
                     tracing::error!("cron enqueue failed for {}: {err}", due.function_name);
@@ -1669,11 +1665,7 @@ mod tests {
         runners.insert("test".to_string(), runner);
         let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
         let job = client
-            .enqueue(
-                "success",
-                serde_json::Map::new(),
-                EnqueueOptions::default(),
-            )
+            .enqueue("success", serde_json::Map::new(), EnqueueOptions::default())
             .await
             .unwrap();
         let mut worker = RRQWorker::new(
@@ -1712,11 +1704,7 @@ mod tests {
         runners.insert("test".to_string(), runner);
         let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
         let job = client
-            .enqueue(
-                "retry",
-                serde_json::Map::new(),
-                EnqueueOptions::default(),
-            )
+            .enqueue("retry", serde_json::Map::new(), EnqueueOptions::default())
             .await
             .unwrap();
         let mut worker = RRQWorker::new(

@@ -110,7 +110,17 @@ export class Registry {
     try {
       const result = await handler(request, signal);
       if (isExecutionOutcome(result)) {
-        return result;
+        const jobId =
+          result.job_id && result.job_id.length > 0 ? result.job_id : request.job_id;
+        const requestId =
+          result.request_id && result.request_id.length > 0
+            ? result.request_id
+            : request.request_id;
+        return {
+          ...result,
+          job_id: jobId,
+          request_id: requestId,
+        };
       }
       return {
         job_id: request.job_id,

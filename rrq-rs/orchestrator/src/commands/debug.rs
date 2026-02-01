@@ -351,8 +351,14 @@ pub(crate) async fn debug_stress_test(
                 .enqueue(
                     "stress_test_job",
                     serde_json::Map::from_iter([
-                        ("job_number".to_string(), Value::from((total_jobs + i) as i64)),
-                        ("batch".to_string(), Value::from(chrono::Utc::now().timestamp())),
+                        (
+                            "job_number".to_string(),
+                            Value::from((total_jobs + i) as i64),
+                        ),
+                        (
+                            "batch".to_string(),
+                            Value::from(chrono::Utc::now().timestamp()),
+                        ),
                     ]),
                     EnqueueOptions {
                         queue_name: Some(queue_name),

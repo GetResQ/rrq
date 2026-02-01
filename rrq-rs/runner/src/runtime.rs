@@ -204,7 +204,17 @@ where
                             "Runner busy: too many in-flight requests",
                         );
                         drop(active);
-                        let _ = response_tx.try_send(outcome);
+                        let send_result =
+                            timeout(RESPONSE_SEND_TIMEOUT, response_tx.send(outcome)).await;
+                        match send_result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(_)) => {
+                                return Err("runner response channel closed".into());
+                            }
+                            Err(_) => {
+                                return Err("runner response channel stalled".into());
+                            }
+                        }
                         continue;
                     }
                     active.insert(request_id.clone());

@@ -115,6 +115,10 @@ class PythonRunner:
                     "Handler for job %s returned successfully.", request.job_id
                 )
                 if isinstance(result, ExecutionOutcome):
+                    if not result.job_id:
+                        result.job_id = request.job_id
+                    if not result.request_id:
+                        result.request_id = request.request_id
                     span.success(duration_seconds=time.monotonic() - start_time)
                     return result
                 span.success(duration_seconds=time.monotonic() - start_time)

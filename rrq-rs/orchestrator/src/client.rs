@@ -320,11 +320,7 @@ mod tests {
             ..Default::default()
         };
         let first = client
-            .enqueue(
-                "task",
-                serde_json::Map::new(),
-                options.clone(),
-            )
+            .enqueue("task", serde_json::Map::new(), options.clone())
             .await
             .unwrap();
         assert_eq!(first.id, "fixed-id");

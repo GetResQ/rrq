@@ -66,14 +66,22 @@ impl Registry {
         let span = telemetry.runner_span(&request);
         let start = Instant::now();
         let function_name = request.function_name.clone();
-        let outcome = match self.get(&function_name) {
+        let job_id = request.job_id.clone();
+        let request_id = request.request_id.clone();
+        let mut outcome = match self.get(&function_name) {
             Some(handler) => handler.handle(request).instrument(span.clone()).await,
             None => ExecutionOutcome::handler_not_found(
-                request.job_id.clone(),
-                request.request_id.clone(),
+                job_id.clone(),
+                request_id.clone(),
                 format!("No handler registered for function '{}'", function_name),
             ),
         };
+        if outcome.job_id.is_none() {
+            outcome.job_id = Some(job_id.clone());
+        }
+        if outcome.request_id.is_none() {
+            outcome.request_id = Some(request_id.clone());
+        }
         record_outcome(&span, &outcome, start.elapsed());
         outcome
     }
