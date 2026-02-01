@@ -273,13 +273,21 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Authenticate with crates.io (Trusted Publishing)
+        id: crates-io-auth
+        uses: rust-lang/crates-io-auth-action@v1
+
       - name: Publish rrq-protocol
         run: cargo publish -p rrq-protocol
         working-directory: rrq-rs
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
 
       - name: Publish rrq-config
         run: cargo publish -p rrq-config
         working-directory: rrq-rs
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
 
       - name: Wait for crates.io indexing
         run: sleep 30
@@ -287,7 +295,11 @@ jobs:
       - name: Publish rrq-producer
         run: cargo publish -p rrq-producer
         working-directory: rrq-rs
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
 
       - name: Publish rrq-runner
         run: cargo publish -p rrq-runner
         working-directory: rrq-rs
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
