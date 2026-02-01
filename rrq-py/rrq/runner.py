@@ -32,12 +32,11 @@ class ExecutionContext(BaseModel):
 class ExecutionRequest(BaseModel):
     """Job data sent to an runner."""
 
-    protocol_version: str = "1"
+    protocol_version: str = "2"
     request_id: str
     job_id: str
     function_name: str
-    args: list[Any] = Field(default_factory=list)
-    kwargs: dict[str, Any] = Field(default_factory=dict)
+    params: dict[str, Any] = Field(default_factory=dict)
     context: ExecutionContext
 
 

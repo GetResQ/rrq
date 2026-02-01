@@ -169,15 +169,13 @@ impl JobStore {
     }
 
     fn build_job_mapping(job: &Job) -> Result<Vec<(String, String)>> {
-        let job_args_json = serde_json::to_string(&job.job_args)?;
-        let job_kwargs_json = serde_json::to_string(&job.job_kwargs)?;
+        let job_params_json = serde_json::to_string(&job.job_params)?;
         let result_json = serde_json::to_string(&job.result)?;
 
         let mut mapping: Vec<(String, String)> = vec![
             ("id".to_string(), job.id.clone()),
             ("function_name".to_string(), job.function_name.clone()),
-            ("job_args".to_string(), job_args_json),
-            ("job_kwargs".to_string(), job_kwargs_json),
+            ("job_params".to_string(), job_params_json),
             ("enqueue_time".to_string(), job.enqueue_time.to_rfc3339()),
             ("status".to_string(), job.status.as_str().to_string()),
             (
@@ -309,12 +307,8 @@ impl JobStore {
         fallback_id: &str,
         default_max_retries: i64,
     ) -> Result<Job> {
-        let job_args = raw
-            .get("job_args")
-            .and_then(|value| serde_json::from_str(value).ok())
-            .unwrap_or_default();
-        let job_kwargs = raw
-            .get("job_kwargs")
+        let job_params = raw
+            .get("job_params")
             .and_then(|value| serde_json::from_str(value).ok())
             .unwrap_or_default();
         let result = raw.get("result").and_then(|value| Self::parse_json(value));
@@ -348,8 +342,7 @@ impl JobStore {
                 .cloned()
                 .unwrap_or_else(|| fallback_id.to_string()),
             function_name: raw.get("function_name").cloned().unwrap_or_default(),
-            job_args,
-            job_kwargs,
+            job_params,
             enqueue_time,
             start_time: raw
                 .get("start_time")
@@ -939,8 +932,7 @@ mod tests {
         Job {
             id: Job::new_id(),
             function_name: "do_work".to_string(),
-            job_args: vec![],
-            job_kwargs: serde_json::Map::new(),
+            job_params: serde_json::Map::new(),
             enqueue_time: Utc::now(),
             start_time: None,
             status: JobStatus::Pending,

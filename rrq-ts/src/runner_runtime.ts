@@ -2,7 +2,7 @@ import net from "node:net";
 import { fileURLToPath } from "node:url";
 
 export const ENV_RUNNER_TCP_SOCKET = "RRQ_RUNNER_TCP_SOCKET";
-export const PROTOCOL_VERSION = "1";
+export const PROTOCOL_VERSION = "2";
 const MAX_FRAME_LEN = 16 * 1024 * 1024;
 const MAX_IN_FLIGHT_PER_CONNECTION = 64;
 
@@ -57,8 +57,7 @@ export interface ExecutionRequest {
   request_id: string;
   job_id: string;
   function_name: string;
-  args: unknown[];
-  kwargs: Record<string, unknown>;
+  params: Record<string, unknown>;
   context: ExecutionContext;
 }
 

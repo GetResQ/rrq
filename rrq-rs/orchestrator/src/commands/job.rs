@@ -167,11 +167,7 @@ pub(crate) async fn job_replay(
         .get("function_name")
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("job missing function_name"))?;
-    let args = cli_utils::parse_json(job_map.get("job_args").map(|v| v.as_str()))
-        .or_else(|| cli_utils::parse_json(job_map.get("args").map(|v| v.as_str())))
-        .unwrap_or(Value::Array(Vec::new()));
-    let kwargs = cli_utils::parse_json(job_map.get("job_kwargs").map(|v| v.as_str()))
-        .or_else(|| cli_utils::parse_json(job_map.get("kwargs").map(|v| v.as_str())))
+    let params = cli_utils::parse_json(job_map.get("job_params").map(|v| v.as_str()))
         .unwrap_or(Value::Object(serde_json::Map::new()));
 
     let queue_name = queue
@@ -179,11 +175,7 @@ pub(crate) async fn job_replay(
         .unwrap_or_else(|| settings.default_queue_name.clone());
 
     let mut client = RRQClient::new(settings.clone(), store.clone());
-    let args_vec = match args {
-        Value::Array(values) => values,
-        _ => Vec::new(),
-    };
-    let kwargs_map = match kwargs {
+    let params_map = match params {
         Value::Object(map) => map,
         _ => serde_json::Map::new(),
     };
@@ -191,8 +183,7 @@ pub(crate) async fn job_replay(
     let job = client
         .enqueue(
             &function_name,
-            args_vec,
-            kwargs_map,
+            params_map,
             EnqueueOptions {
                 queue_name: Some(queue_name.clone()),
                 ..Default::default()
@@ -343,8 +334,10 @@ mod tests {
         Job {
             id: Job::new_id(),
             function_name: "trace_job".to_string(),
-            job_args: vec![json!("arg")],
-            job_kwargs: serde_json::Map::from_iter([("flag".to_string(), json!(true))]),
+            job_params: serde_json::Map::from_iter([
+                ("arg".to_string(), json!("arg")),
+                ("flag".to_string(), json!(true)),
+            ]),
             enqueue_time: Utc::now(),
             start_time: Some(Utc::now() - Duration::seconds(10)),
             status: JobStatus::Completed,
@@ -376,8 +369,7 @@ mod tests {
         let job = client
             .enqueue(
                 "do_work",
-                vec![json!(1)],
-                serde_json::Map::new(),
+                serde_json::Map::from_iter([("n".to_string(), json!(1))]),
                 EnqueueOptions::default(),
             )
             .await?;
@@ -402,7 +394,6 @@ mod tests {
         let cancel_job = client
             .enqueue(
                 "cancel_me",
-                vec![],
                 serde_json::Map::new(),
                 EnqueueOptions::default(),
             )

@@ -14,8 +14,7 @@ type ExecutionRequestPayload = {
   request_id: string;
   job_id: string;
   function_name: string;
-  args: unknown[];
-  kwargs: Record<string, unknown>;
+  params: Record<string, unknown>;
   context: {
     job_id: string;
     attempt: number;
@@ -100,12 +99,11 @@ async function withServer(
 
 function buildRequest(overrides?: Partial<ExecutionRequestPayload>): ExecutionRequestPayload {
   return {
-    protocol_version: "1",
+    protocol_version: "2",
     request_id: "req-1",
     job_id: "job-1",
     function_name: "handler",
-    args: [],
-    kwargs: {},
+    params: {},
     context: {
       job_id: "job-1",
       attempt: 1,
@@ -204,7 +202,7 @@ describe("RunnerRuntime integration", () => {
         encodeMessage({
           type: "cancel",
           payload: {
-            protocol_version: "1",
+            protocol_version: "2",
             job_id: jobId,
             request_id: null,
             hard_kill: false,
@@ -272,7 +270,7 @@ describe("RunnerRuntime integration", () => {
         encodeMessage({
           type: "cancel",
           payload: {
-            protocol_version: "1",
+            protocol_version: "2",
             job_id: jobId,
             request_id: null,
             hard_kill: false,

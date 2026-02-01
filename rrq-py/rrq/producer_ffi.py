@@ -75,8 +75,7 @@ class EnqueueRequestModel(BaseModel):
         None
     )
     function_name: str = Field(min_length=1)
-    args: list[Any] = Field(default_factory=list)
-    kwargs: dict[str, Any] = Field(default_factory=dict)
+    params: dict[str, Any] = Field(default_factory=dict)
     options: EnqueueOptionsModel | None = None
 
 

@@ -12,8 +12,7 @@ export interface ProducerConfig {
 }
 
 export interface EnqueueOptions {
-  args?: unknown[];
-  kwargs?: Record<string, unknown>;
+  params?: Record<string, unknown>;
   queueName?: string;
   jobId?: string;
   uniqueKey?: string;
@@ -64,8 +63,7 @@ const ProducerRequestSchema = z
   .object({
     mode: z.string().optional(),
     function_name: z.string().min(1),
-    args: z.array(z.any()),
-    kwargs: z.record(z.any()),
+    params: z.record(z.any()),
     options: ProducerOptionsSchema,
   })
   .strict();
@@ -149,8 +147,7 @@ export class RRQClient {
   ): Promise<ProducerResponse> {
     const request: Record<string, unknown> = {
       function_name: functionName,
-      args: options.args ?? [],
-      kwargs: options.kwargs ?? {},
+      params: options.params ?? {},
       options: this.buildOptions(options),
     };
     if (mode) {

@@ -31,12 +31,11 @@ Sent from orchestrator to runner when dispatching a job:
 use rrq_protocol::{ExecutionRequest, ExecutionContext};
 
 let request = ExecutionRequest {
-    protocol_version: "1".to_string(),
+    protocol_version: "2".to_string(),
     request_id: "req-uuid".to_string(),
     job_id: "job-uuid".to_string(),
     function_name: "send_email".to_string(),
-    args: vec![serde_json::json!("user@example.com")],
-    kwargs: std::collections::HashMap::new(),
+    params: [("to".to_string(), serde_json::json!("user@example.com"))].into(),
     context: ExecutionContext {
         job_id: "job-uuid".to_string(),
         attempt: 1,
@@ -87,7 +86,7 @@ Sent to runner to cancel an in-flight job:
 use rrq_protocol::CancelRequest;
 
 let cancel = CancelRequest {
-    protocol_version: "1".to_string(),
+    protocol_version: "2".to_string(),
     job_id: "job-uuid".to_string(),
     request_id: Some("req-uuid".to_string()),
     hard_kill: false,

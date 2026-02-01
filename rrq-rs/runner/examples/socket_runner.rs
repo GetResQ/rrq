@@ -29,8 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             request.request_id.clone(),
             json!({
                 "job_id": request.job_id,
-                "args": request.args,
-                "kwargs": request.kwargs,
+                "params": request.params,
             }),
         )
     });

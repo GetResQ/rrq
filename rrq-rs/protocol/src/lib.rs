@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
 
-pub const PROTOCOL_VERSION: &str = "1";
+pub const PROTOCOL_VERSION: &str = "2";
 pub const FRAME_HEADER_LEN: usize = 4;
 
 fn default_protocol_version() -> String {
@@ -50,9 +50,7 @@ pub struct ExecutionRequest {
     pub job_id: String,
     pub function_name: String,
     #[serde(default)]
-    pub args: Vec<Value>,
-    #[serde(default)]
-    pub kwargs: HashMap<String, Value>,
+    pub params: HashMap<String, Value>,
     pub context: ExecutionContext,
 }
 
@@ -246,8 +244,7 @@ mod tests {
             "job_id": "job-1",
             "request_id": "req-1",
             "function_name": "echo",
-            "args": [],
-            "kwargs": {},
+            "params": {},
             "context": {
                 "job_id": "job-1",
                 "attempt": 1,
@@ -282,8 +279,7 @@ mod tests {
             request_id: "req-1".to_string(),
             job_id: "job-1".to_string(),
             function_name: "echo".to_string(),
-            args: Vec::new(),
-            kwargs: HashMap::new(),
+            params: HashMap::new(),
             context: ExecutionContext {
                 job_id: "job-1".to_string(),
                 attempt: 1,

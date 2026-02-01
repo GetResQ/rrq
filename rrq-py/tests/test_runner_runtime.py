@@ -37,8 +37,7 @@ async def test_execute_with_deadline_allows_future_deadline() -> None:
         request_id="req-deadline",
         job_id="job-deadline",
         function_name="echo",
-        args=[],
-        kwargs={},
+        params={},
         context=ExecutionContext(
             job_id="job-deadline",
             attempt=1,
@@ -70,8 +69,7 @@ async def test_execute_with_deadline_raises_for_past_deadline() -> None:
         request_id="req-expired",
         job_id="job-expired",
         function_name="echo",
-        args=[],
-        kwargs={},
+        params={},
         context=ExecutionContext(
             job_id="job-expired",
             attempt=1,
@@ -290,7 +288,7 @@ async def test_cancel_by_job_id_cancels_all_requests() -> None:
         await asyncio.wait_for(wait_for_tracking(), timeout=1)
 
         cancel_payload = {
-            "protocol_version": "1",
+            "protocol_version": "2",
             "job_id": job_id,
             "request_id": None,
             "hard_kill": False,
@@ -344,8 +342,7 @@ async def test_execute_and_respond_cleans_inflight_on_write_error(
         request_id="req-write-error",
         job_id="job-write-error",
         function_name="echo",
-        args=[],
-        kwargs={},
+        params={},
         context=ExecutionContext(
             job_id="job-write-error",
             attempt=1,

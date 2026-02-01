@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Register a handler
     registry.register("greet", |request| async move {
-        let name = request.args.get(0)
+        let name = request.params.get("name")
             .and_then(|v| v.as_str())
             .unwrap_or("World");
 
@@ -78,13 +78,12 @@ registry.register("process_order", |request: ExecutionRequest| async move {
     println!("Attempt: {}", request.context.attempt);
     println!("Queue: {}", request.context.queue_name);
 
-    // Access arguments
-    let order_id = request.args.get(0)
+    // Access parameters
+    let order_id = request.params.get("order_id")
         .and_then(|v| v.as_str())
         .ok_or("missing order_id")?;
 
-    // Access keyword arguments
-    let priority = request.kwargs.get("priority")
+    let priority = request.params.get("priority")
         .and_then(|v| v.as_str())
         .unwrap_or("normal");
 
@@ -137,7 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ExecutionOutcome::success(
             req.job_id.clone(),
             req.request_id.clone(),
-            serde_json::json!(req.args),
+            serde_json::json!(req.params),
         )
     });
 

@@ -3,12 +3,11 @@ import { describe, expect, it } from "bun:test";
 import { Registry, parseTcpSocket } from "../src/runner_runtime.js";
 
 const baseRequest = {
-  protocol_version: "1",
+  protocol_version: "2",
   request_id: "req-1",
   job_id: "job-1",
   function_name: "handler",
-  args: [],
-  kwargs: {},
+  params: {},
   context: {
     job_id: "job-1",
     attempt: 1,

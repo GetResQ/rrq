@@ -71,8 +71,7 @@ struct EnqueueOptionsPayload {
 struct EnqueueRequestPayload {
     mode: Option<EnqueueMode>,
     function_name: String,
-    args: Option<Vec<Value>>,
-    kwargs: Option<Map<String, Value>>,
+    params: Option<Map<String, Value>>,
     options: Option<EnqueueOptionsPayload>,
 }
 
@@ -390,8 +389,7 @@ pub extern "C" fn rrq_producer_enqueue(
         let request: EnqueueRequestPayload = serde_json::from_str(&payload)
             .map_err(|err| format!("invalid enqueue request: {err}"))?;
 
-        let args = request.args.unwrap_or_default();
-        let kwargs = request.kwargs.unwrap_or_default();
+        let params = request.params.unwrap_or_default();
         let options_payload = request.options.unwrap_or(EnqueueOptionsPayload {
             queue_name: None,
             job_id: None,
@@ -483,7 +481,7 @@ pub extern "C" fn rrq_producer_enqueue(
         let response = block_on_runtime(&producer_handle.runtime, async move {
             match mode {
                 EnqueueMode::Enqueue | EnqueueMode::Unique | EnqueueMode::Deferred => producer
-                    .enqueue(&function_name, args, kwargs, options)
+                    .enqueue(&function_name, params, options)
                     .await
                     .map(Some),
                 EnqueueMode::RateLimit => {
@@ -495,7 +493,7 @@ pub extern "C" fn rrq_producer_enqueue(
                     let window = parse_duration_seconds(seconds, "rate_limit_seconds")
                         .map_err(anyhow::Error::msg)?;
                     producer
-                        .enqueue_with_rate_limit(&function_name, args, kwargs, key, window, options)
+                        .enqueue_with_rate_limit(&function_name, params, key, window, options)
                         .await
                 }
                 EnqueueMode::Debounce => {
@@ -521,8 +519,7 @@ pub extern "C" fn rrq_producer_enqueue(
                     producer
                         .enqueue_with_debounce(
                             &function_name,
-                            args,
-                            kwargs,
+                            params,
                             key,
                             window,
                             debounce_options,

@@ -759,8 +759,7 @@ mod tests {
             request_id: "req-1".to_string(),
             job_id: "job-1".to_string(),
             function_name: "echo".to_string(),
-            args: Vec::new(),
-            kwargs: HashMap::new(),
+            params: HashMap::new(),
             context: rrq_protocol::ExecutionContext {
                 job_id: "job-1".to_string(),
                 attempt: 1,
@@ -1209,8 +1208,7 @@ mod tests {
             request_id: "req-1".to_string(),
             job_id: "job-1".to_string(),
             function_name: "echo".to_string(),
-            args: Vec::new(),
-            kwargs: HashMap::new(),
+            params: HashMap::new(),
             context: rrq_protocol::ExecutionContext {
                 job_id: "job-1".to_string(),
                 attempt: 1,
@@ -1266,8 +1264,7 @@ mod tests {
             request_id: "req-1".to_string(),
             job_id: "job-1".to_string(),
             function_name: "echo".to_string(),
-            args: Vec::new(),
-            kwargs: HashMap::new(),
+            params: HashMap::new(),
             context: rrq_protocol::ExecutionContext {
                 job_id: "job-1".to_string(),
                 attempt: 1,

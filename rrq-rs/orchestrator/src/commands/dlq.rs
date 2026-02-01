@@ -340,8 +340,7 @@ mod tests {
         Job {
             id: Job::new_id(),
             function_name: function_name.to_string(),
-            job_args: vec![json!("arg")],
-            job_kwargs: serde_json::Map::new(),
+            job_params: serde_json::Map::from_iter([("arg".to_string(), json!("arg"))]),
             enqueue_time: Utc::now(),
             start_time: None,
             status: JobStatus::Failed,

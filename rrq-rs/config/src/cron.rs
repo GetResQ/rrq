@@ -12,9 +12,7 @@ pub struct CronJob {
     pub function_name: String,
     pub schedule: String,
     #[serde(default)]
-    pub args: Vec<Value>,
-    #[serde(default)]
-    pub kwargs: serde_json::Map<String, Value>,
+    pub params: serde_json::Map<String, Value>,
     #[serde(default)]
     pub queue_name: Option<String>,
     #[serde(default)]
@@ -59,8 +57,7 @@ mod tests {
         let mut job = CronJob {
             function_name: "task".to_string(),
             schedule: "0 * * * * *".to_string(),
-            args: vec![],
-            kwargs: serde_json::Map::new(),
+            params: serde_json::Map::new(),
             queue_name: None,
             unique: false,
             next_run_time: None,
@@ -79,8 +76,7 @@ mod tests {
         let mut job = CronJob {
             function_name: "task".to_string(),
             schedule: "0 * * * * *".to_string(),
-            args: vec![],
-            kwargs: serde_json::Map::new(),
+            params: serde_json::Map::new(),
             queue_name: None,
             unique: false,
             next_run_time: None,
@@ -98,8 +94,7 @@ mod tests {
         let mut job = CronJob {
             function_name: "task".to_string(),
             schedule: "nope".to_string(),
-            args: vec![],
-            kwargs: serde_json::Map::new(),
+            params: serde_json::Map::new(),
             queue_name: None,
             unique: false,
             next_run_time: None,

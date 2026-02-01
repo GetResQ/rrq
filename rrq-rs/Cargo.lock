@@ -1350,6 +1350,7 @@ dependencies = [
  "chrono",
  "cron",
  "dotenvy",
+ "num_cpus",
  "serde",
  "serde_json",
  "tempfile",

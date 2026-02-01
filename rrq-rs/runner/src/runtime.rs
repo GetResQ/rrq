@@ -486,8 +486,7 @@ mod tests {
             request_id: "req-1".to_string(),
             job_id: "job-1".to_string(),
             function_name: function_name.to_string(),
-            args: vec![],
-            kwargs: std::collections::HashMap::new(),
+            params: std::collections::HashMap::new(),
             context: ExecutionContext {
                 job_id: "job-1".to_string(),
                 attempt: 1,
@@ -594,8 +593,7 @@ mod tests {
             request_id: "req-cancel".to_string(),
             job_id: "job-cancel".to_string(),
             function_name: "sleep".to_string(),
-            args: vec![],
-            kwargs: std::collections::HashMap::new(),
+            params: std::collections::HashMap::new(),
             context: ExecutionContext {
                 job_id: "job-cancel".to_string(),
                 attempt: 1,

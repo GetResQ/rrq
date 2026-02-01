@@ -97,8 +97,7 @@ pub trait ProducerHandle: Send + Sync {
     async fn enqueue(
         &self,
         function_name: &str,
-        args: Vec<Value>,
-        kwargs: Map<String, Value>,
+        params: Map<String, Value>,
         options: EnqueueOptions,
     ) -> Result<String>;
 }
@@ -187,8 +186,7 @@ impl Producer {
     pub async fn enqueue(
         &self,
         function_name: &str,
-        args: Vec<Value>,
-        kwargs: Map<String, Value>,
+        params: Map<String, Value>,
         options: EnqueueOptions,
     ) -> Result<String> {
         validate_name("function_name", function_name)?;
@@ -237,8 +235,7 @@ impl Producer {
             }
         }
 
-        let job_args_json = serde_json::to_string(&args)?;
-        let job_kwargs_json = serde_json::to_string(&kwargs)?;
+        let job_params_json = serde_json::to_string(&params)?;
         let trace_context_json = if let Some(trace_context) = options.trace_context {
             serde_json::to_string(&trace_context)?
         } else {
@@ -254,8 +251,7 @@ impl Producer {
             .key(idempotency_key)
             .arg(&job_id)
             .arg(function_name)
-            .arg(&job_args_json)
-            .arg(&job_kwargs_json)
+            .arg(&job_params_json)
             .arg(enqueue_time.to_rfc3339())
             .arg("PENDING")
             .arg(0i64)
@@ -285,8 +281,7 @@ impl Producer {
     pub async fn enqueue_with_rate_limit(
         &self,
         function_name: &str,
-        args: Vec<Value>,
-        kwargs: Map<String, Value>,
+        params: Map<String, Value>,
         rate_limit_key: &str,
         rate_limit_window: Duration,
         options: EnqueueOptions,
@@ -321,8 +316,7 @@ impl Producer {
         let rate_limit_key = format_rate_limit_key(rate_limit_key);
         let score_ms = scheduled_time.timestamp_millis() as f64;
 
-        let job_args_json = serde_json::to_string(&args)?;
-        let job_kwargs_json = serde_json::to_string(&kwargs)?;
+        let job_params_json = serde_json::to_string(&params)?;
         let trace_context_json = if let Some(trace_context) = options.trace_context {
             serde_json::to_string(&trace_context)?
         } else {
@@ -337,8 +331,7 @@ impl Producer {
             .key(rate_limit_key)
             .arg(&job_id)
             .arg(function_name)
-            .arg(&job_args_json)
-            .arg(&job_kwargs_json)
+            .arg(&job_params_json)
             .arg(enqueue_time.to_rfc3339())
             .arg("PENDING")
             .arg(0i64)
@@ -369,8 +362,7 @@ impl Producer {
     pub async fn enqueue_with_debounce(
         &self,
         function_name: &str,
-        args: Vec<Value>,
-        kwargs: Map<String, Value>,
+        params: Map<String, Value>,
         debounce_key: &str,
         debounce_window: Duration,
         options: EnqueueOptions,
@@ -406,8 +398,7 @@ impl Producer {
         let debounce_key = format_debounce_key(debounce_key);
         let score_ms = scheduled_time.timestamp_millis() as f64;
 
-        let job_args_json = serde_json::to_string(&args)?;
-        let job_kwargs_json = serde_json::to_string(&kwargs)?;
+        let job_params_json = serde_json::to_string(&params)?;
         let trace_context_json = if let Some(trace_context) = options.trace_context {
             serde_json::to_string(&trace_context)?
         } else {
@@ -422,8 +413,7 @@ impl Producer {
             .arg(JOB_KEY_PREFIX)
             .arg(&job_id)
             .arg(function_name)
-            .arg(&job_args_json)
-            .arg(&job_kwargs_json)
+            .arg(&job_params_json)
             .arg(enqueue_time.to_rfc3339())
             .arg("PENDING")
             .arg(0i64)
@@ -477,11 +467,10 @@ impl ProducerHandle for Producer {
     async fn enqueue(
         &self,
         function_name: &str,
-        args: Vec<Value>,
-        kwargs: Map<String, Value>,
+        params: Map<String, Value>,
         options: EnqueueOptions,
     ) -> Result<String> {
-        self.enqueue(function_name, args, kwargs, options).await
+        self.enqueue(function_name, params, options).await
     }
 }
 
@@ -523,12 +512,12 @@ fn validate_name(label: &str, value: &str) -> Result<()> {
 fn build_enqueue_script() -> Script {
     let script = format!(
         "-- KEYS: [1] = job_key, [2] = queue_key, [3] = idempotency_key (optional)\n\
-         -- ARGV: [1] = job_id, [2] = function_name, [3] = job_args, [4] = job_kwargs\n\
-         --       [5] = enqueue_time, [6] = status, [7] = current_retries\n\
-         --       [8] = next_scheduled_run_time, [9] = max_retries\n\
-         --       [10] = job_timeout_seconds, [11] = result_ttl_seconds\n\
-         --       [12] = queue_name, [13] = result, [14] = trace_context_json\n\
-         --       [15] = score_ms, [16] = idempotency_ttl_seconds\n\
+         -- ARGV: [1] = job_id, [2] = function_name, [3] = job_params\n\
+         --       [4] = enqueue_time, [5] = status, [6] = current_retries\n\
+         --       [7] = next_scheduled_run_time, [8] = max_retries\n\
+         --       [9] = job_timeout_seconds, [10] = result_ttl_seconds\n\
+         --       [11] = queue_name, [12] = result, [13] = trace_context_json\n\
+         --       [14] = score_ms, [15] = idempotency_ttl_seconds\n\
          local idem_key = KEYS[3]\n\
          if idem_key ~= '' then\n\
              local existing = redis.call('GET', idem_key)\n\
@@ -544,7 +533,7 @@ fn build_enqueue_script() -> Script {
              return {{-1, ARGV[1]}}\n\
          end\n\
          if idem_key ~= '' then\n\
-             local ttl = tonumber(ARGV[16])\n\
+             local ttl = tonumber(ARGV[15])\n\
              local set_ok = nil\n\
              if ttl and ttl > 0 then\n\
                  set_ok = redis.call('SET', idem_key, ARGV[1], 'NX', 'EX', ttl)\n\
@@ -561,21 +550,20 @@ fn build_enqueue_script() -> Script {
          redis.call('HSET', KEYS[1],\n\
              'id', ARGV[1],\n\
              'function_name', ARGV[2],\n\
-             'job_args', ARGV[3],\n\
-             'job_kwargs', ARGV[4],\n\
-             'enqueue_time', ARGV[5],\n\
-             'status', ARGV[6],\n\
-             'current_retries', ARGV[7],\n\
-             'next_scheduled_run_time', ARGV[8],\n\
-             'max_retries', ARGV[9],\n\
-             'job_timeout_seconds', ARGV[10],\n\
-             'result_ttl_seconds', ARGV[11],\n\
-             'queue_name', ARGV[12],\n\
-             'result', ARGV[13])\n\
-         if ARGV[14] ~= '' then\n\
-             redis.call('HSET', KEYS[1], 'trace_context', ARGV[14])\n\
+             'job_params', ARGV[3],\n\
+             'enqueue_time', ARGV[4],\n\
+             'status', ARGV[5],\n\
+             'current_retries', ARGV[6],\n\
+             'next_scheduled_run_time', ARGV[7],\n\
+             'max_retries', ARGV[8],\n\
+             'job_timeout_seconds', ARGV[9],\n\
+             'result_ttl_seconds', ARGV[10],\n\
+             'queue_name', ARGV[11],\n\
+             'result', ARGV[12])\n\
+         if ARGV[13] ~= '' then\n\
+             redis.call('HSET', KEYS[1], 'trace_context', ARGV[13])\n\
          end\n\
-         redis.call('ZADD', KEYS[2], ARGV[15], ARGV[1])\n\
+         redis.call('ZADD', KEYS[2], ARGV[14], ARGV[1])\n\
          return {{1, ARGV[1]}}",
         job_prefix = JOB_KEY_PREFIX
     );
@@ -585,16 +573,16 @@ fn build_enqueue_script() -> Script {
 fn build_rate_limit_script() -> Script {
     let script = "\
         -- KEYS: [1] = job_key, [2] = queue_key, [3] = rate_limit_key\n\
-        -- ARGV: [1] = job_id, [2] = function_name, [3] = job_args, [4] = job_kwargs\n\
-        --       [5] = enqueue_time, [6] = status, [7] = current_retries\n\
-        --       [8] = next_scheduled_run_time, [9] = max_retries\n\
-        --       [10] = job_timeout_seconds, [11] = result_ttl_seconds\n\
-        --       [12] = queue_name, [13] = result, [14] = trace_context_json\n\
-        --       [15] = score_ms, [16] = rate_limit_ttl_seconds\n\
+        -- ARGV: [1] = job_id, [2] = function_name, [3] = job_params\n\
+        --       [4] = enqueue_time, [5] = status, [6] = current_retries\n\
+        --       [7] = next_scheduled_run_time, [8] = max_retries\n\
+        --       [9] = job_timeout_seconds, [10] = result_ttl_seconds\n\
+        --       [11] = queue_name, [12] = result, [13] = trace_context_json\n\
+        --       [14] = score_ms, [15] = rate_limit_ttl_seconds\n\
         local rate_key = KEYS[3]\n\
         local rate_set = false\n\
         if rate_key ~= '' then\n\
-            local ttl = tonumber(ARGV[16])\n\
+            local ttl = tonumber(ARGV[15])\n\
             if not ttl or ttl <= 0 then\n\
                 return {-2, ARGV[1]}\n\
             end\n\
@@ -613,21 +601,20 @@ fn build_rate_limit_script() -> Script {
         redis.call('HSET', KEYS[1],\n\
             'id', ARGV[1],\n\
             'function_name', ARGV[2],\n\
-            'job_args', ARGV[3],\n\
-            'job_kwargs', ARGV[4],\n\
-            'enqueue_time', ARGV[5],\n\
-            'status', ARGV[6],\n\
-            'current_retries', ARGV[7],\n\
-            'next_scheduled_run_time', ARGV[8],\n\
-            'max_retries', ARGV[9],\n\
-            'job_timeout_seconds', ARGV[10],\n\
-            'result_ttl_seconds', ARGV[11],\n\
-            'queue_name', ARGV[12],\n\
-            'result', ARGV[13])\n\
-        if ARGV[14] ~= '' then\n\
-            redis.call('HSET', KEYS[1], 'trace_context', ARGV[14])\n\
+            'job_params', ARGV[3],\n\
+            'enqueue_time', ARGV[4],\n\
+            'status', ARGV[5],\n\
+            'current_retries', ARGV[6],\n\
+            'next_scheduled_run_time', ARGV[7],\n\
+            'max_retries', ARGV[8],\n\
+            'job_timeout_seconds', ARGV[9],\n\
+            'result_ttl_seconds', ARGV[10],\n\
+            'queue_name', ARGV[11],\n\
+            'result', ARGV[12])\n\
+        if ARGV[13] ~= '' then\n\
+            redis.call('HSET', KEYS[1], 'trace_context', ARGV[13])\n\
         end\n\
-        redis.call('ZADD', KEYS[2], ARGV[15], ARGV[1])\n\
+        redis.call('ZADD', KEYS[2], ARGV[14], ARGV[1])\n\
         return {1, ARGV[1]}";
     Script::new(script)
 }
@@ -635,13 +622,12 @@ fn build_rate_limit_script() -> Script {
 fn build_debounce_script() -> Script {
     let script = "\
         -- KEYS: [1] = queue_key, [2] = debounce_key\n\
-        -- ARGV: [1] = job_prefix, [2] = job_id, [3] = function_name, [4] = job_args\n\
-        --       [5] = job_kwargs, [6] = enqueue_time, [7] = status\n\
-        --       [8] = current_retries, [9] = next_scheduled_run_time\n\
-        --       [10] = max_retries, [11] = job_timeout_seconds\n\
-        --       [12] = result_ttl_seconds, [13] = queue_name\n\
-        --       [14] = result, [15] = trace_context_json\n\
-        --       [16] = score_ms, [17] = debounce_ttl_seconds\n\
+        -- ARGV: [1] = job_prefix, [2] = job_id, [3] = function_name, [4] = job_params\n\
+        --       [5] = enqueue_time, [6] = status, [7] = current_retries\n\
+        --       [8] = next_scheduled_run_time, [9] = max_retries\n\
+        --       [10] = job_timeout_seconds, [11] = result_ttl_seconds\n\
+        --       [12] = queue_name, [13] = result, [14] = trace_context_json\n\
+        --       [15] = score_ms, [16] = debounce_ttl_seconds\n\
         local existing_id = redis.call('GET', KEYS[2])\n\
         if existing_id then\n\
             local existing_job_key = ARGV[1] .. existing_id\n\
@@ -650,18 +636,17 @@ fn build_debounce_script() -> Script {
                 if status == 'PENDING' then\n\
                     redis.call('HSET', existing_job_key,\n\
                         'function_name', ARGV[3],\n\
-                        'job_args', ARGV[4],\n\
-                        'job_kwargs', ARGV[5],\n\
-                        'next_scheduled_run_time', ARGV[9],\n\
-                        'max_retries', ARGV[10],\n\
-                        'job_timeout_seconds', ARGV[11],\n\
-                        'result_ttl_seconds', ARGV[12],\n\
-                        'queue_name', ARGV[13])\n\
-                    if ARGV[15] ~= '' then\n\
-                        redis.call('HSET', existing_job_key, 'trace_context', ARGV[15])\n\
+                        'job_params', ARGV[4],\n\
+                        'next_scheduled_run_time', ARGV[8],\n\
+                        'max_retries', ARGV[9],\n\
+                        'job_timeout_seconds', ARGV[10],\n\
+                        'result_ttl_seconds', ARGV[11],\n\
+                        'queue_name', ARGV[12])\n\
+                    if ARGV[14] ~= '' then\n\
+                        redis.call('HSET', existing_job_key, 'trace_context', ARGV[14])\n\
                     end\n\
-                    redis.call('ZADD', KEYS[1], ARGV[16], existing_id)\n\
-                    local ttl = tonumber(ARGV[17])\n\
+                    redis.call('ZADD', KEYS[1], ARGV[15], existing_id)\n\
+                    local ttl = tonumber(ARGV[16])\n\
                     if ttl and ttl > 0 then\n\
                         redis.call('EXPIRE', KEYS[2], ttl)\n\
                     end\n\
@@ -674,7 +659,7 @@ fn build_debounce_script() -> Script {
         if redis.call('EXISTS', job_key) == 1 then\n\
             return {-1, ARGV[2]}\n\
         end\n\
-        local ttl = tonumber(ARGV[17])\n\
+        local ttl = tonumber(ARGV[16])\n\
         if ttl and ttl > 0 then\n\
             local ok = redis.call('SET', KEYS[2], ARGV[2], 'NX', 'EX', ttl)\n\
             if not ok then\n\
@@ -690,21 +675,20 @@ fn build_debounce_script() -> Script {
         redis.call('HSET', job_key,\n\
             'id', ARGV[2],\n\
             'function_name', ARGV[3],\n\
-            'job_args', ARGV[4],\n\
-            'job_kwargs', ARGV[5],\n\
-            'enqueue_time', ARGV[6],\n\
-            'status', ARGV[7],\n\
-            'current_retries', ARGV[8],\n\
-            'next_scheduled_run_time', ARGV[9],\n\
-            'max_retries', ARGV[10],\n\
-            'job_timeout_seconds', ARGV[11],\n\
-            'result_ttl_seconds', ARGV[12],\n\
-            'queue_name', ARGV[13],\n\
-            'result', ARGV[14])\n\
-        if ARGV[15] ~= '' then\n\
-            redis.call('HSET', job_key, 'trace_context', ARGV[15])\n\
+            'job_params', ARGV[4],\n\
+            'enqueue_time', ARGV[5],\n\
+            'status', ARGV[6],\n\
+            'current_retries', ARGV[7],\n\
+            'next_scheduled_run_time', ARGV[8],\n\
+            'max_retries', ARGV[9],\n\
+            'job_timeout_seconds', ARGV[10],\n\
+            'result_ttl_seconds', ARGV[11],\n\
+            'queue_name', ARGV[12],\n\
+            'result', ARGV[13])\n\
+        if ARGV[14] ~= '' then\n\
+            redis.call('HSET', job_key, 'trace_context', ARGV[14])\n\
         end\n\
-        redis.call('ZADD', KEYS[1], ARGV[16], ARGV[2])\n\
+        redis.call('ZADD', KEYS[1], ARGV[15], ARGV[2])\n\
         return {1, ARGV[2]}";
     Script::new(script)
 }
@@ -719,7 +703,6 @@ fn parse_result(result: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use std::sync::OnceLock;
     use tokio::sync::Mutex;
 
@@ -763,7 +746,6 @@ mod tests {
         let job_id = producer
             .enqueue(
                 "work",
-                vec![json!(1)],
                 serde_json::Map::new(),
                 EnqueueOptions::default(),
             )
@@ -799,7 +781,6 @@ mod tests {
         let job_id = producer
             .enqueue(
                 "work",
-                vec![],
                 serde_json::Map::new(),
                 EnqueueOptions::default(),
             )
@@ -828,13 +809,13 @@ mod tests {
             ..Default::default()
         };
         let first = producer
-            .enqueue("work", vec![], serde_json::Map::new(), options.clone())
+            .enqueue("work", serde_json::Map::new(), options.clone())
             .await
             .unwrap();
         assert_eq!(first, "fixed-id");
 
         let err = producer
-            .enqueue("work", vec![], serde_json::Map::new(), options)
+            .enqueue("work", serde_json::Map::new(), options)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("job_id already exists"));
@@ -855,11 +836,11 @@ mod tests {
             ..Default::default()
         };
         let first = producer
-            .enqueue("work", vec![], serde_json::Map::new(), options.clone())
+            .enqueue("work", serde_json::Map::new(), options.clone())
             .await
             .unwrap();
         let second = producer
-            .enqueue("work", vec![], serde_json::Map::new(), options)
+            .enqueue("work", serde_json::Map::new(), options)
             .await
             .unwrap();
         assert_eq!(first, second);
@@ -894,7 +875,7 @@ mod tests {
             ..Default::default()
         };
         producer
-            .enqueue("work", vec![], serde_json::Map::new(), options)
+            .enqueue("work", serde_json::Map::new(), options)
             .await
             .unwrap();
 
@@ -915,7 +896,6 @@ mod tests {
         let first = producer
             .enqueue_with_rate_limit(
                 "work",
-                vec![],
                 serde_json::Map::new(),
                 "rate-key",
                 Duration::from_secs(5),
@@ -928,7 +908,6 @@ mod tests {
         let second = producer
             .enqueue_with_rate_limit(
                 "work",
-                vec![],
                 serde_json::Map::new(),
                 "rate-key",
                 Duration::from_secs(5),
@@ -952,7 +931,6 @@ mod tests {
         let first = producer
             .enqueue_with_debounce(
                 "work",
-                vec![],
                 serde_json::Map::new(),
                 "debounce-key",
                 Duration::from_secs(5),
@@ -963,7 +941,6 @@ mod tests {
         let second = producer
             .enqueue_with_debounce(
                 "work",
-                vec![],
                 serde_json::Map::new(),
                 "debounce-key",
                 Duration::from_secs(5),
@@ -1002,7 +979,7 @@ mod tests {
             ..Default::default()
         };
         let job_id = producer
-            .enqueue("work", vec![], serde_json::Map::new(), options)
+            .enqueue("work", serde_json::Map::new(), options)
             .await
             .unwrap();
         assert_eq!(job_id, "fresh-id");
@@ -1025,7 +1002,7 @@ mod tests {
             ..Default::default()
         };
         let err = producer
-            .enqueue("", vec![], serde_json::Map::new(), options)
+            .enqueue("", serde_json::Map::new(), options)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("function_name cannot be empty"));
@@ -1046,7 +1023,7 @@ mod tests {
             ..Default::default()
         };
         let err = producer
-            .enqueue("work", vec![], serde_json::Map::new(), options)
+            .enqueue("work", serde_json::Map::new(), options)
             .await
             .unwrap_err();
         assert!(
@@ -1068,7 +1045,6 @@ mod tests {
         let job_id = producer
             .enqueue(
                 "work",
-                vec![],
                 serde_json::Map::new(),
                 EnqueueOptions::default(),
             )
