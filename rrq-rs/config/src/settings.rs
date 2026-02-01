@@ -6,8 +6,8 @@ use crate::cron::CronJob;
 use crate::defaults::{
     DEFAULT_DLQ_NAME, DEFAULT_EXPECTED_JOB_TTL, DEFAULT_JOB_TIMEOUT_SECONDS,
     DEFAULT_LOCK_TIMEOUT_EXTENSION_SECONDS, DEFAULT_MAX_RETRIES, DEFAULT_POLL_DELAY_SECONDS,
-    DEFAULT_QUEUE_NAME, DEFAULT_RESULT_TTL_SECONDS, DEFAULT_RUNNER_CONNECT_TIMEOUT_MS,
-    DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
+    DEFAULT_QUEUE_NAME, DEFAULT_REDIS_DSN, DEFAULT_RESULT_TTL_SECONDS,
+    DEFAULT_RUNNER_CONNECT_TIMEOUT_MS, DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -18,6 +18,7 @@ pub enum RunnerType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RunnerConfig {
     #[serde(default = "default_runner_type", rename = "type")]
     pub runner_type: RunnerType,
@@ -72,7 +73,7 @@ pub struct RRQSettings {
 impl Default for RRQSettings {
     fn default() -> Self {
         Self {
-            redis_dsn: "redis://localhost:6379/0".to_string(),
+            redis_dsn: DEFAULT_REDIS_DSN.to_string(),
             default_queue_name: DEFAULT_QUEUE_NAME.to_string(),
             default_dlq_name: DEFAULT_DLQ_NAME.to_string(),
             default_max_retries: DEFAULT_MAX_RETRIES,

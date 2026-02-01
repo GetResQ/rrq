@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
 use crate::settings::RRQSettings;
+use crate::tcp_socket::parse_tcp_socket;
 
 pub const DEFAULT_CONFIG_FILENAME: &str = "rrq.toml";
 pub const ENV_CONFIG_KEY: &str = "RRQ_CONFIG";
@@ -49,7 +50,11 @@ pub fn load_toml_settings(config_path: Option<&str>) -> Result<RRQSettings> {
     let env_overrides = env_overrides()?;
     let merged = deep_merge(json_value, env_overrides);
 
-    let settings: RRQSettings = serde_json::from_value(merged).context("invalid RRQ config")?;
+    let settings: RRQSettings = serde_json::from_value(merged.clone()).map_err(|err| {
+        let hint = diagnose_config_error(&merged, &err);
+        anyhow::anyhow!("invalid RRQ config: {err}{hint}")
+    })?;
+    validate_runner_configs(&settings)?;
     Ok(settings)
 }
 
@@ -206,6 +211,148 @@ fn deep_merge(base: Value, overlay: Value) -> Value {
     }
 }
 
+fn diagnose_config_error(config: &Value, err: &serde_json::Error) -> String {
+    let err_msg = err.to_string().to_lowercase();
+
+    // Check for unknown field errors in runner configs
+    if err_msg.contains("unknown field")
+        && let Some(runners) = config.get("runners").and_then(|v| v.as_object())
+    {
+        let valid_fields = [
+            "type",
+            "cmd",
+            "pool_size",
+            "max_in_flight",
+            "env",
+            "cwd",
+            "tcp_socket",
+            "response_timeout_seconds",
+        ];
+        for (name, runner) in runners {
+            if let Some(obj) = runner.as_object() {
+                for key in obj.keys() {
+                    if !valid_fields.contains(&key.as_str()) {
+                        return format!(
+                            "\n\nHint: runner '{name}' has unknown field '{key}'. Valid fields are: {}",
+                            valid_fields.join(", ")
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Check for type errors in runner configs
+    if err_msg.contains("invalid type")
+        && let Some(runners) = config.get("runners").and_then(|v| v.as_object())
+    {
+        for (name, runner) in runners {
+            if let Some(obj) = runner.as_object() {
+                if let Some(pool_size) = obj.get("pool_size")
+                    && !pool_size.is_u64()
+                {
+                    return format!(
+                        "\n\nHint: runner '{name}' has invalid pool_size - must be a positive integer, got: {pool_size}"
+                    );
+                }
+                if let Some(max_in_flight) = obj.get("max_in_flight")
+                    && !max_in_flight.is_u64()
+                {
+                    return format!(
+                        "\n\nHint: runner '{name}' has invalid max_in_flight - must be a positive integer, got: {max_in_flight}"
+                    );
+                }
+                if let Some(cmd) = obj.get("cmd")
+                    && !cmd.is_array()
+                {
+                    return format!(
+                        "\n\nHint: runner '{name}' has invalid cmd - must be an array of strings, got: {cmd}"
+                    );
+                }
+            }
+        }
+    }
+
+    String::new()
+}
+
+fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
+    if settings.runners.is_empty() {
+        return Ok(()); // No runners configured is valid (will error at worker startup)
+    }
+
+    for (name, config) in &settings.runners {
+        // Check for missing required fields
+        if config.tcp_socket.is_none() {
+            return Err(anyhow::anyhow!(
+                "runner '{name}' is missing required field 'tcp_socket' (e.g., \"127.0.0.1:9000\")"
+            ));
+        }
+
+        if config.cmd.is_none() {
+            return Err(anyhow::anyhow!(
+                "runner '{name}' is missing required field 'cmd' (e.g., [\"rrq-runner\", \"--settings\", \"myapp.settings\"])"
+            ));
+        }
+
+        // Validate tcp_socket format, host, and port
+        if let Some(ref socket) = config.tcp_socket {
+            let spec = parse_tcp_socket(socket)
+                .with_context(|| format!("runner '{name}' has invalid tcp_socket '{socket}'"))?;
+
+            // Validate port range is sufficient for pool_size
+            let pool_size = config.pool_size.unwrap_or(1);
+            let max_port = spec.port as u32 + pool_size.saturating_sub(1) as u32;
+            if max_port > u16::MAX as u32 {
+                return Err(anyhow::anyhow!(
+                    "runner '{name}' tcp_socket port range insufficient for pool_size {pool_size} \
+                    (port {} + {} would exceed 65535)",
+                    spec.port,
+                    pool_size - 1
+                ));
+            }
+        }
+
+        // Validate pool_size if specified
+        if let Some(pool_size) = config.pool_size
+            && pool_size == 0
+        {
+            return Err(anyhow::anyhow!(
+                "runner '{name}' has invalid pool_size: 0 - must be a positive integer"
+            ));
+        }
+
+        // Validate max_in_flight if specified
+        if let Some(max_in_flight) = config.max_in_flight
+            && max_in_flight == 0
+        {
+            return Err(anyhow::anyhow!(
+                "runner '{name}' has invalid max_in_flight: 0 - must be a positive integer"
+            ));
+        }
+    }
+
+    // Check that default_runner_name references a configured runner
+    if !settings.default_runner_name.is_empty()
+        && !settings.runners.contains_key(&settings.default_runner_name)
+    {
+        let available: Vec<_> = settings.runners.keys().collect();
+        if available.is_empty() {
+            return Err(anyhow::anyhow!(
+                "default_runner_name is '{}' but no runners are configured",
+                settings.default_runner_name
+            ));
+        }
+        return Err(anyhow::anyhow!(
+            "default_runner_name '{}' does not match any configured runner. Available runners: {:?}",
+            settings.default_runner_name,
+            available
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(unsafe_code)] // env var manipulation in tests
 mod tests {
@@ -265,5 +412,159 @@ mod tests {
         let (path, source) = resolve_config_source(None);
         assert_eq!(path, Some(value));
         assert!(source.contains(ENV_CONFIG_KEY));
+    }
+
+    #[test]
+    fn validate_runner_configs_accepts_valid_config() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        default_runner_name = "python"
+        [rrq.runners.python]
+        cmd = ["rrq-runner", "--settings", "myapp.settings"]
+        tcp_socket = "127.0.0.1:9000"
+        pool_size = 2
+        max_in_flight = 10
+        "#;
+        fs::write(&path, config).unwrap();
+        let settings = load_toml_settings(Some(path.to_str().unwrap())).unwrap();
+        assert_eq!(settings.runners.len(), 1);
+        assert!(settings.runners.contains_key("python"));
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_missing_tcp_socket() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        [rrq.runners.python]
+        cmd = ["rrq-runner"]
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(err.to_string().contains("tcp_socket"));
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_missing_cmd() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        [rrq.runners.python]
+        tcp_socket = "127.0.0.1:9000"
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(err.to_string().contains("cmd"));
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_non_loopback() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        [rrq.runners.python]
+        cmd = ["rrq-runner"]
+        tcp_socket = "10.0.0.1:9000"
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        // Error chain includes "loopback" in the cause
+        let full_err = format!("{err:?}");
+        assert!(full_err.contains("loopback"), "error was: {full_err}");
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_zero_pool_size() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        [rrq.runners.python]
+        cmd = ["rrq-runner"]
+        tcp_socket = "127.0.0.1:9000"
+        pool_size = 0
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(err.to_string().contains("pool_size"));
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_zero_max_in_flight() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        [rrq.runners.python]
+        cmd = ["rrq-runner"]
+        tcp_socket = "127.0.0.1:9000"
+        max_in_flight = 0
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(err.to_string().contains("max_in_flight"));
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_mismatched_default_runner() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        default_runner_name = "node"
+        [rrq.runners.python]
+        cmd = ["rrq-runner"]
+        tcp_socket = "127.0.0.1:9000"
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(err.to_string().contains("node"));
+        assert!(err.to_string().contains("python"));
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_unknown_field() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        [rrq.runners.python]
+        cmd = ["rrq-runner"]
+        tcp_socket = "127.0.0.1:9000"
+        pool_siz = 4
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_port_overflow() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        [rrq.runners.python]
+        cmd = ["rrq-runner"]
+        tcp_socket = "127.0.0.1:65535"
+        pool_size = 2
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(err.to_string().contains("port range"));
     }
 }

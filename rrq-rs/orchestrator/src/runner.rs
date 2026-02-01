@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::process::Stdio;
 use std::sync::{
     Arc,
@@ -9,7 +9,7 @@ use std::sync::{
 use crate::constants::DEFAULT_RUNNER_CONNECT_TIMEOUT_MS;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use rrq_config::RRQSettings;
+use rrq_config::{RRQSettings, TcpSocketSpec, parse_tcp_socket};
 use rrq_protocol::{
     CancelRequest, ExecutionOutcome, ExecutionRequest, FRAME_HEADER_LEN, PROTOCOL_VERSION,
     RunnerMessage, encode_frame,
@@ -23,61 +23,6 @@ use tokio::time::{Duration, Instant, timeout};
 
 const ENV_RUNNER_TCP_SOCKET: &str = "RRQ_RUNNER_TCP_SOCKET";
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct TcpSocketSpec {
-    host: IpAddr,
-    port: u16,
-}
-
-impl TcpSocketSpec {
-    fn addr(&self, port: u16) -> SocketAddr {
-        SocketAddr::new(self.host, port)
-    }
-}
-
-fn parse_tcp_socket(raw: &str) -> Result<TcpSocketSpec> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return Err(anyhow::anyhow!("runner tcp_socket cannot be empty"));
-    }
-
-    let (host, port_str) = if let Some(rest) = raw.strip_prefix('[') {
-        let (host, port_str) = rest
-            .split_once("]:")
-            .ok_or_else(|| anyhow::anyhow!("runner tcp_socket must be in [host]:port format"))?;
-        (host, port_str)
-    } else {
-        let (host, port_str) = raw
-            .rsplit_once(':')
-            .ok_or_else(|| anyhow::anyhow!("runner tcp_socket must be in host:port format"))?;
-        if host.is_empty() {
-            return Err(anyhow::anyhow!("runner tcp_socket host cannot be empty"));
-        }
-        (host, port_str)
-    };
-
-    let port: u16 = port_str
-        .parse()
-        .with_context(|| format!("Invalid runner tcp_socket port: {port_str}"))?;
-    if port == 0 {
-        return Err(anyhow::anyhow!("runner tcp_socket port must be > 0"));
-    }
-
-    let ip = if host == "localhost" {
-        IpAddr::V4(Ipv4Addr::LOCALHOST)
-    } else {
-        let parsed: IpAddr = host
-            .parse()
-            .with_context(|| format!("Invalid runner tcp_socket host: {host}"))?;
-        if !parsed.is_loopback() {
-            return Err(anyhow::anyhow!("runner tcp_socket host must be localhost"));
-        }
-        parsed
-    };
-
-    Ok(TcpSocketSpec { host: ip, port })
-}
 
 fn connect_timeout_from_settings(timeout_ms: i64) -> Duration {
     let ms = if timeout_ms > 0 {
@@ -733,12 +678,7 @@ pub async fn build_runners_from_settings(
     let connect_timeout = connect_timeout_from_settings(settings.runner_connect_timeout_ms);
     let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
     for (name, config) in &settings.runners {
-        if config.cmd.is_none() {
-            return Err(anyhow::anyhow!(
-                "runner '{}' requires cmd for socket mode",
-                name
-            ));
-        }
+        // cmd and tcp_socket are validated by the config crate
         let pool_size = pool_sizes
             .get(name)
             .copied()
@@ -806,7 +746,7 @@ where
 mod tests {
     use super::*;
     use rrq_config::{RRQSettings, RunnerConfig, RunnerType};
-    use std::net::TcpListener as StdTcpListener;
+    use std::net::{IpAddr, Ipv4Addr, TcpListener as StdTcpListener};
     use tokio::net::TcpListener as TokioTcpListener;
     use tokio::process::Command;
     use tokio::time::sleep;
@@ -1038,20 +978,7 @@ mod tests {
         assert!(err.to_string().contains("max_in_flight must be positive"));
     }
 
-    #[test]
-    fn parse_tcp_socket_allows_localhost() {
-        let spec = parse_tcp_socket("localhost:1234").unwrap();
-        assert_eq!(
-            spec.addr(spec.port),
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234)
-        );
-    }
-
-    #[test]
-    fn parse_tcp_socket_rejects_non_localhost() {
-        let err = parse_tcp_socket("10.0.0.1:1234").unwrap_err();
-        assert!(err.to_string().contains("localhost"));
-    }
+    // parse_tcp_socket tests are in rrq_config::tcp_socket module
 
     #[test]
     fn connect_timeout_from_settings_defaults_for_non_positive() {
