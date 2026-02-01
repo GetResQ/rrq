@@ -112,8 +112,7 @@ async def test_handle_connection_processes_request() -> None:
             request_id="req-ready",
             job_id="job-ready",
             function_name="echo",
-            args=[],
-            kwargs={},
+            params={},
             context=ExecutionContext(
                 job_id="job-ready",
                 attempt=1,
@@ -171,8 +170,7 @@ async def test_handle_connection_returns_busy_when_inflight_limit_reached(
             request_id="req-1",
             job_id=job_id,
             function_name="block",
-            args=[],
-            kwargs={},
+            params={},
             context=ExecutionContext(
                 job_id=job_id,
                 attempt=1,
@@ -184,8 +182,7 @@ async def test_handle_connection_returns_busy_when_inflight_limit_reached(
             request_id="req-2",
             job_id=job_id,
             function_name="block",
-            args=[],
-            kwargs={},
+            params={},
             context=ExecutionContext(
                 job_id=job_id,
                 attempt=1,
@@ -254,8 +251,7 @@ async def test_cancel_by_job_id_cancels_all_requests() -> None:
             request_id="req-1",
             job_id=job_id,
             function_name="block",
-            args=[],
-            kwargs={},
+            params={},
             context=ExecutionContext(
                 job_id=job_id,
                 attempt=1,
@@ -267,8 +263,7 @@ async def test_cancel_by_job_id_cancels_all_requests() -> None:
             request_id="req-2",
             job_id=job_id,
             function_name="block",
-            args=[],
-            kwargs={},
+            params={},
             context=ExecutionContext(
                 job_id=job_id,
                 attempt=2,

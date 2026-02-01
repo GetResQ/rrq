@@ -1460,9 +1460,11 @@ mod tests {
 
     #[test]
     fn determine_needed_runners_includes_default() {
-        let mut settings = RRQSettings::default();
-        settings.default_runner_name = "python".to_string();
-        settings.default_queue_name = "default".to_string();
+        let settings = RRQSettings {
+            default_runner_name: "python".to_string(),
+            default_queue_name: "default".to_string(),
+            ..Default::default()
+        };
 
         let needed = super::determine_needed_runners(&settings, None);
         assert!(needed.contains("python"));
@@ -1471,9 +1473,11 @@ mod tests {
 
     #[test]
     fn determine_needed_runners_includes_routed_runners() {
-        let mut settings = RRQSettings::default();
-        settings.default_runner_name = "python".to_string();
-        settings.default_queue_name = "default".to_string();
+        let mut settings = RRQSettings {
+            default_runner_name: "python".to_string(),
+            default_queue_name: "default".to_string(),
+            ..Default::default()
+        };
         settings
             .runner_routes
             .insert("mail-ingest".to_string(), "mail_runner".to_string());
@@ -1490,9 +1494,11 @@ mod tests {
 
     #[test]
     fn determine_needed_runners_uses_default_queue_when_none_provided() {
-        let mut settings = RRQSettings::default();
-        settings.default_runner_name = "python".to_string();
-        settings.default_queue_name = "my-queue".to_string();
+        let mut settings = RRQSettings {
+            default_runner_name: "python".to_string(),
+            default_queue_name: "my-queue".to_string(),
+            ..Default::default()
+        };
         settings
             .runner_routes
             .insert("my-queue".to_string(), "special_runner".to_string());
@@ -1506,9 +1512,11 @@ mod tests {
 
     #[test]
     fn determine_needed_runners_deduplicates() {
-        let mut settings = RRQSettings::default();
-        settings.default_runner_name = "shared".to_string();
-        settings.default_queue_name = "default".to_string();
+        let mut settings = RRQSettings {
+            default_runner_name: "shared".to_string(),
+            default_queue_name: "default".to_string(),
+            ..Default::default()
+        };
         settings
             .runner_routes
             .insert("queue-a".to_string(), "shared".to_string());
