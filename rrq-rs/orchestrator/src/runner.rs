@@ -23,6 +23,8 @@ use tokio::time::{Duration, Instant, timeout};
 
 const ENV_RUNNER_TCP_SOCKET: &str = "RRQ_RUNNER_TCP_SOCKET";
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+const REUSE_SOCKET_MAX_ATTEMPTS: usize = 5;
+const REUSE_SOCKET_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 fn connect_timeout_from_settings(timeout_ms: i64) -> Duration {
     let ms = if timeout_ms > 0 {
@@ -186,10 +188,10 @@ impl SocketRunnerPool {
         if let Some(spawn_override) = &self.spawn_override {
             return Ok((spawn_override)());
         }
-        let max_attempts = if reuse_socket.is_none() {
-            self.pool_size.max(1)
+        let max_attempts = if reuse_socket.is_some() {
+            REUSE_SOCKET_MAX_ATTEMPTS
         } else {
-            1
+            self.pool_size.max(1)
         };
         let mut attempts = 0;
         loop {
@@ -202,8 +204,11 @@ impl SocketRunnerPool {
             };
             if let Err(err) = self.ensure_tcp_port_available(socket) {
                 attempts += 1;
-                if reuse_socket.is_some() || attempts >= max_attempts {
+                if attempts >= max_attempts {
                     return Err(err);
+                }
+                if reuse_socket.is_some() {
+                    tokio::time::sleep(REUSE_SOCKET_RETRY_DELAY).await;
                 }
                 continue;
             }
@@ -385,7 +390,16 @@ impl SocketRunnerPool {
         // Capture the old socket target to reuse (prevents port exhaustion on TCP)
         let old_socket = guard.socket;
         let _ = self.terminate(&mut guard).await;
-        *guard = self.spawn_process(Some(old_socket)).await?;
+        let replacement = match self.spawn_process(Some(old_socket)).await {
+            Ok(proc) => proc,
+            Err(err) => {
+                tracing::warn!(
+                    "failed to reuse runner socket {old_socket}: {err}; allocating new socket"
+                );
+                self.spawn_process(None).await?
+            }
+        };
+        *guard = replacement;
         self.availability.notify_waiters();
         Ok(())
     }
@@ -616,6 +630,38 @@ struct InFlightRequest {
     socket: RunnerSocketTarget,
 }
 
+/// Determine which runners are needed based on the queues being listened to.
+///
+/// Returns a set of runner names that should be spawned. This includes:
+/// - Runners explicitly mapped to queues via `runner_routes`
+/// - The default runner (for queues without explicit routing)
+pub fn determine_needed_runners(
+    settings: &RRQSettings,
+    queues: Option<&[String]>,
+) -> std::collections::HashSet<String> {
+    let mut needed = std::collections::HashSet::new();
+
+    // Always need the default runner for unrouted queues
+    if !settings.default_runner_name.is_empty() {
+        needed.insert(settings.default_runner_name.clone());
+    }
+
+    // Get the effective queues (CLI override or default)
+    let effective_queues: Vec<String> = match queues {
+        Some(q) if !q.is_empty() => q.to_vec(),
+        _ => vec![settings.default_queue_name.clone()],
+    };
+
+    // Add runners that are explicitly routed to these queues
+    for queue in &effective_queues {
+        if let Some(runner_name) = settings.runner_routes.get(queue) {
+            needed.insert(runner_name.clone());
+        }
+    }
+
+    needed
+}
+
 pub fn resolve_runner_pool_sizes(
     settings: &RRQSettings,
     watch_mode: bool,
@@ -667,6 +713,19 @@ pub async fn build_runners_from_settings(
     pool_sizes: Option<&HashMap<String, usize>>,
     max_in_flight: Option<&HashMap<String, usize>>,
 ) -> Result<HashMap<String, Arc<dyn Runner>>> {
+    build_runners_from_settings_filtered(settings, pool_sizes, max_in_flight, None).await
+}
+
+/// Build runners from settings, optionally filtering to only spawn needed runners.
+///
+/// If `needed_runners` is `Some`, only runners in that set will be spawned.
+/// If `needed_runners` is `None`, all configured runners will be spawned.
+pub async fn build_runners_from_settings_filtered(
+    settings: &RRQSettings,
+    pool_sizes: Option<&HashMap<String, usize>>,
+    max_in_flight: Option<&HashMap<String, usize>>,
+    needed_runners: Option<&std::collections::HashSet<String>>,
+) -> Result<HashMap<String, Arc<dyn Runner>>> {
     let pool_sizes = match pool_sizes {
         Some(map) => map.clone(),
         None => resolve_runner_pool_sizes(settings, false, None)?,
@@ -678,6 +737,14 @@ pub async fn build_runners_from_settings(
     let connect_timeout = connect_timeout_from_settings(settings.runner_connect_timeout_ms);
     let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
     for (name, config) in &settings.runners {
+        // Skip runners that are not needed (if filter is provided)
+        if let Some(needed) = needed_runners
+            && !needed.contains(name)
+        {
+            tracing::debug!(runner = %name, "skipping runner (not needed for configured queues)");
+            continue;
+        }
+
         // cmd and tcp_socket are validated by the config crate
         let pool_size = pool_sizes
             .get(name)
@@ -759,8 +826,7 @@ mod tests {
             request_id: "req-1".to_string(),
             job_id: "job-1".to_string(),
             function_name: "echo".to_string(),
-            args: Vec::new(),
-            kwargs: HashMap::new(),
+            params: HashMap::new(),
             context: rrq_protocol::ExecutionContext {
                 job_id: "job-1".to_string(),
                 attempt: 1,
@@ -1209,8 +1275,7 @@ mod tests {
             request_id: "req-1".to_string(),
             job_id: "job-1".to_string(),
             function_name: "echo".to_string(),
-            args: Vec::new(),
-            kwargs: HashMap::new(),
+            params: HashMap::new(),
             context: rrq_protocol::ExecutionContext {
                 job_id: "job-1".to_string(),
                 attempt: 1,
@@ -1266,8 +1331,7 @@ mod tests {
             request_id: "req-1".to_string(),
             job_id: "job-1".to_string(),
             function_name: "echo".to_string(),
-            args: Vec::new(),
-            kwargs: HashMap::new(),
+            params: HashMap::new(),
             context: rrq_protocol::ExecutionContext {
                 job_id: "job-1".to_string(),
                 attempt: 1,
@@ -1392,5 +1456,79 @@ mod tests {
         assert_ne!(initial_socket, new_socket);
 
         pool.close().await.unwrap();
+    }
+
+    #[test]
+    fn determine_needed_runners_includes_default() {
+        let settings = RRQSettings {
+            default_runner_name: "python".to_string(),
+            default_queue_name: "default".to_string(),
+            ..Default::default()
+        };
+
+        let needed = super::determine_needed_runners(&settings, None);
+        assert!(needed.contains("python"));
+        assert_eq!(needed.len(), 1);
+    }
+
+    #[test]
+    fn determine_needed_runners_includes_routed_runners() {
+        let mut settings = RRQSettings {
+            default_runner_name: "python".to_string(),
+            default_queue_name: "default".to_string(),
+            ..Default::default()
+        };
+        settings
+            .runner_routes
+            .insert("mail-ingest".to_string(), "mail_runner".to_string());
+        settings
+            .runner_routes
+            .insert("mail-extract".to_string(), "mail_runner".to_string());
+
+        // When listening to mail-ingest queue, should need mail_runner + default
+        let needed = super::determine_needed_runners(&settings, Some(&["mail-ingest".to_string()]));
+        assert!(needed.contains("python")); // default runner
+        assert!(needed.contains("mail_runner")); // routed runner
+        assert_eq!(needed.len(), 2);
+    }
+
+    #[test]
+    fn determine_needed_runners_uses_default_queue_when_none_provided() {
+        let mut settings = RRQSettings {
+            default_runner_name: "python".to_string(),
+            default_queue_name: "my-queue".to_string(),
+            ..Default::default()
+        };
+        settings
+            .runner_routes
+            .insert("my-queue".to_string(), "special_runner".to_string());
+
+        // When no queues provided, uses default_queue_name which is routed
+        let needed = super::determine_needed_runners(&settings, None);
+        assert!(needed.contains("python")); // default runner
+        assert!(needed.contains("special_runner")); // routed for default queue
+        assert_eq!(needed.len(), 2);
+    }
+
+    #[test]
+    fn determine_needed_runners_deduplicates() {
+        let mut settings = RRQSettings {
+            default_runner_name: "shared".to_string(),
+            default_queue_name: "default".to_string(),
+            ..Default::default()
+        };
+        settings
+            .runner_routes
+            .insert("queue-a".to_string(), "shared".to_string());
+        settings
+            .runner_routes
+            .insert("queue-b".to_string(), "shared".to_string());
+
+        let needed = super::determine_needed_runners(
+            &settings,
+            Some(&["queue-a".to_string(), "queue-b".to_string()]),
+        );
+        assert!(needed.contains("shared"));
+        assert_eq!(needed.len(), 1); // Only one runner, deduplicated
     }
 }

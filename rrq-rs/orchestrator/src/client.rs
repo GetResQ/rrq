@@ -36,8 +36,7 @@ impl RRQClient {
     pub async fn enqueue(
         &mut self,
         function_name: &str,
-        args: Vec<Value>,
-        kwargs: serde_json::Map<String, Value>,
+        params: serde_json::Map<String, Value>,
         options: EnqueueOptions,
     ) -> Result<Job> {
         let job_id = options.job_id.unwrap_or_else(Job::new_id);
@@ -114,8 +113,7 @@ impl RRQClient {
         let job = Job {
             id: job_id.clone(),
             function_name: function_name.to_string(),
-            job_args: args,
-            job_kwargs: kwargs,
+            job_params: params,
             enqueue_time,
             start_time: None,
             status: JobStatus::Pending,
@@ -172,7 +170,6 @@ mod tests {
     use crate::constants::UNIQUE_JOB_LOCK_PREFIX;
     use crate::test_support::RedisTestContext;
     use chrono::Duration as ChronoDuration;
-    use serde_json::json;
 
     #[tokio::test]
     async fn enqueue_with_defer_by_and_unique_lock() {
@@ -186,7 +183,7 @@ mod tests {
             ..Default::default()
         };
         let job = client
-            .enqueue("task", vec![json!(1)], serde_json::Map::new(), options)
+            .enqueue("task", serde_json::Map::new(), options)
             .await
             .unwrap();
         let scheduled = job.next_scheduled_run_time.unwrap();
@@ -209,7 +206,7 @@ mod tests {
             ..Default::default()
         };
         let job = client
-            .enqueue("task", Vec::new(), serde_json::Map::new(), options)
+            .enqueue("task", serde_json::Map::new(), options)
             .await
             .unwrap();
         let scheduled = job.next_scheduled_run_time.unwrap();
@@ -231,7 +228,7 @@ mod tests {
             ..Default::default()
         };
         let job = client
-            .enqueue("task", Vec::new(), serde_json::Map::new(), options)
+            .enqueue("task", serde_json::Map::new(), options)
             .await
             .unwrap();
         let scheduled = job.next_scheduled_run_time.unwrap();
@@ -259,7 +256,7 @@ mod tests {
             ..Default::default()
         };
         let job = client
-            .enqueue("task", Vec::new(), serde_json::Map::new(), options)
+            .enqueue("task", serde_json::Map::new(), options)
             .await
             .unwrap();
         let scheduled = job.next_scheduled_run_time.unwrap();
@@ -280,7 +277,7 @@ mod tests {
             ..Default::default()
         };
         let err = client
-            .enqueue("task", Vec::new(), serde_json::Map::new(), options)
+            .enqueue("task", serde_json::Map::new(), options)
             .await
             .unwrap_err();
         assert!(
@@ -299,7 +296,7 @@ mod tests {
             ..Default::default()
         };
         let err = client
-            .enqueue("task", Vec::new(), serde_json::Map::new(), options)
+            .enqueue("task", serde_json::Map::new(), options)
             .await
             .unwrap_err();
         assert!(
@@ -323,18 +320,13 @@ mod tests {
             ..Default::default()
         };
         let first = client
-            .enqueue(
-                "task",
-                vec![json!(1)],
-                serde_json::Map::new(),
-                options.clone(),
-            )
+            .enqueue("task", serde_json::Map::new(), options.clone())
             .await
             .unwrap();
         assert_eq!(first.id, "fixed-id");
 
         let err = client
-            .enqueue("task", vec![json!(2)], serde_json::Map::new(), options)
+            .enqueue("task", serde_json::Map::new(), options)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("job_id already exists"));
@@ -345,7 +337,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(stored.job_args, vec![json!(1)]);
+        assert!(stored.job_params.is_empty());
         let queue_size = ctx
             .store
             .queue_size(&ctx.settings.default_queue_name)

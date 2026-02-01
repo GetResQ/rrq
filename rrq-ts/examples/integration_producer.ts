@@ -23,8 +23,7 @@ const client = new RRQClient({
 try {
   for (let i = 0; i < count; i += 1) {
     await client.enqueue(functionName, {
-      args: [`from-ts-${i}`],
-      kwargs: { source: "ts" },
+      params: { message: `from-ts-${i}`, source: "ts" },
     });
   }
 } finally {

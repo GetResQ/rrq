@@ -1,172 +1,264 @@
-# RRQ TypeScript (Producer + Runner)
+# RRQ TypeScript
 
-TypeScript/JavaScript package for RRQ (Reliable Redis Queue). Includes:
+[![npm](https://img.shields.io/npm/v/rrq-ts.svg)](https://www.npmjs.com/package/rrq-ts)
+[![License](https://img.shields.io/npm/l/rrq-ts.svg)](LICENSE)
 
-- **Producer** client for enqueuing jobs into RRQ.
-- **Runner runtime** to run job handlers over the RRQ socket protocol.
+**TypeScript/JavaScript client for RRQ**, the distributed job queue with a Rust-powered orchestrator.
 
-Designed to work with **Node.js (20+)** and **Bun**. The producer FFI uses
-`koffi` on Node and `bun:ffi` when running under Bun.
+## What is RRQ?
 
-## Installation
+RRQ (Reliable Redis Queue) is a distributed job queue that separates the hard parts (scheduling, retries, locking, timeouts) into a Rust orchestrator while letting you write job handlers in your preferred language. It uses Redis as the source of truth with atomic operations for reliability.
+
+**Why RRQ?**
+
+- **Language flexibility** - Write job handlers in TypeScript, Python, or Rust
+- **Rust orchestrator** - The complex distributed systems logic is handled by battle-tested Rust code
+- **Production features built in** - Retries, dead letter queues, timeouts, cron scheduling, distributed tracing
+- **Redis simplicity** - No separate databases; everything lives in Redis with predictable semantics
+
+## This Package
+
+This package provides:
+
+- **Producer client** - Enqueue jobs from Node.js/Bun applications
+- **Runner runtime** - Execute job handlers written in TypeScript
+
+Works with **Node.js 20+** and **Bun**.
+
+## Quick Start
+
+### 1. Install
 
 ```bash
 npm install rrq-ts
+# or
+bun add rrq-ts
 ```
 
-## Producer usage
+### 2. Enqueue jobs (Producer)
 
-```ts
+```typescript
 import { RRQClient } from "rrq-ts";
 
 const client = new RRQClient({
-  config: {
-    redisDsn: "redis://localhost:6379/0",
-  },
+  config: { redisDsn: "redis://localhost:6379/0" }
 });
 
 const jobId = await client.enqueue("send_email", {
-  args: ["user@example.com"],
-  kwargs: { template: "welcome" },
-  queueName: "rrq:queue:default",
-  maxRetries: 5,
+  params: { to: "user@example.com", template: "welcome" },
+  queueName: "emails",
+  maxRetries: 5
 });
 
-console.log("enqueued", jobId);
+console.log(`Enqueued job: ${jobId}`);
 await client.close();
 ```
 
-### Producer requirements
+### 3. Write job handlers (Runner)
 
-The TypeScript producer uses the Rust `rrq_producer` shared library via FFI.
-Provide the library in one of these ways:
-
-- Set `RRQ_PRODUCER_LIB_PATH` to the absolute path of the shared library.
-- Place the library in `rrq-ts/bin` (e.g. `librrq_producer.dylib` or `librrq_producer.so`).
-- For published packages, place the library in `rrq-ts/bin/<platform>-<arch>/`
-  (for example, `bin/linux-x64/librrq_producer.so` or
-  `bin/darwin-arm64/librrq_producer.dylib`).
-
-To build the library from this repo:
-
-```bash
-cargo build -p rrq-producer --release
-```
-
-### Producer config from rrq.toml
-
-```ts
-const client = new RRQClient({ configPath: "rrq.toml" });
-```
-
-### Producer options
-
-```ts
-interface EnqueueOptions {
-  args?: unknown[];
-  kwargs?: Record<string, unknown>;
-  queueName?: string;
-  jobId?: string;
-  uniqueKey?: string;
-  uniqueTtlSeconds?: number;
-  maxRetries?: number;
-  jobTimeoutSeconds?: number;
-  resultTtlSeconds?: number;
-  deferUntil?: Date;
-  deferBySeconds?: number;
-  traceContext?: Record<string, string> | null;
-}
-```
-
-`uniqueKey` is idempotency: repeated enqueues with the same key return the same
-job id.
-
-### Rate limit / debounce
-
-```ts
-const jobId = await client.enqueueWithRateLimit("send_email", {
-  rateLimitKey: "user-123",
-  rateLimitSeconds: 5,
-});
-if (jobId === null) {
-  // rate limited
-}
-
-const debouncedId = await client.enqueueWithDebounce("sync_user", {
-  debounceKey: "user-123",
-  debounceSeconds: 5,
-});
-```
-
-### Job status + results
-
-```ts
-const status = await client.getJobStatus(jobId);
-```
-
-## Runner runtime usage
-
-```ts
+```typescript
 import { RunnerRuntime, Registry } from "rrq-ts";
 
 const registry = new Registry();
+
 registry.register("send_email", async (request, signal) => {
-  // handle request.args / request.kwargs; use signal for cancellation
-  return {
-    job_id: request.job_id,
-    request_id: request.request_id,
-    status: "success",
-    result: { ok: true },
-  };
+  const { to, template } = request.params;
+
+  // Your email sending logic here
+  await sendEmail(to, template);
+
+  return { sent: true, to };
 });
 
 const runtime = new RunnerRuntime(registry);
 await runtime.runFromEnv();
 ```
 
-The orchestrator sets `RRQ_RUNNER_TCP_SOCKET` when launching runners. You
-can also run the runtime directly:
+### 4. Configure (`rrq.toml`)
 
-```bash
-RRQ_RUNNER_TCP_SOCKET=127.0.0.1:9000 node dist/runner_runtime.js
+```toml
+[rrq]
+redis_dsn = "redis://localhost:6379/0"
+default_runner_name = "node"
+
+[rrq.runners.node]
+type = "socket"
+cmd = ["node", "dist/runner.js"]
+tcp_socket = "127.0.0.1:9000"
+pool_size = 4
+max_in_flight = 10
 ```
 
-### OpenTelemetry (runner)
+### 5. Run
 
-```ts
-import { RunnerRuntime, Registry } from "rrq-ts";
-import { OtelTelemetry } from "rrq-ts";
+```bash
+# Install the RRQ orchestrator
+cargo install rrq
+# or download from releases
 
-const registry = new Registry();
+# Start the orchestrator (spawns runners automatically)
+rrq worker run --config rrq.toml
+```
+
+## Producer API
+
+### Enqueue Options
+
+```typescript
+interface EnqueueOptions {
+  params?: Record<string, unknown>;  // Job parameters
+  queueName?: string;                 // Target queue (default: "default")
+  jobId?: string;                     // Custom job ID
+  maxRetries?: number;                // Max retry attempts
+  jobTimeoutSeconds?: number;         // Execution timeout
+  resultTtlSeconds?: number;          // How long to keep results
+  deferUntil?: Date;                  // Schedule for specific time
+  deferBySeconds?: number;            // Delay execution
+  traceContext?: Record<string, string>;  // Distributed tracing
+}
+```
+
+### Unique Jobs (Idempotency)
+
+```typescript
+const jobId = await client.enqueueWithUniqueKey(
+  "process_order",
+  "order-123",  // unique key
+  { params: { orderId: "123" } }
+);
+```
+
+### Rate Limiting
+
+```typescript
+const jobId = await client.enqueueWithRateLimit("sync_user", {
+  params: { userId: "456" },
+  rateLimitKey: "user-456",
+  rateLimitSeconds: 60
+});
+
+if (jobId === null) {
+  console.log("Rate limited");
+}
+```
+
+### Debouncing
+
+```typescript
+await client.enqueueWithDebounce("save_document", {
+  params: { docId: "789" },
+  debounceKey: "doc-789",
+  debounceSeconds: 5
+});
+```
+
+### Job Status
+
+```typescript
+const status = await client.getJobStatus(jobId);
+console.log(status);
+```
+
+## Runner API
+
+### Handler Signature
+
+```typescript
+type Handler = (
+  request: ExecutionRequest,
+  signal: AbortSignal
+) => Promise<ExecutionOutcome | unknown> | ExecutionOutcome | unknown;
+```
+
+### Execution Request
+
+```typescript
+interface ExecutionRequest {
+  protocol_version: string;
+  job_id: string;
+  request_id: string;
+  function_name: string;
+  params: Record<string, unknown>;
+  context: {
+    job_id: string;
+    attempt: number;
+    queue_name: string;
+    enqueue_time: string;
+    deadline?: string | null;
+    trace_context?: Record<string, string> | null;
+    worker_id?: string | null;
+  };
+}
+```
+
+### Outcome Types
+
+```typescript
+// Success
+const success: ExecutionOutcome = {
+  job_id: jobId,
+  request_id: requestId,
+  status: "success",
+  result: { result: "data" },
+};
+
+// Failure (may be retried)
+const failure: ExecutionOutcome = {
+  job_id: jobId,
+  request_id: requestId,
+  status: "error",
+  error: { message: "Something went wrong" },
+};
+
+// Explicit retry after delay
+const retry: ExecutionOutcome = {
+  job_id: jobId,
+  request_id: requestId,
+  status: "retry",
+  error: { message: "Rate limited" },
+  retry_after_seconds: 60,
+};
+```
+
+### OpenTelemetry
+
+```typescript
+import { RunnerRuntime, Registry, OtelTelemetry } from "rrq-ts";
+
 const runtime = new RunnerRuntime(registry, new OtelTelemetry());
 await runtime.runFromEnv();
 ```
 
-See `docs/TELEMETRY.md` for end-to-end producer → runner tracing.
+## Producer FFI Setup
 
-## Build
+The producer uses a Rust FFI library for consistent behavior across languages. The library is loaded from:
 
-```bash
-bun run build
-```
+1. `RRQ_PRODUCER_LIB_PATH` environment variable
+2. `rrq-ts/bin/<platform>-<arch>/` (for published packages)
+3. `rrq-ts/bin/` (for development)
 
-## Tests
-
-```bash
-bun test
-```
-
-If you need the Rust FFI library built automatically:
+Build from source:
 
 ```bash
-sh ../scripts/with-producer-lib.sh -- sh -c "cd rrq-ts && bun test"
+cargo build -p rrq-producer --release
+# Copy to bin/darwin-arm64/ or bin/linux-x64/ as appropriate
 ```
 
-## Notes
+## Related Packages
 
-- Producer uses the Rust FFI library for enqueue semantics consistent with RRQ's
-  Rust/Python producers.
-- The runner implements the RRQ v1 socket protocol.
+| Package | Language | Purpose |
+|---------|----------|---------|
+| [rrq-ts](https://www.npmjs.com/package/rrq-ts) | TypeScript | Producer + runner (this package) |
+| [rrq](https://pypi.org/project/rrq/) | Python | Producer + runner |
+| [rrq](https://crates.io/crates/rrq) | Rust | Orchestrator binary |
+| [rrq-producer](https://crates.io/crates/rrq-producer) | Rust | Native producer |
+| [rrq-runner](https://crates.io/crates/rrq-runner) | Rust | Native runner |
+
+## Requirements
+
+- Node.js 20+ or Bun
+- Redis 5.0+
+- RRQ orchestrator binary
 
 ## License
 

@@ -103,7 +103,7 @@ Options:
 - `--limit` Max rows (default: 20)
 
 ### `rrq job replay <job_id>`
-Re-enqueue with original args/kwargs.
+Re-enqueue with original params.
 
 Options:
 - `--config` Path to `rrq.toml` (optional)
@@ -190,8 +190,8 @@ Submit a one-off job.
 
 Options:
 - `--config` Path to `rrq.toml` (optional)
-- `--args` JSON args array
-- `--kwargs` JSON kwargs object
+- `--args` JSON args array (deprecated; stored under `params.args`)
+- `--kwargs` JSON params object
 - `--queue` Queue name
 - `--delay` Delay in seconds
 

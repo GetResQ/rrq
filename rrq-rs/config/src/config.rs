@@ -281,6 +281,7 @@ fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
         return Ok(()); // No runners configured is valid (will error at worker startup)
     }
 
+    let default_pool_size = num_cpus::get();
     for (name, config) in &settings.runners {
         // Check for missing required fields
         if config.tcp_socket.is_none() {
@@ -301,7 +302,7 @@ fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
                 .with_context(|| format!("runner '{name}' has invalid tcp_socket '{socket}'"))?;
 
             // Validate port range is sufficient for pool_size
-            let pool_size = config.pool_size.unwrap_or(1);
+            let pool_size = config.pool_size.unwrap_or(default_pool_size);
             let max_port = spec.port as u32 + pool_size.saturating_sub(1) as u32;
             if max_port > u16::MAX as u32 {
                 return Err(anyhow::anyhow!(
@@ -566,5 +567,27 @@ mod tests {
         fs::write(&path, config).unwrap();
         let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
         assert!(err.to_string().contains("port range"));
+    }
+
+    #[test]
+    fn validate_runner_configs_uses_default_pool_size_for_port_range() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        [rrq.runners.python]
+        cmd = ["rrq-runner"]
+        tcp_socket = "127.0.0.1:65535"
+        "#;
+        fs::write(&path, config).unwrap();
+        let result = load_toml_settings(Some(path.to_str().unwrap()));
+        let default_pool_size = num_cpus::get();
+        if default_pool_size > 1 {
+            let err = result.unwrap_err();
+            assert!(err.to_string().contains("port range"));
+        } else {
+            assert!(result.is_ok());
+        }
     }
 }

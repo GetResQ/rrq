@@ -37,8 +37,7 @@ describe("RRQClient producer integration", () => {
 
   it("enqueues job and stores it in Redis", async () => {
     const jobId = await client.enqueue("handler", {
-      args: [1],
-      kwargs: { ok: true },
+      params: { n: 1, ok: true },
     });
 
     const jobKey = `${CONSTANTS.job_key_prefix}${jobId}`;

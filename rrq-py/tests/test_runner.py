@@ -28,8 +28,7 @@ async def test_python_runner_context_includes_trace_and_deadline() -> None:
         request_id="req-ctx",
         job_id="job-ctx",
         function_name="echo",
-        args=[],
-        kwargs={},
+        params={},
         context=ExecutionContext(
             job_id="job-ctx",
             attempt=2,

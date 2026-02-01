@@ -553,8 +553,8 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
         }
     };
 
-    let kwargs = job
-        .job_kwargs
+    let params = job
+        .job_params
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
@@ -563,8 +563,7 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
         request_id: Uuid::new_v4().to_string(),
         job_id: job.id.clone(),
         function_name: handler_name,
-        args: job.job_args.clone(),
-        kwargs,
+        params,
         context: ExecutionContext {
             job_id: job.id.clone(),
             attempt: attempt as u32,
@@ -1045,8 +1044,7 @@ async fn cron_loop(
         struct DueCronJob {
             index: usize,
             function_name: String,
-            args: Vec<Value>,
-            kwargs: serde_json::Map<String, Value>,
+            params: serde_json::Map<String, Value>,
             queue_name: Option<String>,
             unique_key: Option<String>,
         }
@@ -1076,8 +1074,7 @@ async fn cron_loop(
                 due.push(DueCronJob {
                     index,
                     function_name: job.function_name.clone(),
-                    args: job.args.clone(),
-                    kwargs: job.kwargs.clone(),
+                    params: job.params.clone(),
                     queue_name: job.queue_name.clone(),
                     unique_key,
                 });
@@ -1109,12 +1106,7 @@ async fn cron_loop(
                     job_id: None,
                 };
                 if let Err(err) = client
-                    .enqueue(
-                        &due.function_name,
-                        due.args.clone(),
-                        due.kwargs.clone(),
-                        options,
-                    )
+                    .enqueue(&due.function_name, due.params.clone(), options)
                     .await
                 {
                     tracing::error!("cron enqueue failed for {}: {err}", due.function_name);
@@ -1252,8 +1244,7 @@ mod tests {
         Job {
             id: Job::new_id(),
             function_name: "task".to_string(),
-            job_args: vec![],
-            job_kwargs: serde_json::Map::new(),
+            job_params: serde_json::Map::new(),
             enqueue_time: Utc::now(),
             start_time: None,
             status: JobStatus::Pending,
@@ -1571,7 +1562,7 @@ mod tests {
                 ..Default::default()
             };
             let _ = client
-                .enqueue("task", Vec::new(), serde_json::Map::new(), options)
+                .enqueue("task", serde_json::Map::new(), options)
                 .await
                 .unwrap();
         }
@@ -1582,7 +1573,7 @@ mod tests {
                 ..Default::default()
             };
             let _ = client
-                .enqueue("task", Vec::new(), serde_json::Map::new(), options)
+                .enqueue("task", serde_json::Map::new(), options)
                 .await
                 .unwrap();
         }
@@ -1674,12 +1665,7 @@ mod tests {
         runners.insert("test".to_string(), runner);
         let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
         let job = client
-            .enqueue(
-                "success",
-                Vec::new(),
-                serde_json::Map::new(),
-                EnqueueOptions::default(),
-            )
+            .enqueue("success", serde_json::Map::new(), EnqueueOptions::default())
             .await
             .unwrap();
         let mut worker = RRQWorker::new(
@@ -1718,12 +1704,7 @@ mod tests {
         runners.insert("test".to_string(), runner);
         let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
         let job = client
-            .enqueue(
-                "retry",
-                Vec::new(),
-                serde_json::Map::new(),
-                EnqueueOptions::default(),
-            )
+            .enqueue("retry", serde_json::Map::new(), EnqueueOptions::default())
             .await
             .unwrap();
         let mut worker = RRQWorker::new(
@@ -1769,7 +1750,7 @@ mod tests {
             ..Default::default()
         };
         let job = client
-            .enqueue("timeout", Vec::new(), serde_json::Map::new(), options)
+            .enqueue("timeout", serde_json::Map::new(), options)
             .await
             .unwrap();
         let mut worker = RRQWorker::new(

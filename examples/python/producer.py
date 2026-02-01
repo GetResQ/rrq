@@ -35,14 +35,20 @@ async def main() -> None:
 
     try:
         for i in range(args.count):
-            await client.enqueue("quick_task", {"args": [f"msg-{i}"]})
-        await client.enqueue("slow_task", {"args": [1.0]})
+            await client.enqueue(
+                "quick_task",
+                {"params": {"message": f"msg-{i}", "source": "python"}},
+            )
+        await client.enqueue("slow_task", {"params": {"seconds": 1.0}})
         await client.enqueue("error_task", {})
-        await client.enqueue("retry_task", {"args": [2]})
+        await client.enqueue("retry_task", {"params": {"until_attempt": 2}})
 
         rust_count = args.rust_count or (1 if args.include_rust else 0)
         for i in range(rust_count):
-            await client.enqueue("rust#echo", {"kwargs": {"hello": f"from python {i}"}})
+            await client.enqueue(
+                "rust#echo",
+                {"params": {"hello": f"from python {i}"}},
+            )
     finally:
         await client.close()
 

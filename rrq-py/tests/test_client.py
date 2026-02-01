@@ -55,11 +55,10 @@ async def test_enqueue_job_writes_job_and_queue(
     rrq_client: RRQClient, redis_for_client_tests: AsyncRedis
 ) -> None:
     func_name = "test_function_client"
-    args_ = [1, "hello"]
 
     job_id = await rrq_client.enqueue(
         func_name,
-        {"args": args_, "kwargs": {"world": True}},
+        {"params": {"a": 1, "b": "hello", "world": True}},
     )
 
     job_key = f"{JOB_KEY_PREFIX}{job_id}"
@@ -164,7 +163,7 @@ async def test_enqueue_with_user_specified_job_id(
 
     with pytest.raises(ValueError):
         await rrq_client.enqueue(
-            func_name, {"job_id": user_job_id, "args": ["new_arg"]}
+            func_name, {"job_id": user_job_id, "params": {"new_arg": 1}}
         )
 
 
@@ -206,7 +205,7 @@ async def test_enqueue_with_unique_key_idempotent(
     assert idempotency_value is not None
 
     job2 = await rrq_client.enqueue(
-        func_name, {"unique_key": unique_key, "args": ["different_arg"]}
+        func_name, {"unique_key": unique_key, "params": {"different_arg": 1}}
     )
     assert job2 == job1
 

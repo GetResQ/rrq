@@ -83,11 +83,12 @@ pub(crate) async fn debug_generate_jobs(
         let mut job = Job {
             id: job_id,
             function_name: function_name.to_string(),
-            job_args: vec![
-                Value::String(format!("arg_{i}")),
-                Value::from(rng.random_range(1..=100) as i64),
-            ],
-            job_kwargs: serde_json::Map::from_iter([
+            job_params: serde_json::Map::from_iter([
+                ("arg".to_string(), Value::String(format!("arg_{i}"))),
+                (
+                    "count".to_string(),
+                    Value::from(rng.random_range(1..=100) as i64),
+                ),
                 (
                     "user_id".to_string(),
                     Value::from(rng.random_range(1..=1000) as i64),
@@ -261,29 +262,36 @@ pub(crate) async fn debug_submit(
     let store = JobStore::new(settings.clone()).await?;
     let mut client = RRQClient::new(settings.clone(), store.clone());
 
-    let args_value = args
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-        .unwrap_or(Value::Array(Vec::new()));
-    let kwargs_value = kwargs
+    // Parse params from kwargs JSON (args is deprecated but preserved under params["args"])
+    let params_value = kwargs
         .as_deref()
         .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
         .unwrap_or(Value::Object(serde_json::Map::new()));
 
-    let args_vec = match args_value {
-        Value::Array(values) => values,
-        _ => Vec::new(),
-    };
-    let kwargs_map = match kwargs_value {
+    let mut params_map = match params_value {
         Value::Object(map) => map,
         _ => serde_json::Map::new(),
     };
 
+    if let Some(raw) = args.as_deref() {
+        let args_value = serde_json::from_str::<Value>(raw)
+            .map_err(|err| anyhow::anyhow!("--args must be valid JSON array: {err}"))?;
+        let args_vec = match args_value {
+            Value::Array(values) => values,
+            _ => {
+                anyhow::bail!("--args must be a JSON array");
+            }
+        };
+        if params_map.contains_key("args") {
+            anyhow::bail!("--args conflicts with kwargs key 'args'");
+        }
+        params_map.insert("args".to_string(), Value::Array(args_vec));
+    }
+
     let job = client
         .enqueue(
             &function_name,
-            args_vec,
-            kwargs_map,
+            params_map,
             EnqueueOptions {
                 queue_name: Some(queue.unwrap_or(settings.default_queue_name.clone())),
                 defer_by: delay.map(chrono::Duration::seconds),
@@ -357,11 +365,16 @@ pub(crate) async fn debug_stress_test(
             let _ = client
                 .enqueue(
                     "stress_test_job",
-                    vec![Value::from((total_jobs + i) as i64)],
-                    serde_json::Map::from_iter([(
-                        "batch".to_string(),
-                        Value::from(chrono::Utc::now().timestamp()),
-                    )]),
+                    serde_json::Map::from_iter([
+                        (
+                            "job_number".to_string(),
+                            Value::from((total_jobs + i) as i64),
+                        ),
+                        (
+                            "batch".to_string(),
+                            Value::from(chrono::Utc::now().timestamp()),
+                        ),
+                    ]),
                     EnqueueOptions {
                         queue_name: Some(queue_name),
                         ..Default::default()
@@ -435,8 +448,7 @@ mod tests {
         let job = client
             .enqueue(
                 "cleanup",
-                vec![json!(1)],
-                serde_json::Map::new(),
+                serde_json::Map::from_iter([("n".to_string(), json!(1))]),
                 EnqueueOptions::default(),
             )
             .await?;

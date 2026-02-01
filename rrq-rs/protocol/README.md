@@ -4,15 +4,20 @@
 [![Documentation](https://docs.rs/rrq-protocol/badge.svg)](https://docs.rs/rrq-protocol)
 [![License](https://img.shields.io/crates/l/rrq-protocol.svg)](LICENSE)
 
-Protocol definitions for communication between the [RRQ](https://crates.io/crates/rrq) orchestrator and runner processes.
+**Wire protocol types for RRQ orchestrator-runner communication.**
 
-## Overview
+## What is RRQ?
 
-This crate defines the wire protocol used for socket communication between:
-- **RRQ Orchestrator** - dispatches jobs to runner processes
-- **RRQ Runner** - receives and executes job handlers
+RRQ (Reliable Redis Queue) is a distributed job queue with a Rust orchestrator and language-flexible workers. This crate defines the protocol used for socket communication between the orchestrator and runner processes.
 
-The protocol uses length-prefixed JSON frames over TCP connections.
+## When to Use This Crate
+
+Use `rrq-protocol` if you're:
+- Building a custom runner in a new language
+- Extending the RRQ protocol
+- Debugging orchestrator-runner communication
+
+For most use cases, use [`rrq-runner`](https://crates.io/crates/rrq-runner) which wraps this protocol.
 
 ## Installation
 
@@ -21,7 +26,18 @@ The protocol uses length-prefixed JSON frames over TCP connections.
 rrq-protocol = "0.9"
 ```
 
-## Protocol Messages
+## Protocol Overview
+
+Messages are length-prefixed JSON frames over TCP:
+
+```
+┌─────────────────┬──────────────────────────────┐
+│  Length (4B)    │  JSON Payload (N bytes)      │
+│  Big-endian u32 │  UTF-8 encoded               │
+└─────────────────┴──────────────────────────────┘
+```
+
+## Message Types
 
 ### ExecutionRequest
 
@@ -31,12 +47,11 @@ Sent from orchestrator to runner when dispatching a job:
 use rrq_protocol::{ExecutionRequest, ExecutionContext};
 
 let request = ExecutionRequest {
-    protocol_version: "1".to_string(),
+    protocol_version: "2".to_string(),
     request_id: "req-uuid".to_string(),
     job_id: "job-uuid".to_string(),
     function_name: "send_email".to_string(),
-    args: vec![serde_json::json!("user@example.com")],
-    kwargs: std::collections::HashMap::new(),
+    params: [("to".to_string(), json!("user@example.com"))].into(),
     context: ExecutionContext {
         job_id: "job-uuid".to_string(),
         attempt: 1,
@@ -51,43 +66,30 @@ let request = ExecutionRequest {
 
 ### ExecutionOutcome
 
-Returned from runner to orchestrator after job execution:
+Returned from runner after job execution:
 
 ```rust
 use rrq_protocol::ExecutionOutcome;
 
 // Success
-let outcome = ExecutionOutcome::success(
-    "job-uuid".to_string(),
-    "req-uuid".to_string(),
-    serde_json::json!({"sent": true}),
-);
+let outcome = ExecutionOutcome::success("job-id", "req-id", json!({"sent": true}));
 
 // Failure
-let outcome = ExecutionOutcome::failure(
-    "job-uuid".to_string(),
-    "req-uuid".to_string(),
-    "Connection timeout".to_string(),
-);
+let outcome = ExecutionOutcome::failure("job-id", "req-id", "Connection timeout");
 
 // Retry after delay
-let outcome = ExecutionOutcome::retry_after(
-    "job-uuid".to_string(),
-    "req-uuid".to_string(),
-    "Rate limited".to_string(),
-    60, // retry after 60 seconds
-);
+let outcome = ExecutionOutcome::retry_after("job-id", "req-id", "Rate limited", 60);
 ```
 
 ### CancelRequest
 
-Sent to runner to cancel an in-flight job:
+Sent to cancel an in-flight job:
 
 ```rust
 use rrq_protocol::CancelRequest;
 
 let cancel = CancelRequest {
-    protocol_version: "1".to_string(),
+    protocol_version: "2".to_string(),
     job_id: "job-uuid".to_string(),
     request_id: Some("req-uuid".to_string()),
     hard_kill: false,
@@ -96,58 +98,31 @@ let cancel = CancelRequest {
 
 ## Frame Encoding
 
-Messages are encoded as length-prefixed JSON:
-
-```
-┌─────────────────┬──────────────────────────────┐
-│  Length (4B)    │  JSON Payload (N bytes)      │
-│  Big-endian u32 │  UTF-8 encoded               │
-└─────────────────┴──────────────────────────────┘
-```
-
 ```rust
-use rrq_protocol::{encode_frame, RunnerMessage, ExecutionRequest};
+use rrq_protocol::{encode_frame, RunnerMessage};
 
-let message = RunnerMessage::Request {
-    payload: request,
-};
+let message = RunnerMessage::Request { payload: request };
 let frame: Vec<u8> = encode_frame(&message)?;
-// frame = [length_bytes...][json_bytes...]
-```
-
-## Runner Message Envelope
-
-All messages are wrapped in an `RunnerMessage` enum:
-
-```rust
-use rrq_protocol::RunnerMessage;
-
-// Three variants:
-let msg = RunnerMessage::Request { payload: request };
-let msg = RunnerMessage::Response { payload: outcome };
-let msg = RunnerMessage::Cancel { payload: cancel };
 ```
 
 ## Outcome Types
 
-The `outcome_type` field indicates how the job completed:
-
 | Type | Description |
 |------|-------------|
-| `success` | Job completed successfully |
+| `success` | Job completed |
 | `failure` | Job failed (may retry) |
-| `handler_not_found` | No handler registered for function |
-| `timeout` | Job exceeded deadline |
-| `cancelled` | Job was cancelled |
-| `retry_after` | Retry after specified delay |
+| `handler_not_found` | No handler for function |
+| `timeout` | Exceeded deadline |
+| `cancelled` | Job cancelled |
+| `retry_after` | Retry after delay |
 
 ## Related Crates
 
-| Crate | Description |
-|-------|-------------|
-| [`rrq`](https://crates.io/crates/rrq) | Job queue orchestrator |
-| [`rrq-producer`](https://crates.io/crates/rrq-producer) | Client for enqueuing jobs |
-| [`rrq-runner`](https://crates.io/crates/rrq-runner) | Runner runtime implementation |
+| Crate | Purpose |
+|-------|---------|
+| [`rrq`](https://crates.io/crates/rrq) | Orchestrator |
+| [`rrq-runner`](https://crates.io/crates/rrq-runner) | Runner runtime |
+| [`rrq-producer`](https://crates.io/crates/rrq-producer) | Job producer |
 
 ## License
 

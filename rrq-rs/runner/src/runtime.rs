@@ -204,7 +204,17 @@ where
                             "Runner busy: too many in-flight requests",
                         );
                         drop(active);
-                        let _ = response_tx.try_send(outcome);
+                        let send_result =
+                            timeout(RESPONSE_SEND_TIMEOUT, response_tx.send(outcome)).await;
+                        match send_result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(_)) => {
+                                return Err("runner response channel closed".into());
+                            }
+                            Err(_) => {
+                                return Err("runner response channel stalled".into());
+                            }
+                        }
                         continue;
                     }
                     active.insert(request_id.clone());
@@ -486,8 +496,7 @@ mod tests {
             request_id: "req-1".to_string(),
             job_id: "job-1".to_string(),
             function_name: function_name.to_string(),
-            args: vec![],
-            kwargs: std::collections::HashMap::new(),
+            params: std::collections::HashMap::new(),
             context: ExecutionContext {
                 job_id: "job-1".to_string(),
                 attempt: 1,
@@ -594,8 +603,7 @@ mod tests {
             request_id: "req-cancel".to_string(),
             job_id: "job-cancel".to_string(),
             function_name: "sleep".to_string(),
-            args: vec![],
-            kwargs: std::collections::HashMap::new(),
+            params: std::collections::HashMap::new(),
             context: ExecutionContext {
                 job_id: "job-cancel".to_string(),
                 attempt: 1,

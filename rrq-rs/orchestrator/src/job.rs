@@ -19,9 +19,7 @@ pub struct Job {
     pub id: String,
     pub function_name: String,
     #[serde(default)]
-    pub job_args: Vec<Value>,
-    #[serde(default)]
-    pub job_kwargs: serde_json::Map<String, Value>,
+    pub job_params: serde_json::Map<String, Value>,
 
     pub enqueue_time: DateTime<Utc>,
     #[serde(default)]

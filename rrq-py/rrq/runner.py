@@ -32,12 +32,11 @@ class ExecutionContext(BaseModel):
 class ExecutionRequest(BaseModel):
     """Job data sent to an runner."""
 
-    protocol_version: str = "1"
+    protocol_version: str = "2"
     request_id: str
     job_id: str
     function_name: str
-    args: list[Any] = Field(default_factory=list)
-    kwargs: dict[str, Any] = Field(default_factory=dict)
+    params: dict[str, Any] = Field(default_factory=dict)
     context: ExecutionContext
 
 
@@ -116,6 +115,10 @@ class PythonRunner:
                     "Handler for job %s returned successfully.", request.job_id
                 )
                 if isinstance(result, ExecutionOutcome):
+                    if not result.job_id:
+                        result.job_id = request.job_id
+                    if not result.request_id:
+                        result.request_id = request.request_id
                     span.success(duration_seconds=time.monotonic() - start_time)
                     return result
                 span.success(duration_seconds=time.monotonic() - start_time)

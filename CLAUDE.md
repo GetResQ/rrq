@@ -14,6 +14,35 @@ uv run ty check                   # Type check (must pass before commits)
 uv add <package>                  # Add dependency
 ```
 
+## Repo-Wide Testing
+```bash
+# Rust
+cd rrq-rs
+cargo fmt && cargo clippy
+cargo test
+
+# TypeScript (requires Bun)
+sh scripts/with-producer-lib.sh -- sh -c "cd rrq-ts && bun test"
+cd rrq-ts && bun run lint
+
+# Python (unit tests + warnings as errors)
+cd rrq-py
+uv run pytest
+uv run pytest -W error
+
+# Integration scenario runner (requires Redis + cargo + bun)
+sh scripts/with-producer-lib.sh -- uv run --project rrq-py python examples/integration_test.py
+# Smaller/isolated run (recommended if other RRQ processes are active)
+sh scripts/with-producer-lib.sh -- uv run --project rrq-py python examples/integration_test.py --count 100 --redis-dsn redis://localhost:6379/15
+```
+
+Notes:
+- `examples/integration_test.py` expects Redis running and an RRQ CLI binary
+  available (PATH or `rrq-py/rrq/bin/rrq`).
+- Use a dedicated Redis DB (`--redis-dsn redis://localhost:6379/15`) if any
+  other RRQ workers/executors are running to avoid protocol/version conflicts.
+- The `with-producer-lib.sh` wrapper builds and exports the producer FFI lib.
+
 ## Code Style
 - Python 3.11+, double quotes, 88 char lines
 - Type hints on all functions, Pydantic V2 for validation

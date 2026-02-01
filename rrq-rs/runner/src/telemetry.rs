@@ -32,12 +32,11 @@ mod tests {
 
     fn build_request() -> ExecutionRequest {
         ExecutionRequest {
-            protocol_version: "1".to_string(),
+            protocol_version: "2".to_string(),
             request_id: "req-1".to_string(),
             job_id: "job-1".to_string(),
             function_name: "handler".to_string(),
-            args: vec![],
-            kwargs: std::collections::HashMap::new(),
+            params: std::collections::HashMap::new(),
             context: ExecutionContext {
                 job_id: "job-1".to_string(),
                 attempt: 1,

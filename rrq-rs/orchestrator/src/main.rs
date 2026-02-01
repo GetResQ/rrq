@@ -620,7 +620,6 @@ while True:
         let job = client
             .enqueue(
                 "demo_job",
-                vec![],
                 serde_json::Map::new(),
                 EnqueueOptions::default(),
             )
@@ -683,7 +682,6 @@ while True:
         let cancel_job = client
             .enqueue(
                 "cancel_me",
-                vec![],
                 serde_json::Map::new(),
                 EnqueueOptions::default(),
             )

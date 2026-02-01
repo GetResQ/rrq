@@ -105,8 +105,7 @@ Schedule periodic jobs while a worker is running.
 [[rrq.cron_jobs]]
 function_name = "process_message"
 schedule = "0 * * * * *"
-args = ["cron payload"]
-kwargs = { source = "cron" }
+params = { payload = "cron payload", source = "cron" }
 queue_name = "default"
 unique = true
 ```
@@ -115,8 +114,7 @@ unique = true
 | --- | --- | --- | --- |
 | `function_name` | string | required | Handler name to enqueue. |
 | `schedule` | string | required | Cron expression with seconds (6 fields, UTC). |
-| `args` | array | `[]` | Positional args. |
-| `kwargs` | table | `{}` | Keyword args. |
+| `params` | table | `{}` | Job parameters. |
 | `queue_name` | string | — | Override target queue. |
 | `unique` | bool | `false` | Prevent duplicates with a per-function lock. |
 

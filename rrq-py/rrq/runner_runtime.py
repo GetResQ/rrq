@@ -28,7 +28,7 @@ MAX_IN_FLIGHT_PER_CONNECTION = 64
 
 
 class CancelRequest(BaseModel):
-    protocol_version: str = "1"
+    protocol_version: str = "2"
     job_id: str
     request_id: str | None = None
     hard_kill: bool = Field(default=False)
@@ -324,7 +324,7 @@ async def _handle_connection(
             if message_type == "request":
                 request = ExecutionRequest.model_validate(payload)
 
-                if request.protocol_version != "1":
+                if request.protocol_version != "2":
                     outcome = ExecutionOutcome(
                         job_id=request.job_id,
                         request_id=request.request_id,
@@ -371,7 +371,7 @@ async def _handle_connection(
 
             if message_type == "cancel":
                 cancel_request = CancelRequest.model_validate(payload)
-                if cancel_request.protocol_version != "1":
+                if cancel_request.protocol_version != "2":
                     continue
                 request_id = cancel_request.request_id
                 if request_id is None:

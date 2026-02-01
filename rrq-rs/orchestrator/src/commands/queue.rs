@@ -260,8 +260,7 @@ mod tests {
         Job {
             id: Job::new_id(),
             function_name: "do_work".to_string(),
-            job_args: vec![],
-            job_kwargs: serde_json::Map::new(),
+            job_params: serde_json::Map::new(),
             enqueue_time: Utc::now(),
             start_time: None,
             status,

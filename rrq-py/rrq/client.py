@@ -60,8 +60,7 @@ class RRQClient:
         options: dict[str, Any] | None = None,
     ) -> str:
         options = dict(options) if options else {}
-        args = list(options.pop("args", []))
-        kwargs = dict(options.pop("kwargs", {}))
+        params = dict(options.pop("params", {}))
 
         defer_until = options.get("defer_until")
         if isinstance(defer_until, datetime):
@@ -69,8 +68,7 @@ class RRQClient:
 
         request = {
             "function_name": function_name,
-            "args": args,
-            "kwargs": kwargs,
+            "params": params,
             "options": options,
         }
 
@@ -102,8 +100,7 @@ class RRQClient:
         merged = dict(options)
         request = {
             "function_name": function_name,
-            "args": list(merged.pop("args", [])),
-            "kwargs": dict(merged.pop("kwargs", {})),
+            "params": dict(merged.pop("params", {})),
             "options": merged,
             "mode": "rate_limit",
         }
@@ -121,8 +118,7 @@ class RRQClient:
         merged = dict(options)
         request = {
             "function_name": function_name,
-            "args": list(merged.pop("args", [])),
-            "kwargs": dict(merged.pop("kwargs", {})),
+            "params": dict(merged.pop("params", {})),
             "options": merged,
             "mode": "debounce",
         }

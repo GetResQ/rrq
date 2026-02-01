@@ -9,7 +9,8 @@ use tokio::sync::mpsc;
 use tokio::time::Duration;
 
 use rrq::runner::{
-    build_runners_from_settings, resolve_runner_max_in_flight, resolve_runner_pool_sizes,
+    build_runners_from_settings_filtered, determine_needed_runners, resolve_runner_max_in_flight,
+    resolve_runner_pool_sizes,
 };
 use rrq::worker::RRQWorker;
 use rrq::{load_toml_settings, resolve_config_source};
@@ -27,16 +28,34 @@ pub(crate) async fn run_worker(
         println!("missing RRQ config (provide --config or RRQ_CONFIG).");
     }
     let settings = load_toml_settings(config.as_deref())?;
+
+    // Determine which runners are needed based on the queues being listened to
+    let queues_slice = if queues.is_empty() {
+        None
+    } else {
+        Some(queues.as_slice())
+    };
+    let needed_runners = determine_needed_runners(&settings, queues_slice);
+
     let pool_sizes = resolve_runner_pool_sizes(&settings, watch_mode, None)?;
     let max_in_flight = resolve_runner_max_in_flight(&settings, watch_mode)?;
     let mut effective_concurrency = 0usize;
     for (name, pool_size) in &pool_sizes {
+        // Only count concurrency for runners we'll actually spawn
+        if !needed_runners.contains(name) {
+            continue;
+        }
         let in_flight = max_in_flight.get(name).copied().unwrap_or(1);
         effective_concurrency += pool_size.saturating_mul(in_flight);
     }
     let effective_concurrency = std::cmp::max(1, effective_concurrency);
-    let runners =
-        build_runners_from_settings(&settings, Some(&pool_sizes), Some(&max_in_flight)).await?;
+    let runners = build_runners_from_settings_filtered(
+        &settings,
+        Some(&pool_sizes),
+        Some(&max_in_flight),
+        Some(&needed_runners),
+    )
+    .await?;
     let queues = if queues.is_empty() {
         None
     } else {
@@ -267,18 +286,36 @@ pub(crate) async fn run_worker_watch(
             Some(settings) => settings,
             None => load_toml_settings(config.as_deref())?,
         };
+
+        // Determine which runners are needed based on the queues being listened to
+        let queues_slice = if queues.is_empty() {
+            None
+        } else {
+            Some(queues.as_slice())
+        };
+        let needed_runners = determine_needed_runners(&settings, queues_slice);
+
         let pool_sizes = resolve_runner_pool_sizes(&settings, true, None)?;
         let max_in_flight = resolve_runner_max_in_flight(&settings, true)?;
         let mut effective_concurrency = 0usize;
         for (name, pool_size) in &pool_sizes {
+            // Only count concurrency for runners we'll actually spawn
+            if !needed_runners.contains(name) {
+                continue;
+            }
             let in_flight = max_in_flight.get(name).copied().unwrap_or(1);
             effective_concurrency += pool_size.saturating_mul(in_flight);
         }
         let effective_concurrency = std::cmp::max(1, effective_concurrency);
         let mut settings = settings;
         settings.worker_shutdown_grace_period_seconds = 0.0;
-        let runners =
-            build_runners_from_settings(&settings, Some(&pool_sizes), Some(&max_in_flight)).await?;
+        let runners = build_runners_from_settings_filtered(
+            &settings,
+            Some(&pool_sizes),
+            Some(&max_in_flight),
+            Some(&needed_runners),
+        )
+        .await?;
         let queue_arg = if queues.is_empty() {
             None
         } else {

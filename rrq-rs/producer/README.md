@@ -4,16 +4,11 @@
 [![Documentation](https://docs.rs/rrq-producer/badge.svg)](https://docs.rs/rrq-producer)
 [![License](https://img.shields.io/crates/l/rrq-producer.svg)](LICENSE)
 
-A production-ready Rust client for enqueuing jobs into [RRQ](https://crates.io/crates/rrq) (Redis Reliable Queue).
+**Rust client for enqueuing jobs into RRQ**, the distributed job queue with a Rust orchestrator.
 
-## Features
+## What is RRQ?
 
-- **Auto-reconnecting connections** via Redis ConnectionManager
-- **Atomic job enqueue** operations with Redis pipelines
-- **Job result polling** with configurable timeout
-- **Trace context propagation** for distributed tracing (OpenTelemetry, Datadog)
-- **Trait-based design** for easy mocking in tests
-- **TLS support** for secure Redis connections
+RRQ (Reliable Redis Queue) is a distributed job queue that separates the complex scheduling logic (retries, timeouts, locking) into a Rust orchestrator while letting you write job handlers in Python, TypeScript, or Rust. This crate lets you enqueue jobs from Rust applications.
 
 ## Installation
 
@@ -25,160 +20,110 @@ rrq-producer = "0.9"
 ## Quick Start
 
 ```rust
-use rrq_producer::{Producer, EnqueueOptions};
-use serde_json::{json, Map};
+use rrq_producer::Producer;
+use serde_json::json;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Connect to Redis
     let producer = Producer::new("redis://localhost:6379/0").await?;
 
-    // Enqueue a job
     let job_id = producer.enqueue(
-        "send_email",                           // handler function name
-        vec![json!("user@example.com")],        // positional args
-        Map::new(),                             // keyword args
-        EnqueueOptions::default(),
+        "send_email",
+        json!({
+            "to": "user@example.com",
+            "template": "welcome"
+        }),
     ).await?;
 
-    println!("Enqueued job: {}", job_id);
+    println!("Enqueued: {}", job_id);
     Ok(())
 }
 ```
 
+## Features
+
+- **Auto-reconnecting** - Redis connections recover automatically
+- **Atomic operations** - Jobs enqueue reliably with Redis pipelines
+- **Job status polling** - Check job progress and results
+- **Distributed tracing** - OpenTelemetry and Datadog context propagation
+- **TLS support** - Secure Redis connections (`rediss://`)
+- **Trait-based design** - Easy mocking for tests
+
 ## Enqueue Options
 
-Customize job behavior with `EnqueueOptions`:
-
 ```rust
-use rrq_producer::EnqueueOptions;
+use rrq_producer::{Producer, EnqueueOptions};
 use chrono::{Utc, Duration};
-use std::collections::HashMap;
 
 let options = EnqueueOptions {
-    // Target a specific queue (default: "default")
     queue_name: Some("high-priority".to_string()),
-
-    // Custom job ID (default: auto-generated UUID)
-    job_id: Some("order-123-confirmation".to_string()),
-
-    // Max retry attempts on failure (default: 3)
+    job_id: Some("order-123".to_string()),
     max_retries: Some(5),
-
-    // Job execution timeout in seconds (default: 300)
     job_timeout_seconds: Some(600),
-
-    // How long to keep job results in Redis (default: 3600)
     result_ttl_seconds: Some(86400),
-
-    // Schedule job for future execution
     scheduled_time: Some(Utc::now() + Duration::hours(1)),
-
-    // Trace context for distributed tracing
-    trace_context: Some(HashMap::from([
-        ("traceparent".to_string(), "00-abc123-def456-01".to_string()),
-    ])),
-
     ..Default::default()
 };
+
+let job_id = producer.enqueue_with_options("process_order", json!({}), options).await?;
 ```
 
-## Check Job Status (Non-blocking)
+## Check Job Status
 
 ```rust
 if let Some(result) = producer.get_job_status(&job_id).await? {
     match result.status {
-        JobStatus::Pending => println!("Job is waiting in queue"),
-        JobStatus::Active => println!("Job is currently running"),
-        JobStatus::Completed => println!("Job finished: {:?}", result.result),
-        JobStatus::Failed => println!("Job failed: {:?}", result.last_error),
-        JobStatus::Retrying => println!("Job is being retried"),
-        JobStatus::Unknown => println!("Unknown status"),
+        JobStatus::Pending => println!("Waiting in queue"),
+        JobStatus::Active => println!("Running"),
+        JobStatus::Completed => println!("Done: {:?}", result.result),
+        JobStatus::Failed => println!("Failed: {:?}", result.last_error),
+        _ => {}
     }
-} else {
-    println!("Job not found");
-}
-```
-
-## Custom Configuration
-
-```rust
-use rrq_producer::{Producer, ProducerConfig};
-
-let config = ProducerConfig {
-    queue_name: "default".to_string(),
-    max_retries: 3,
-    job_timeout_seconds: 300,
-    result_ttl_seconds: 3600,
-};
-
-let producer = Producer::with_config("redis://localhost:6379/0", config).await?;
-```
-
-## Testing with Mocks
-
-The `ProducerHandle` trait enables easy mocking:
-
-```rust
-use rrq_producer::{ProducerHandle, EnqueueOptions, JobResult};
-use async_trait::async_trait;
-
-struct MockProducer;
-
-#[async_trait]
-impl ProducerHandle for MockProducer {
-    async fn enqueue(
-        &self,
-        function_name: &str,
-        args: Vec<serde_json::Value>,
-        kwargs: serde_json::Map<String, serde_json::Value>,
-        options: EnqueueOptions,
-    ) -> anyhow::Result<String> {
-        Ok("mock-job-id".to_string())
-    }
-
 }
 ```
 
 ## Distributed Tracing
 
-Pass trace context to propagate spans across services:
-
 ```rust
 use std::collections::HashMap;
-use rrq_producer::EnqueueOptions;
 
-// Build trace context from your tracing library
-let mut trace_context = HashMap::new();
-trace_context.insert("traceparent".to_string(), "00-abc-def-01".to_string());
-trace_context.insert("tracestate".to_string(), "vendor=value".to_string());
-
-// For Datadog
-trace_context.insert("x-datadog-trace-id".to_string(), "123456".to_string());
-trace_context.insert("x-datadog-parent-id".to_string(), "789".to_string());
+let mut trace = HashMap::new();
+trace.insert("traceparent".to_string(), "00-abc-def-01".to_string());
 
 let options = EnqueueOptions {
-    trace_context: Some(trace_context),
+    trace_context: Some(trace),
     ..Default::default()
 };
 ```
 
 ## TLS Connections
 
-Connect to Redis with TLS (e.g., AWS ElastiCache):
+```rust
+let producer = Producer::new("rediss://my-cluster.cache.amazonaws.com:6379").await?;
+```
+
+## Testing with Mocks
 
 ```rust
-// TLS is automatically enabled for rediss:// URLs
-let producer = Producer::new("rediss://my-cluster.cache.amazonaws.com:6379").await?;
+use rrq_producer::ProducerHandle;
+
+struct MockProducer;
+
+#[async_trait]
+impl ProducerHandle for MockProducer {
+    async fn enqueue(&self, function_name: &str, params: Value, options: EnqueueOptions) -> anyhow::Result<String> {
+        Ok("mock-job-id".to_string())
+    }
+}
 ```
 
 ## Related Crates
 
-| Crate | Description |
-|-------|-------------|
-| [`rrq`](https://crates.io/crates/rrq) | Job queue orchestrator (worker) |
-| [`rrq-runner`](https://crates.io/crates/rrq-runner) | Runner runtime for job handlers |
-| [`rrq-protocol`](https://crates.io/crates/rrq-protocol) | Protocol definitions |
+| Crate | Purpose |
+|-------|---------|
+| [`rrq`](https://crates.io/crates/rrq) | Orchestrator (runs workers) |
+| [`rrq-runner`](https://crates.io/crates/rrq-runner) | Build Rust job handlers |
+| [`rrq-protocol`](https://crates.io/crates/rrq-protocol) | Wire protocol types |
 
 ## License
 

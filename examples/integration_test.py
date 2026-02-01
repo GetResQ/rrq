@@ -126,19 +126,19 @@ def _run(
 
 
 def _resolve_rrq_cmd() -> list[str]:
-    rrq_path = shutil.which("rrq")
-    if rrq_path:
-        return [rrq_path]
-
     repo_root = Path(__file__).resolve().parents[1]
     repo_candidates = [
-        repo_root / "rrq-py" / "rrq" / "bin" / "rrq",
         repo_root / "rrq-rs" / "target" / "release" / "rrq",
         repo_root / "rrq-rs" / "target" / "debug" / "rrq",
+        repo_root / "rrq-py" / "rrq" / "bin" / "rrq",
     ]
     for candidate in repo_candidates:
         if candidate.exists():
             return [str(candidate)]
+
+    rrq_path = shutil.which("rrq")
+    if rrq_path:
+        return [rrq_path]
 
     raise SystemExit(
         "rrq CLI not found on PATH. Install it via `pip install rrq` or "
@@ -317,7 +317,7 @@ def main() -> int:
         default=os.getenv("RRQ_REDIS_DSN", "redis://localhost:6379/3"),
         help="Redis DSN (default: redis://localhost:6379/3)",
     )
-    parser.add_argument("--count", type=int, default=1000, help="Job count per run")
+    parser.add_argument("--count", type=int, default=100, help="Job count per run")
     parser.add_argument(
         "--timeout",
         type=float,

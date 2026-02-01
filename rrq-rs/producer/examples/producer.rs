@@ -16,15 +16,14 @@ async fn main() -> Result<()> {
     let producer = Producer::new(redis_dsn).await?;
 
     for i in 0..count {
-        let args = vec![json!(format!("from-rust-{i}"))];
-        let mut kwargs: Map<String, Value> = Map::new();
-        kwargs.insert("source".to_string(), json!("rust"));
+        let mut params: Map<String, Value> = Map::new();
+        params.insert("message".to_string(), json!(format!("from-rust-{i}")));
+        params.insert("source".to_string(), json!("rust"));
 
         producer
             .enqueue(
                 &function_name,
-                args,
-                kwargs,
+                params,
                 EnqueueOptions {
                     queue_name: Some(queue_name.clone()),
                     ..Default::default()
