@@ -1,6 +1,6 @@
 [package]
 name = "rrq-config"
-version = "0.9.10"
+version = "0.9.11"
 edition = "2024"
 license = "Apache-2.0"
 description = "RRQ configuration loader and settings types."
@@ -18,7 +18,7 @@ cron = "0.15.0"
 dotenvy = "0.15.7"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-toml = "0.9.11"
+toml = "0.8"
 num_cpus = "1.17.0"
 
 [dev-dependencies]
