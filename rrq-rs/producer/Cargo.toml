@@ -19,7 +19,8 @@ crate-type = ["rlib", "cdylib"]
 anyhow = "1.0.100"
 async-trait = "0.1.89"
 chrono = { version = "0.4.43", features = ["serde"] }
-redis = { version = "1.0.2", features = ["tokio-comp", "tokio-native-tls-comp", "connection-manager"] }
+redis = { version = "1.0.2", features = ["tokio-comp", "tokio-rustls-comp", "tls-rustls-webpki-roots", "connection-manager"] }
+rustls = { version = "0.23", features = ["ring"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.149"
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "sync", "time"] }

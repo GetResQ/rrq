@@ -6,8 +6,38 @@
 //! - Job result polling with timeout
 //! - Trace context propagation support
 //! - Trait-based design for easy mocking in tests
+//!
+//! # TLS Support
+//!
+//! This library uses rustls with embedded Mozilla CA roots for TLS connections.
+//! Before creating a Producer with a TLS Redis URL, you must initialize the
+//! crypto provider by calling [`init_crypto_provider`] once at application startup.
+//!
+//! ```no_run
+//! rrq_producer::init_crypto_provider();
+//! ```
 
 use anyhow::{Context, Result};
+use std::sync::Once;
+
+static CRYPTO_PROVIDER_INIT: Once = Once::new();
+
+/// Initialize the rustls crypto provider (ring) for TLS connections.
+///
+/// This must be called once before creating a Producer with a TLS Redis URL.
+/// It is safe to call multiple times; subsequent calls are no-ops.
+///
+/// # Example
+///
+/// ```no_run
+/// rrq_producer::init_crypto_provider();
+/// // Now you can create producers with TLS Redis URLs
+/// ```
+pub fn init_crypto_provider() {
+    CRYPTO_PROVIDER_INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use redis::AsyncCommands;

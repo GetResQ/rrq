@@ -5,6 +5,14 @@ use tracing_subscriber::EnvFilter;
 mod cli_utils;
 mod commands;
 
+/// Initialize the rustls crypto provider (ring).
+/// This must be called once before any TLS connections are made.
+fn init_crypto_provider() {
+    // Use the ring crypto provider for rustls.
+    // This is required for rustls 0.22+ and embeds CA roots via webpki-roots.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 use commands::{
     DlqListOptions, DlqRequeueOptions, check_workers, debug_clear, debug_generate_jobs,
     debug_generate_workers, debug_stress_test, debug_submit, dlq_inspect, dlq_list, dlq_requeue,
@@ -466,6 +474,7 @@ async fn dispatch_command(command: Commands) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_crypto_provider();
     init_tracing();
     let cli = Cli::parse();
     dispatch_command(cli.command).await

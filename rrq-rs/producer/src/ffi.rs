@@ -11,8 +11,18 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::panic::{self, AssertUnwindSafe};
 use std::ptr;
-use std::sync::mpsc;
+use std::sync::{Once, mpsc};
 use std::time::Duration;
+
+static CRYPTO_PROVIDER_INIT: Once = Once::new();
+
+/// Initialize the rustls crypto provider (ring).
+/// This is called once per process before any TLS connections are made.
+fn init_crypto_provider() {
+    CRYPTO_PROVIDER_INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
 
 const MAX_MILLIS: i64 = i64::MAX / 2;
 
@@ -240,6 +250,7 @@ pub extern "C" fn rrq_producer_new(
     config_json: *const c_char,
     error_out: *mut *mut c_char,
 ) -> *mut ProducerHandle {
+    init_crypto_provider();
     with_unwind(error_out, || {
         let payload = take_cstr(config_json)?;
         let config_payload: ProducerConfigPayload = serde_json::from_str(&payload)
@@ -288,6 +299,7 @@ pub extern "C" fn rrq_producer_new_from_toml(
     config_path: *const c_char,
     error_out: *mut *mut c_char,
 ) -> *mut ProducerHandle {
+    init_crypto_provider();
     with_unwind(error_out, || {
         let config_path = if config_path.is_null() {
             None
