@@ -7,7 +7,6 @@ use std::sync::{
 };
 
 use crate::constants::DEFAULT_RUNNER_CONNECT_TIMEOUT_MS;
-use tracing::{debug, info, warn};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rrq_config::{RRQSettings, TcpSocketSpec, parse_tcp_socket};
@@ -21,6 +20,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, timeout};
+use tracing::{debug, info, warn};
 
 const ENV_RUNNER_TCP_SOCKET: &str = "RRQ_RUNNER_TCP_SOCKET";
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
@@ -342,8 +342,7 @@ impl SocketRunnerPool {
                     }
                     info!(
                         elapsed_ms = elapsed.as_millis() as u64,
-                        attempt,
-                        "Runner socket connected successfully"
+                        attempt, "Runner socket connected successfully"
                     );
                     return Ok(());
                 }
@@ -363,7 +362,7 @@ impl SocketRunnerPool {
                         );
                         return Err(err.into());
                     }
-                    if attempt % 10 == 0 {
+                    if attempt.is_multiple_of(10) {
                         debug!(
                             elapsed_ms = elapsed.as_millis() as u64,
                             attempt,
