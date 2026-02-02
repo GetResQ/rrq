@@ -466,11 +466,6 @@ async fn dispatch_command(command: Commands) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Install crypto provider for TLS (required for rediss:// connections)
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .map_err(|_| anyhow::anyhow!("Failed to install rustls crypto provider"))?;
-
     init_tracing();
     let cli = Cli::parse();
     dispatch_command(cli.command).await

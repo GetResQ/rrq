@@ -19,23 +19,11 @@ use rrq_config::defaults::{
 };
 use serde_json::{Map, Value};
 use std::collections::HashMap;
-use std::sync::Once;
 use std::time::Duration;
 use uuid::Uuid;
 
 #[allow(dead_code)]
 mod ffi;
-
-static CRYPTO_PROVIDER_INIT: Once = Once::new();
-
-/// Ensures the rustls crypto provider is installed for TLS connections (rediss://).
-/// This is idempotent and safe to call multiple times.
-fn ensure_crypto_provider() {
-    CRYPTO_PROVIDER_INIT.call_once(|| {
-        // Ignore errors - if already installed by the application, that's fine
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
-}
 
 const JOB_KEY_PREFIX: &str = "rrq:job:";
 const QUEUE_KEY_PREFIX: &str = "rrq:queue:";
@@ -146,9 +134,6 @@ impl Producer {
 
     /// Create a new Producer with custom configuration.
     pub async fn with_config(redis_dsn: impl AsRef<str>, config: ProducerConfig) -> Result<Self> {
-        // Ensure TLS crypto provider is available for rediss:// connections
-        ensure_crypto_provider();
-
         let client = redis::Client::open(redis_dsn.as_ref())
             .with_context(|| "failed to create Redis client")?;
         let manager = ConnectionManager::new(client)
@@ -1046,14 +1031,6 @@ mod tests {
         // Non-existent job
         let result = producer.get_job_status("non-existent").await.unwrap();
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn ensure_crypto_provider_is_idempotent() {
-        // Should not panic when called multiple times
-        ensure_crypto_provider();
-        ensure_crypto_provider();
-        ensure_crypto_provider();
     }
 
     #[tokio::test]

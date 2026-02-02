@@ -7,6 +7,7 @@ use std::sync::{
 };
 
 use crate::constants::DEFAULT_RUNNER_CONNECT_TIMEOUT_MS;
+use tracing::{debug, info, warn};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rrq_config::{RRQSettings, TcpSocketSpec, parse_tcp_socket};
@@ -289,17 +290,40 @@ impl SocketRunnerPool {
     }
 
     async fn connect_socket(&self, socket: &RunnerSocketTarget, child: &mut Child) -> Result<()> {
-        let deadline = Instant::now() + self.connect_timeout;
+        let start = Instant::now();
+        let deadline = start + self.connect_timeout;
         let mut last_error: Option<anyhow::Error> = None;
         let mut delay = Duration::from_millis(10);
         let max_delay = Duration::from_millis(200);
+        let mut attempt = 0u32;
+
+        info!(
+            timeout_ms = self.connect_timeout.as_millis() as u64,
+            "Waiting for runner socket to be ready..."
+        );
+
         loop {
+            attempt += 1;
+            let elapsed = start.elapsed();
+
             if let Ok(Some(status)) = child.try_wait() {
+                warn!(
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    attempt,
+                    exit_status = %status,
+                    "Runner process exited before socket ready"
+                );
                 return Err(anyhow::anyhow!(
                     "runner exited before socket ready ({status})"
                 ));
             }
             if Instant::now() >= deadline {
+                warn!(
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    attempt,
+                    last_error = ?last_error,
+                    "Runner socket connect timeout exceeded"
+                );
                 return Err(anyhow::anyhow!(
                     "runner socket not ready: {}",
                     last_error
@@ -316,6 +340,11 @@ impl SocketRunnerPool {
                         ));
                         continue;
                     }
+                    info!(
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        attempt,
+                        "Runner socket connected successfully"
+                    );
                     return Ok(());
                 }
                 Err(err) => {
@@ -326,7 +355,21 @@ impl SocketRunnerPool {
                             | std::io::ErrorKind::ConnectionReset
                     );
                     if !retryable {
+                        warn!(
+                            elapsed_ms = elapsed.as_millis() as u64,
+                            attempt,
+                            error = %err,
+                            "Non-retryable socket connect error"
+                        );
                         return Err(err.into());
+                    }
+                    if attempt % 10 == 0 {
+                        debug!(
+                            elapsed_ms = elapsed.as_millis() as u64,
+                            attempt,
+                            error = %err,
+                            "Still waiting for runner socket..."
+                        );
                     }
                     last_error = Some(err.into());
                 }
