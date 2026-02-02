@@ -303,3 +303,9 @@ jobs:
         working-directory: rrq-rs
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+
+      - name: Publish rrq
+        run: cargo publish -p rrq
+        working-directory: rrq-rs
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}

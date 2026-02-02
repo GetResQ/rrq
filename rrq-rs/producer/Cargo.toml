@@ -1,6 +1,6 @@
 [package]
 name = "rrq-producer"
-version = "0.9.11"
+version = "0.9.12"
 edition = "2024"
 license = "Apache-2.0"
 description = "RRQ producer client for enqueuing jobs into Redis."
@@ -24,7 +24,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.149"
 tokio = { version = "1.49.0", features = ["rt-multi-thread", "sync", "time"] }
 uuid = { version = "1.20.0", features = ["v4"] }
-rrq-config = { version = "0.9.11", path = "../config" }
+rrq-config = { version = "0.9.12", path = "../config" }
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "time"] }
