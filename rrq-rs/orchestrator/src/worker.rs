@@ -3,6 +3,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Instant;
 
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
@@ -11,6 +12,7 @@ use rrq_protocol::{ExecutionContext, ExecutionOutcome, ExecutionRequest, Outcome
 use serde_json::Value;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{Duration, sleep, timeout};
+use tracing::field::Empty;
 use uuid::Uuid;
 
 use crate::client::{EnqueueOptions, RRQClient};
@@ -18,6 +20,7 @@ use crate::constants::DEFAULT_WORKER_ID_PREFIX;
 use crate::job::{Job, JobStatus};
 use crate::runner::Runner;
 use crate::store::JobStore;
+use crate::telemetry;
 use rrq_config::CronJob;
 use rrq_config::RRQSettings;
 
@@ -479,13 +482,28 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
         running_jobs,
         running_aborts,
     } = context;
+    let attempt = job.current_retries + 1;
+    let started_at = Instant::now();
     let span = tracing::info_span!(
         "rrq.job",
-        job_id = %job.id,
-        function_name = %job.function_name,
-        queue_name = %queue_name,
-        attempt = job.current_retries + 1
+        "span.kind" = "consumer",
+        "messaging.system" = "redis",
+        "messaging.destination.name" = %queue_name,
+        "messaging.operation" = "process",
+        "rrq.job_id" = %job.id,
+        "rrq.function" = %job.function_name,
+        "rrq.queue" = %queue_name,
+        "rrq.attempt" = attempt,
+        "rrq.worker_id" = %worker_id,
+        "rrq.outcome" = Empty,
+        "rrq.duration_ms" = Empty,
+        "rrq.retry_delay_ms" = Empty,
+        "rrq.error_message" = Empty,
+        "rrq.error_type" = Empty
     );
+    if let Some(trace_context) = job.trace_context.as_ref() {
+        telemetry::set_parent_from_trace_context(&span, trace_context);
+    }
     let _enter = span.enter();
     let job_timeout = job
         .job_timeout_seconds
@@ -503,7 +521,6 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
         .await?;
         return Ok(());
     }
-    let attempt = job.current_retries + 1;
     let deadline = Utc::now() + chrono::Duration::seconds(job_timeout);
 
     let (runner_name, handler_name) = split_runner_name(&job.function_name);
@@ -588,17 +605,44 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
     )
     .await;
 
+    let duration_ms = started_at.elapsed().as_secs_f64() * 1000.0;
     let outcome_result = match exec_result {
         Ok(Ok(outcome)) => {
-            handle_execution_outcome(&job, &queue_name, &settings, &mut job_store, outcome).await
+            handle_execution_outcome(
+                &job,
+                &queue_name,
+                &settings,
+                &mut job_store,
+                outcome,
+                duration_ms,
+            )
+            .await
         }
         Ok(Err(err)) => {
             let message = format!("Runner transport error: {err}");
+            span.record("rrq.outcome", "transport_error");
+            span.record("rrq.error_message", message.as_str());
+            span.record("rrq.duration_ms", duration_ms);
+            tracing::error!(
+                outcome = "transport_error",
+                duration_ms,
+                error_message = %message,
+                "job failed before runner response"
+            );
             process_failure_job(&job, &queue_name, &settings, &mut job_store, &message).await
         }
         Err(_) => {
             let _ = runner.cancel(&job.id, Some(request_id.as_str())).await;
             let message = format!("Job timed out after {}s.", job_timeout);
+            span.record("rrq.outcome", "timeout");
+            span.record("rrq.error_message", message.as_str());
+            span.record("rrq.duration_ms", duration_ms);
+            tracing::warn!(
+                outcome = "timeout",
+                duration_ms,
+                error_message = %message,
+                "job timed out before runner response"
+            );
             handle_job_timeout(&job, &queue_name, &mut job_store, &message).await
         }
     };
@@ -645,7 +689,17 @@ async fn handle_execution_outcome(
     settings: &RRQSettings,
     job_store: &mut JobStore,
     outcome: ExecutionOutcome,
+    duration_ms: f64,
 ) -> Result<()> {
+    let span = tracing::Span::current();
+    span.record("rrq.duration_ms", duration_ms);
+    if let Some(error) = outcome.error.as_ref() {
+        span.record("rrq.error_message", error.message.as_str());
+        if let Some(error_type) = error.error_type.as_deref() {
+            span.record("rrq.error_type", error_type);
+        }
+    }
+
     match outcome.status {
         OutcomeStatus::Success => {
             let result = outcome.result.unwrap_or(Value::Null);
@@ -656,7 +710,8 @@ async fn handle_execution_outcome(
             if let Some(unique_key) = job.job_unique_key.as_ref() {
                 job_store.release_unique_job_lock(unique_key).await?;
             }
-            tracing::info!("job completed");
+            span.record("rrq.outcome", "success");
+            tracing::info!(outcome = "success", duration_ms, "job completed");
         }
         OutcomeStatus::Retry => {
             let message = outcome
@@ -673,7 +728,17 @@ async fn handle_execution_outcome(
                 outcome.retry_after_seconds,
             )
             .await?;
-            tracing::info!("job retry requested");
+            span.record("rrq.outcome", "retry");
+            if let Some(delay) = outcome.retry_after_seconds {
+                span.record("rrq.retry_delay_ms", delay * 1000.0);
+            }
+            tracing::warn!(
+                outcome = "retry",
+                duration_ms,
+                retry_after_seconds = outcome.retry_after_seconds,
+                error_message = %message,
+                "job retry requested"
+            );
         }
         OutcomeStatus::Timeout => {
             let message = outcome
@@ -688,7 +753,13 @@ async fn handle_execution_outcome(
                     )
                 });
             handle_job_timeout(job, queue_name, job_store, &message).await?;
-            tracing::info!("job timeout");
+            span.record("rrq.outcome", "timeout");
+            tracing::warn!(
+                outcome = "timeout",
+                duration_ms,
+                error_message = %message,
+                "job timeout"
+            );
         }
         OutcomeStatus::Error => {
             let error_type = outcome
@@ -702,7 +773,14 @@ async fn handle_execution_outcome(
                     .map(|error| error.message.clone())
                     .unwrap_or_else(|| "Handler not found".to_string());
                 handle_fatal_job_error(job, queue_name, &message, job_store).await?;
-                tracing::info!("job fatal error");
+                span.record("rrq.outcome", "fatal");
+                tracing::error!(
+                    outcome = "fatal",
+                    duration_ms,
+                    error_type = "handler_not_found",
+                    error_message = %message,
+                    "job fatal error"
+                );
             } else {
                 let message = outcome
                     .error
@@ -710,7 +788,14 @@ async fn handle_execution_outcome(
                     .map(|error| error.message.clone())
                     .unwrap_or_else(|| "Job failed".to_string());
                 process_failure_job(job, queue_name, settings, job_store, &message).await?;
-                tracing::info!("job failed");
+                span.record("rrq.outcome", "error");
+                tracing::error!(
+                    outcome = "error",
+                    duration_ms,
+                    error_type = error_type.unwrap_or("unknown"),
+                    error_message = %message,
+                    "job failed"
+                );
             }
         }
     }
@@ -1298,7 +1383,14 @@ mod tests {
         assert!(acquired);
 
         let outcome = ExecutionOutcome::success(&job.id, "req-1", json!({"ok": true}));
-        handle_execution_outcome(&job, &queue_name, &ctx.settings, &mut ctx.store, outcome)
+        handle_execution_outcome(
+            &job,
+            &queue_name,
+            &ctx.settings,
+            &mut ctx.store,
+            outcome,
+            0.0,
+        )
             .await
             .unwrap();
 
@@ -1323,7 +1415,14 @@ mod tests {
         ctx.store.save_job_definition(&job).await.unwrap();
 
         let outcome = ExecutionOutcome::retry(&job.id, "req-1", "retry", Some(0.01));
-        handle_execution_outcome(&job, &queue_name, &ctx.settings, &mut ctx.store, outcome)
+        handle_execution_outcome(
+            &job,
+            &queue_name,
+            &ctx.settings,
+            &mut ctx.store,
+            outcome,
+            0.0,
+        )
             .await
             .unwrap();
 
@@ -1354,7 +1453,14 @@ mod tests {
         assert!(acquired);
 
         let outcome = ExecutionOutcome::timeout(&job.id, "req-1", "timeout");
-        handle_execution_outcome(&job, &queue_name, &ctx.settings, &mut ctx.store, outcome)
+        handle_execution_outcome(
+            &job,
+            &queue_name,
+            &ctx.settings,
+            &mut ctx.store,
+            outcome,
+            0.0,
+        )
             .await
             .unwrap();
 
@@ -1379,7 +1485,14 @@ mod tests {
         ctx.store.save_job_definition(&job).await.unwrap();
 
         let outcome = ExecutionOutcome::handler_not_found(&job.id, "req-1", "missing");
-        handle_execution_outcome(&job, &queue_name, &ctx.settings, &mut ctx.store, outcome)
+        handle_execution_outcome(
+            &job,
+            &queue_name,
+            &ctx.settings,
+            &mut ctx.store,
+            outcome,
+            0.0,
+        )
             .await
             .unwrap();
 
@@ -1404,7 +1517,14 @@ mod tests {
         ctx.store.save_job_definition(&job).await.unwrap();
 
         let outcome = ExecutionOutcome::error(&job.id, "req-1", "failed");
-        handle_execution_outcome(&job, &queue_name, &ctx.settings, &mut ctx.store, outcome)
+        handle_execution_outcome(
+            &job,
+            &queue_name,
+            &ctx.settings,
+            &mut ctx.store,
+            outcome,
+            0.0,
+        )
             .await
             .unwrap();
 

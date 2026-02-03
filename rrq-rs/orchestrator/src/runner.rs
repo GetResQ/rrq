@@ -7,13 +7,16 @@ use std::sync::{
 };
 
 use crate::constants::DEFAULT_RUNNER_CONNECT_TIMEOUT_MS;
+use crate::telemetry::{self, LogFormat};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use rrq_config::{RRQSettings, TcpSocketSpec, parse_tcp_socket};
 use rrq_protocol::{
     CancelRequest, ExecutionOutcome, ExecutionRequest, FRAME_HEADER_LEN, PROTOCOL_VERSION,
     RunnerMessage, encode_frame,
 };
+use serde_json::{Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
@@ -26,6 +29,90 @@ const ENV_RUNNER_TCP_SOCKET: &str = "RRQ_RUNNER_TCP_SOCKET";
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 const REUSE_SOCKET_MAX_ATTEMPTS: usize = 5;
 const REUSE_SOCKET_RETRY_DELAY: Duration = Duration::from_millis(50);
+
+#[derive(Clone, Copy)]
+enum RunnerLogStream {
+    Stdout,
+    Stderr,
+}
+
+impl RunnerLogStream {
+    fn as_str(self) -> &'static str {
+        match self {
+            RunnerLogStream::Stdout => "stdout",
+            RunnerLogStream::Stderr => "stderr",
+        }
+    }
+
+    fn default_level(self) -> &'static str {
+        match self {
+            RunnerLogStream::Stdout => "INFO",
+            RunnerLogStream::Stderr => "ERROR",
+        }
+    }
+
+    fn write(self, line: &str) {
+        match self {
+            RunnerLogStream::Stdout => println!("{line}"),
+            RunnerLogStream::Stderr => eprintln!("{line}"),
+        }
+    }
+}
+
+fn emit_runner_log(runner: &str, stream: RunnerLogStream, line: &str) {
+    if matches!(telemetry::log_format(), LogFormat::Json) {
+        let event = build_runner_event_json(runner, stream, line, Utc::now());
+        match serde_json::to_string(&event) {
+            Ok(text) => stream.write(&text),
+            Err(_) => stream.write(line),
+        }
+        return;
+    }
+
+    match stream {
+        RunnerLogStream::Stdout => {
+            tracing::info!(runner = %runner, %line, "runner stdout");
+        }
+        RunnerLogStream::Stderr => {
+            tracing::error!(runner = %runner, %line, "runner stderr");
+        }
+    }
+}
+
+fn build_runner_event_json(
+    runner: &str,
+    stream: RunnerLogStream,
+    line: &str,
+    now: DateTime<Utc>,
+) -> Value {
+    let mut event = match serde_json::from_str::<Value>(line) {
+        Ok(Value::Object(object)) => object,
+        _ => {
+            let mut object = Map::new();
+            object.insert("message".to_string(), Value::String(line.to_string()));
+            object
+        }
+    };
+    event
+        .entry("timestamp".to_string())
+        .or_insert_with(|| Value::String(now.to_rfc3339()));
+    event
+        .entry("level".to_string())
+        .or_insert_with(|| Value::String(stream.default_level().to_string()));
+    event.insert(
+        "rrq.runner".to_string(),
+        Value::String(runner.to_string()),
+    );
+    event.insert(
+        "rrq.stream".to_string(),
+        Value::String(stream.as_str().to_string()),
+    );
+    event.insert(
+        "rrq.source".to_string(),
+        Value::String("runner".to_string()),
+    );
+    Value::Object(event)
+}
 
 fn connect_timeout_from_settings(timeout_ms: i64) -> Duration {
     let ms = if timeout_ms > 0 {
@@ -64,6 +151,7 @@ struct SocketProcess {
 }
 
 pub struct SocketRunnerPool {
+    name: String,
     cmd: Vec<String>,
     pool_size: usize,
     max_in_flight: usize,
@@ -94,6 +182,7 @@ impl Drop for ProcessPermit {
 impl SocketRunnerPool {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
+        name: impl Into<String>,
         cmd: Vec<String>,
         pool_size: usize,
         max_in_flight: usize,
@@ -103,6 +192,7 @@ impl SocketRunnerPool {
         response_timeout: Option<Duration>,
         connect_timeout: Duration,
     ) -> Result<Self> {
+        let name = name.into();
         if pool_size == 0 {
             return Err(anyhow::anyhow!("pool_size must be positive"));
         }
@@ -125,6 +215,7 @@ impl SocketRunnerPool {
         }
 
         let pool = Self {
+            name,
             cmd,
             pool_size,
             max_in_flight,
@@ -230,11 +321,13 @@ impl SocketRunnerPool {
                 command.current_dir(cwd);
             }
             let mut child = command.spawn().context("failed to spawn runner")?;
+            let stdout_name = self.name.clone();
+            let stderr_name = self.name.clone();
             let stdout_task = child.stdout.take().map(|stdout| {
                 tokio::spawn(async move {
                     let mut reader = BufReader::new(stdout).lines();
                     while let Ok(Some(line)) = reader.next_line().await {
-                        tracing::info!("[runner:stdout] {}", line);
+                        emit_runner_log(&stdout_name, RunnerLogStream::Stdout, &line);
                     }
                 })
             });
@@ -242,7 +335,7 @@ impl SocketRunnerPool {
                 tokio::spawn(async move {
                     let mut reader = BufReader::new(stderr).lines();
                     while let Ok(Some(line)) = reader.next_line().await {
-                        tracing::error!("[runner:stderr] {}", line);
+                        emit_runner_log(&stderr_name, RunnerLogStream::Stderr, &line);
                     }
                 })
             });
@@ -477,6 +570,7 @@ pub struct SocketRunner {
 impl SocketRunner {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
+        name: impl Into<String>,
         cmd: Vec<String>,
         pool_size: usize,
         max_in_flight: usize,
@@ -488,6 +582,7 @@ impl SocketRunner {
     ) -> Result<Self> {
         let response_timeout = response_timeout_seconds.map(Duration::from_secs_f64);
         let pool = SocketRunnerPool::new(
+            name,
             cmd,
             pool_size,
             max_in_flight,
@@ -798,6 +893,7 @@ pub async fn build_runners_from_settings_filtered(
             .ok_or_else(|| anyhow::anyhow!("missing max_in_flight for runner '{}'", name))?;
         let cmd = config.cmd.clone().unwrap_or_default();
         let runner = SocketRunner::new(
+            name.clone(),
             cmd,
             pool_size,
             max_in_flight,
@@ -854,6 +950,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use rrq_config::{RRQSettings, RunnerConfig, RunnerType};
     use std::net::{IpAddr, Ipv4Addr, TcpListener as StdTcpListener};
     use tokio::net::TcpListener as TokioTcpListener;
@@ -894,6 +991,61 @@ mod tests {
         }
     }
 
+    #[test]
+    fn build_runner_event_json_preserves_fields() {
+        let now = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let line = r#"{"timestamp":"2024-01-01T00:00:00Z","level":"WARN","fields":{"message":"hello"},"target":"runner"}"#;
+        let value = build_runner_event_json("python", RunnerLogStream::Stdout, line, now);
+        let obj = value.as_object().expect("object");
+        assert_eq!(
+            obj.get("timestamp").and_then(Value::as_str),
+            Some("2024-01-01T00:00:00Z")
+        );
+        assert_eq!(obj.get("level").and_then(Value::as_str), Some("WARN"));
+        assert_eq!(
+            obj.get("rrq.runner").and_then(Value::as_str),
+            Some("python")
+        );
+        assert_eq!(
+            obj.get("rrq.stream").and_then(Value::as_str),
+            Some("stdout")
+        );
+        assert_eq!(
+            obj.get("rrq.source").and_then(Value::as_str),
+            Some("runner")
+        );
+        assert!(obj.get("fields").is_some());
+    }
+
+    #[test]
+    fn build_runner_event_json_wraps_plain_text() {
+        let now = Utc.with_ymd_and_hms(2024, 2, 2, 3, 4, 5).unwrap();
+        let value = build_runner_event_json(
+            "rust",
+            RunnerLogStream::Stderr,
+            "plain log line",
+            now,
+        );
+        let obj = value.as_object().expect("object");
+        assert_eq!(
+            obj.get("timestamp").and_then(Value::as_str),
+            Some("2024-02-02T03:04:05Z")
+        );
+        assert_eq!(obj.get("level").and_then(Value::as_str), Some("ERROR"));
+        assert_eq!(
+            obj.get("message").and_then(Value::as_str),
+            Some("plain log line")
+        );
+        assert_eq!(
+            obj.get("rrq.runner").and_then(Value::as_str),
+            Some("rust")
+        );
+        assert_eq!(
+            obj.get("rrq.stream").and_then(Value::as_str),
+            Some("stderr")
+        );
+    }
+
     fn build_test_pool(max_in_flight: usize) -> SocketRunnerPool {
         let child = Command::new("sleep")
             .arg("60")
@@ -908,6 +1060,7 @@ mod tests {
             permits: Arc::new(Semaphore::new(max_in_flight)),
         };
         SocketRunnerPool {
+            name: "test".to_string(),
             cmd: vec!["sleep".to_string(), "60".to_string()],
             pool_size: 1,
             max_in_flight,
@@ -975,6 +1128,7 @@ mod tests {
         });
         let (spec, _socket_addr) = allocate_tcp_spec();
         let pool = SocketRunnerPool {
+            name: "test".to_string(),
             cmd: vec!["sleep".to_string(), "60".to_string()],
             pool_size: 1,
             max_in_flight: 1,
@@ -1011,6 +1165,7 @@ mod tests {
     async fn connect_socket_errors_when_child_exits() {
         let (spec, socket_addr) = allocate_tcp_spec();
         let pool = SocketRunnerPool {
+            name: "test".to_string(),
             cmd: vec!["true".to_string()],
             pool_size: 1,
             max_in_flight: 1,
@@ -1102,6 +1257,7 @@ mod tests {
     #[tokio::test]
     async fn tcp_socket_pool_range_rejects_overflow() {
         let err = SocketRunnerPool::new(
+            "test",
             vec!["true".to_string()],
             2,
             1,
@@ -1121,6 +1277,7 @@ mod tests {
     #[test]
     fn tcp_socket_pool_assigns_incrementing_ports() {
         let pool = SocketRunnerPool {
+            name: "test".to_string(),
             cmd: vec!["true".to_string()],
             pool_size: 2,
             max_in_flight: 1,
@@ -1162,6 +1319,7 @@ mod tests {
         let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let pool = SocketRunnerPool {
+            name: "test".to_string(),
             cmd: vec!["true".to_string()],
             pool_size: 1,
             max_in_flight: 1,
@@ -1294,6 +1452,7 @@ mod tests {
         };
         let (spec, _addr) = allocate_tcp_spec();
         let pool = SocketRunnerPool {
+            name: "test".to_string(),
             cmd: vec!["sleep".to_string(), "60".to_string()],
             pool_size: 1,
             max_in_flight: 1,
@@ -1400,6 +1559,7 @@ mod tests {
     fn spawn_process_with_reuse_socket_does_not_increment_cursor() {
         // This test verifies that when reuse_socket is Some, the tcp_port_cursor is not incremented
         let pool = SocketRunnerPool {
+            name: "test".to_string(),
             cmd: vec!["true".to_string()],
             pool_size: 2,
             max_in_flight: 1,
@@ -1451,6 +1611,7 @@ mod tests {
 
         let (spec, _addr) = allocate_tcp_spec();
         let pool = SocketRunnerPool {
+            name: "test".to_string(),
             cmd: vec!["sleep".to_string(), "60".to_string()],
             pool_size: 1,
             max_in_flight: 1,

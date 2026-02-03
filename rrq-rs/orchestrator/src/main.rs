@@ -1,9 +1,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing_subscriber::EnvFilter;
-
 mod cli_utils;
 mod commands;
+mod telemetry;
 
 /// Initialize the rustls crypto provider (ring).
 /// This must be called once before any TLS connections are made.
@@ -277,11 +276,6 @@ enum RunnerCommand {
     },
 }
 
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
-}
-
 async fn dispatch_command(command: Commands) -> Result<()> {
     match command {
         Commands::Worker { command } => match command {
@@ -475,7 +469,7 @@ async fn dispatch_command(command: Commands) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_crypto_provider();
-    init_tracing();
+    telemetry::init_tracing();
     let cli = Cli::parse();
     dispatch_command(cli.command).await
 }
