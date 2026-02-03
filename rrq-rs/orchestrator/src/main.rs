@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use rrq::telemetry;
 mod cli_utils;
 mod commands;
-mod telemetry;
 
 /// Initialize the rustls crypto provider (ring).
 /// This must be called once before any TLS connections are made.

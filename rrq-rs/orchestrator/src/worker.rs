@@ -1391,8 +1391,8 @@ mod tests {
             outcome,
             0.0,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         let loaded = ctx
             .store
@@ -1423,8 +1423,8 @@ mod tests {
             outcome,
             0.0,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         let loaded = ctx
             .store
@@ -1461,8 +1461,8 @@ mod tests {
             outcome,
             0.0,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         let loaded = ctx
             .store
@@ -1493,8 +1493,8 @@ mod tests {
             outcome,
             0.0,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         let loaded = ctx
             .store
@@ -1525,8 +1525,8 @@ mod tests {
             outcome,
             0.0,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         let loaded = ctx
             .store

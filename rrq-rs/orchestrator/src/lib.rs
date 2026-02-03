@@ -3,6 +3,7 @@ pub mod constants;
 pub mod job;
 pub mod runner;
 pub mod store;
+pub mod telemetry;
 pub mod worker;
 
 #[cfg(test)]

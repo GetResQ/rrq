@@ -2,17 +2,17 @@ use std::collections::HashMap;
 use std::env;
 use std::sync::OnceLock;
 
+use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::propagation::{Extractor, TextMapCompositePropagator};
 use opentelemetry::trace::TracerProvider as _;
-use opentelemetry::KeyValue;
 use opentelemetry_otlp::{SpanExporter, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::propagation::{BaggagePropagator, TraceContextPropagator};
 use opentelemetry_sdk::trace::span_processor_with_async_runtime::BatchSpanProcessor;
 use opentelemetry_sdk::{Resource, runtime, trace as sdktrace};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::EnvFilter;
-use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::layer::{Layer, SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,22 +40,40 @@ fn parse_log_format(value: &str) -> LogFormat {
 
 pub fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let fmt_layer = match log_format() {
-        LogFormat::Json => tracing_subscriber::fmt::layer()
-            .json()
-            .with_ansi(false)
-            .with_current_span(true),
-        LogFormat::Pretty => tracing_subscriber::fmt::layer(),
-    }
-    .with_filter(filter);
-
     let (otel_layer, otel_error) = init_otel_layer();
-    let registry = tracing_subscriber::registry().with(fmt_layer);
-
-    if let Some(otel_layer) = otel_layer {
-        registry.with(otel_layer).init();
-    } else {
-        registry.init();
+    match log_format() {
+        LogFormat::Json => {
+            if let Some(otel_layer) = otel_layer {
+                let fmt_layer = tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_ansi(false)
+                    .with_current_span(true)
+                    .with_filter(filter.clone());
+                tracing_subscriber::registry()
+                    .with(otel_layer)
+                    .with(fmt_layer)
+                    .init();
+            } else {
+                let fmt_layer = tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_ansi(false)
+                    .with_current_span(true)
+                    .with_filter(filter);
+                tracing_subscriber::registry().with(fmt_layer).init();
+            }
+        }
+        LogFormat::Pretty => {
+            if let Some(otel_layer) = otel_layer {
+                let fmt_layer = tracing_subscriber::fmt::layer().with_filter(filter.clone());
+                tracing_subscriber::registry()
+                    .with(otel_layer)
+                    .with(fmt_layer)
+                    .init();
+            } else {
+                let fmt_layer = tracing_subscriber::fmt::layer().with_filter(filter);
+                tracing_subscriber::registry().with(fmt_layer).init();
+            }
+        }
     }
 
     if let Some(error) = otel_error {
@@ -74,12 +92,13 @@ pub fn set_parent_from_trace_context(
     let parent = global::get_text_map_propagator(|propagator| {
         propagator.extract(&HashMapExtractor(trace_context))
     });
-    span.set_parent(parent);
+    let _ = span.set_parent(parent);
 }
 
-fn init_otel_layer(
-) -> (
-    Option<tracing_opentelemetry::OpenTelemetryLayer<tracing_subscriber::Registry, sdktrace::Tracer>>,
+fn init_otel_layer() -> (
+    Option<
+        tracing_opentelemetry::OpenTelemetryLayer<tracing_subscriber::Registry, sdktrace::Tracer>,
+    >,
     Option<String>,
 ) {
     if !otel_enabled() {
@@ -104,10 +123,8 @@ fn init_otel_layer(
 
     let mut resource_builder = Resource::builder().with_service_name(service_name.clone());
     if let Some(environment) = environment {
-        resource_builder = resource_builder.with_attribute(KeyValue::new(
-            "deployment.environment",
-            environment,
-        ));
+        resource_builder =
+            resource_builder.with_attribute(KeyValue::new("deployment.environment", environment));
     }
     if let Some(version) = version {
         resource_builder =

@@ -99,10 +99,7 @@ fn build_runner_event_json(
     event
         .entry("level".to_string())
         .or_insert_with(|| Value::String(stream.default_level().to_string()));
-    event.insert(
-        "rrq.runner".to_string(),
-        Value::String(runner.to_string()),
-    );
+    event.insert("rrq.runner".to_string(), Value::String(runner.to_string()));
     event.insert(
         "rrq.stream".to_string(),
         Value::String(stream.as_str().to_string()),
@@ -1020,12 +1017,7 @@ mod tests {
     #[test]
     fn build_runner_event_json_wraps_plain_text() {
         let now = Utc.with_ymd_and_hms(2024, 2, 2, 3, 4, 5).unwrap();
-        let value = build_runner_event_json(
-            "rust",
-            RunnerLogStream::Stderr,
-            "plain log line",
-            now,
-        );
+        let value = build_runner_event_json("rust", RunnerLogStream::Stderr, "plain log line", now);
         let obj = value.as_object().expect("object");
         assert_eq!(
             obj.get("timestamp").and_then(Value::as_str),
@@ -1036,10 +1028,7 @@ mod tests {
             obj.get("message").and_then(Value::as_str),
             Some("plain log line")
         );
-        assert_eq!(
-            obj.get("rrq.runner").and_then(Value::as_str),
-            Some("rust")
-        );
+        assert_eq!(obj.get("rrq.runner").and_then(Value::as_str), Some("rust"));
         assert_eq!(
             obj.get("rrq.stream").and_then(Value::as_str),
             Some("stderr")
