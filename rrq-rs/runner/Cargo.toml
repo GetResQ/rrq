@@ -1,6 +1,6 @@
 [package]
 name = "rrq-runner"
-version = "0.9.13"
+version = "0.9.14"
 edition = "2024"
 license = "Apache-2.0"
 description = "RRQ runner runtime for Rust."
@@ -13,7 +13,7 @@ categories = ["asynchronous"]
 
 [dependencies]
 async-trait = "0.1.89"
-rrq-protocol = { version = "0.9.13", path = "../protocol" }
+rrq-protocol = { version = "0.9.14", path = "../protocol" }
 chrono = "0.4.43"
 serde_json = "1.0.149"
 tokio = { version = "1.49.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
