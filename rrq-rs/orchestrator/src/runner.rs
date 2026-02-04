@@ -1019,10 +1019,12 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2024, 2, 2, 3, 4, 5).unwrap();
         let value = build_runner_event_json("rust", RunnerLogStream::Stderr, "plain log line", now);
         let obj = value.as_object().expect("object");
-        assert_eq!(
-            obj.get("timestamp").and_then(Value::as_str),
-            Some("2024-02-02T03:04:05Z")
-        );
+        let timestamp = obj
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .expect("timestamp");
+        let parsed = DateTime::parse_from_rfc3339(timestamp).expect("rfc3339");
+        assert_eq!(parsed.with_timezone(&Utc), now);
         assert_eq!(obj.get("level").and_then(Value::as_str), Some("ERROR"));
         assert_eq!(
             obj.get("message").and_then(Value::as_str),

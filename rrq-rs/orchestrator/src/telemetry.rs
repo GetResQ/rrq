@@ -110,11 +110,14 @@ fn init_otel_layer() -> (
         Box::new(BaggagePropagator::new()),
     ]));
 
-    let service_name = env::var("DD_SERVICE")
-        .or_else(|_| env::var("RRQ_SERVICE_NAME"))
-        .unwrap_or_else(|_| "rrq".to_string());
-    let environment = env::var("DD_ENV").ok();
-    let version = env::var("DD_VERSION").ok();
+    let service_name = env_optional_nonempty("OTEL_SERVICE_NAME")
+        .or_else(|| otel_resource_attribute("service.name"))
+        .or_else(|| env_optional_nonempty("RRQ_SERVICE_NAME"))
+        .unwrap_or_else(|| "rrq".to_string());
+    let environment = otel_resource_attribute("deployment.environment")
+        .or_else(|| env_optional_nonempty("ENVIRONMENT"));
+    let version = otel_resource_attribute("service.version")
+        .or_else(|| env_optional_nonempty("SERVICE_VERSION"));
 
     let exporter = match build_otlp_exporter() {
         Ok(exporter) => exporter,
@@ -144,27 +147,21 @@ fn init_otel_layer() -> (
 }
 
 fn otel_enabled() -> bool {
-    let enabled = env::var("DD_TRACE_ENABLED")
-        .ok()
-        .map(|value| parse_bool(&value))
-        .unwrap_or(false);
-    if enabled {
+    if let Ok(endpoint) = env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        && !endpoint.is_empty()
+    {
         return true;
     }
-    env::var("DD_OTLP_ENDPOINT").is_ok() || env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok()
-}
-
-fn parse_bool(value: &str) -> bool {
-    matches!(
-        value.trim().to_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    if let Ok(endpoint) = env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        && !endpoint.is_empty()
+    {
+        return true;
+    }
+    false
 }
 
 fn build_otlp_exporter() -> Result<SpanExporter, String> {
-    let endpoint = env::var("DD_OTLP_ENDPOINT")
-        .or_else(|_| env::var("OTEL_EXPORTER_OTLP_ENDPOINT"))
-        .unwrap_or_else(|_| "http://127.0.0.1:4318/v1/traces".to_string());
+    let endpoint = resolve_otlp_endpoint();
 
     let mut headers = parse_otlp_headers(env::var("OTEL_EXPORTER_OTLP_HEADERS").ok());
     if let Ok(api_key) = env::var("DD_API_KEY") {
@@ -176,6 +173,54 @@ fn build_otlp_exporter() -> Result<SpanExporter, String> {
         exporter_builder = exporter_builder.with_headers(headers);
     }
     exporter_builder.build().map_err(|err| err.to_string())
+}
+
+fn resolve_otlp_endpoint() -> String {
+    if let Ok(endpoint) = env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        && !endpoint.is_empty()
+    {
+        return endpoint;
+    }
+
+    if let Ok(endpoint) = env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        && !endpoint.is_empty()
+    {
+        return ensure_traces_path(endpoint);
+    }
+
+    "http://127.0.0.1:4318/v1/traces".to_string()
+}
+
+fn ensure_traces_path(endpoint: String) -> String {
+    if endpoint.ends_with("/v1/traces") {
+        return endpoint;
+    }
+    let base = endpoint.trim_end_matches('/');
+    format!("{base}/v1/traces")
+}
+
+fn env_optional_nonempty(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|value| !value.is_empty())
+}
+
+fn otel_resource_attribute(key: &str) -> Option<String> {
+    let raw = env::var("OTEL_RESOURCE_ATTRIBUTES").ok()?;
+    for pair in raw.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let (attr_key, value) = pair.split_once('=')?;
+        if attr_key.trim() != key {
+            continue;
+        }
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        if value.is_empty() {
+            return None;
+        }
+        return Some(value.to_string());
+    }
+    None
 }
 
 fn parse_otlp_headers(raw: Option<String>) -> HashMap<String, String> {
@@ -229,16 +274,6 @@ mod tests {
         assert_eq!(parse_log_format("json"), LogFormat::Json);
         assert_eq!(parse_log_format(""), LogFormat::Json);
         assert_eq!(parse_log_format("nope"), LogFormat::Json);
-    }
-
-    #[test]
-    fn parse_bool_understands_truthy_values() {
-        for value in ["1", "true", "TRUE", "yes", "on", " On "] {
-            assert!(parse_bool(value), "expected true for {value}");
-        }
-        for value in ["0", "false", "no", "off", ""] {
-            assert!(!parse_bool(value), "expected false for {value}");
-        }
     }
 
     #[test]
