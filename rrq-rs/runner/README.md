@@ -52,7 +52,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     });
 
-    let addr = std::env::var("RRQ_RUNNER_TCP_SOCKET")?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let tcp_socket = args
+        .iter()
+        .position(|arg| arg == "--tcp-socket")
+        .and_then(|idx| args.get(idx + 1))
+        .ok_or("Missing --tcp-socket")?;
+    let addr = tcp_socket.as_str();
     run_tcp(&registry, parse_tcp_socket(&addr)?)
 }
 ```
@@ -118,8 +124,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ExecutionOutcome::success(req.job_id.clone(), req.request_id.clone(), json!({}))
     });
 
-    let addr = std::env::var("RRQ_RUNNER_TCP_SOCKET")?;
-    runtime.run_tcp_with(&registry, parse_tcp_socket(&addr)?, &OtelTelemetry)
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let tcp_socket = args
+        .iter()
+        .position(|arg| arg == "--tcp-socket")
+        .and_then(|idx| args.get(idx + 1))
+        .ok_or("Missing --tcp-socket")?;
+    runtime.run_tcp_with(&registry, parse_tcp_socket(tcp_socket)?, &OtelTelemetry)
 }
 ```
 
@@ -139,14 +150,6 @@ tcp_socket = "127.0.0.1:9000"
 pool_size = 4
 max_in_flight = 10
 ```
-
-## Environment Variables
-
-Set by the orchestrator:
-
-| Variable | Description |
-|----------|-------------|
-| `RRQ_RUNNER_TCP_SOCKET` | Socket address for communication |
 
 ## Related Crates
 

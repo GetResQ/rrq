@@ -22,7 +22,7 @@ You can run the example binary from crates.io:
 
 ```
 cargo install rrq-runner --example socket_runner
-RRQ_RUNNER_TCP_SOCKET=127.0.0.1:9000 socket_runner
+socket_runner --tcp-socket 127.0.0.1:9000
 ```
 
 Then point your worker config to the binary:

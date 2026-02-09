@@ -82,74 +82,6 @@ fn env_overrides() -> Result<Value> {
     let mut payload = Map::new();
 
     set_env_string(&mut payload, "redis_dsn", "RRQ_REDIS_DSN");
-    set_env_string(&mut payload, "default_queue_name", "RRQ_DEFAULT_QUEUE_NAME");
-    set_env_string(&mut payload, "default_dlq_name", "RRQ_DEFAULT_DLQ_NAME");
-    set_env_int(
-        &mut payload,
-        "default_max_retries",
-        "RRQ_DEFAULT_MAX_RETRIES",
-    )?;
-    set_env_int(
-        &mut payload,
-        "default_job_timeout_seconds",
-        "RRQ_DEFAULT_JOB_TIMEOUT_SECONDS",
-    )?;
-    set_env_int(
-        &mut payload,
-        "default_result_ttl_seconds",
-        "RRQ_DEFAULT_RESULT_TTL_SECONDS",
-    )?;
-    set_env_float(
-        &mut payload,
-        "default_poll_delay_seconds",
-        "RRQ_DEFAULT_POLL_DELAY_SECONDS",
-    )?;
-    set_env_int(
-        &mut payload,
-        "runner_connect_timeout_ms",
-        "RRQ_RUNNER_CONNECT_TIMEOUT_MS",
-    )?;
-    set_env_int(
-        &mut payload,
-        "default_lock_timeout_extension_seconds",
-        "RRQ_DEFAULT_LOCK_TIMEOUT_EXTENSION_SECONDS",
-    )?;
-    set_env_int(
-        &mut payload,
-        "default_unique_job_lock_ttl_seconds",
-        "RRQ_DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS",
-    )?;
-    set_env_string(
-        &mut payload,
-        "default_runner_name",
-        "RRQ_DEFAULT_RUNNER_NAME",
-    );
-    set_env_float(
-        &mut payload,
-        "worker_health_check_interval_seconds",
-        "RRQ_WORKER_HEALTH_CHECK_INTERVAL_SECONDS",
-    )?;
-    set_env_float(
-        &mut payload,
-        "worker_health_check_ttl_buffer_seconds",
-        "RRQ_WORKER_HEALTH_CHECK_TTL_BUFFER_SECONDS",
-    )?;
-    set_env_float(
-        &mut payload,
-        "base_retry_delay_seconds",
-        "RRQ_BASE_RETRY_DELAY_SECONDS",
-    )?;
-    set_env_float(
-        &mut payload,
-        "max_retry_delay_seconds",
-        "RRQ_MAX_RETRY_DELAY_SECONDS",
-    )?;
-    set_env_float(
-        &mut payload,
-        "worker_shutdown_grace_period_seconds",
-        "RRQ_WORKER_SHUTDOWN_GRACE_PERIOD_SECONDS",
-    )?;
-    set_env_int(&mut payload, "expected_job_ttl", "RRQ_EXPECTED_JOB_TTL")?;
 
     Ok(Value::Object(payload))
 }
@@ -160,38 +92,6 @@ fn set_env_string(map: &mut Map<String, Value>, key: &str, env: &str) {
     {
         map.insert(key.to_string(), Value::String(value));
     }
-}
-
-fn set_env_int(map: &mut Map<String, Value>, key: &str, env: &str) -> Result<()> {
-    if let Ok(value) = std::env::var(env) {
-        if value.is_empty() {
-            return Ok(());
-        }
-        let parsed: i64 = value
-            .parse()
-            .with_context(|| format!("Invalid {env} value: {value}"))?;
-        map.insert(key.to_string(), Value::Number(parsed.into()));
-    }
-    Ok(())
-}
-
-fn set_env_float(map: &mut Map<String, Value>, key: &str, env: &str) -> Result<()> {
-    if let Ok(value) = std::env::var(env) {
-        if value.is_empty() {
-            return Ok(());
-        }
-        let parsed: f64 = value
-            .parse()
-            .with_context(|| format!("Invalid {env} value: {value}"))?;
-        map.insert(
-            key.to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(parsed)
-                    .ok_or_else(|| anyhow::anyhow!("Invalid {env} value: {value}"))?,
-            ),
-        );
-    }
-    Ok(())
 }
 
 fn deep_merge(base: Value, overlay: Value) -> Value {
@@ -372,8 +272,7 @@ mod tests {
     fn load_toml_settings_merges_env_and_normalizes_fields() {
         let _lock = env_lock().lock().unwrap();
         unsafe {
-            std::env::set_var("RRQ_DEFAULT_QUEUE_NAME", "from_env");
-            std::env::set_var("RRQ_WORKER_HEALTH_CHECK_TTL_BUFFER_SECONDS", "12.5");
+            std::env::set_var("RRQ_REDIS_DSN", "redis://localhost:6379/10");
         }
 
         let dir = tempfile::tempdir().unwrap();
@@ -388,12 +287,12 @@ mod tests {
         fs::write(&path, config).unwrap();
 
         let settings = load_toml_settings(Some(path.to_str().unwrap())).unwrap();
-        assert_eq!(settings.default_queue_name, "from_env");
+        assert_eq!(settings.redis_dsn, "redis://localhost:6379/10");
+        assert_eq!(settings.default_queue_name, "from_toml");
         assert_eq!(
             settings.runner_routes.get("alpha"),
             Some(&"python".to_string())
         );
-        assert_eq!(settings.worker_health_check_ttl_buffer_seconds, 12.5);
     }
 
     #[test]

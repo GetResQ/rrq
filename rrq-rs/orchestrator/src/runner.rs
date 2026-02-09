@@ -24,8 +24,6 @@ use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, timeout};
 use tracing::{debug, info, warn};
-
-const ENV_RUNNER_TCP_SOCKET: &str = "RRQ_RUNNER_TCP_SOCKET";
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 const REUSE_SOCKET_MAX_ATTEMPTS: usize = 5;
 const REUSE_SOCKET_RETRY_DELAY: Duration = Duration::from_millis(50);
@@ -306,6 +304,8 @@ impl SocketRunnerPool {
             if self.cmd.len() > 1 {
                 command.args(&self.cmd[1..]);
             }
+            // Standard runner contract: accept `--tcp-socket host:port` (localhost only).
+            command.arg("--tcp-socket").arg(socket.to_string());
             command
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -313,7 +313,6 @@ impl SocketRunnerPool {
             if let Some(env) = &self.env {
                 command.envs(env);
             }
-            command.env(ENV_RUNNER_TCP_SOCKET, socket.to_string());
             if let Some(cwd) = &self.cwd {
                 command.current_dir(cwd);
             }

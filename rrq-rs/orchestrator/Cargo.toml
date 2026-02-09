@@ -1,6 +1,6 @@
 [package]
 name = "rrq"
-version = "0.9.14"
+version = "0.9.15"
 edition = "2024"
 license = "Apache-2.0"
 description = "RRQ orchestrator CLI and worker runtime."
@@ -21,6 +21,7 @@ async-trait = "0.1.89"
 chrono = { version = "0.4.43", features = ["serde"] }
 clap = { version = "4.5.54", features = ["derive"] }
 cron = "0.15.0"
+dotenvy = "0.15.7"
 globset = "0.4.18"
 ignore = "0.4.23"
 num_cpus = "1.17.0"
@@ -39,13 +40,13 @@ opentelemetry-otlp = { version = "0.31.0", default-features = false, features = 
 opentelemetry_sdk = { version = "0.31.0", default-features = false, features = ["trace", "rt-tokio", "experimental_trace_batch_span_processor_with_async_runtime"] }
 tracing-opentelemetry = "0.32.1"
 
-rrq-protocol = { version = "0.9.14", path = "../protocol" }
-rrq-config = { version = "0.9.14", path = "../config" }
+rrq-protocol = { version = "0.9.15", path = "../protocol" }
+rrq-config = { version = "0.9.15", path = "../config" }
 
 [dev-dependencies]
 serde_json = "1.0.149"
 tokio = { version = "1.49.0", features = ["io-std", "io-util", "macros", "rt-multi-thread"] }
-rrq-producer = { version = "0.9.14", path = "../producer" }
+rrq-producer = { version = "0.9.15", path = "../producer" }
 
 [lints]
 workspace = true

@@ -29,24 +29,24 @@ only the fields they need (for example, `redis_dsn` and default queue settings).
 | Key | Type | Default | Env override | Notes |
 | --- | --- | --- | --- | --- |
 | `redis_dsn` | string | `"redis://localhost:6379/0"` | `RRQ_REDIS_DSN` | Redis DSN. |
-| `default_queue_name` | string | `"rrq:queue:default"` | `RRQ_DEFAULT_QUEUE_NAME` | Queue name or full Redis key. |
-| `default_dlq_name` | string | `"rrq:dlq:default"` | `RRQ_DEFAULT_DLQ_NAME` | DLQ name or full Redis key. |
-| `default_max_retries` | int | `5` | `RRQ_DEFAULT_MAX_RETRIES` | Default retry attempts per job. |
-| `default_job_timeout_seconds` | int | `300` | `RRQ_DEFAULT_JOB_TIMEOUT_SECONDS` | Per-attempt timeout. |
-| `default_lock_timeout_extension_seconds` | int | `60` | `RRQ_DEFAULT_LOCK_TIMEOUT_EXTENSION_SECONDS` | Extra time added to job timeout for lock TTL. |
-| `default_result_ttl_seconds` | int | `86400` | `RRQ_DEFAULT_RESULT_TTL_SECONDS` | TTL for successful job results. |
-| `default_poll_delay_seconds` | float | `0.1` | `RRQ_DEFAULT_POLL_DELAY_SECONDS` | Worker sleep when queues are empty. |
-| `runner_connect_timeout_ms` | int | `15000` | `RRQ_RUNNER_CONNECT_TIMEOUT_MS` | Time (ms) to wait for runner sockets to come online. |
-| `default_unique_job_lock_ttl_seconds` | int | `21600` | `RRQ_DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS` | TTL for unique job locks. |
-| `default_runner_name` | string | `"python"` | `RRQ_DEFAULT_RUNNER_NAME` | Must match a configured runner. |
+| `default_queue_name` | string | `"rrq:queue:default"` | — | Queue name or full Redis key. |
+| `default_dlq_name` | string | `"rrq:dlq:default"` | — | DLQ name or full Redis key. |
+| `default_max_retries` | int | `5` | — | Default retry attempts per job. |
+| `default_job_timeout_seconds` | int | `300` | — | Per-attempt timeout. |
+| `default_lock_timeout_extension_seconds` | int | `60` | — | Extra time added to job timeout for lock TTL. |
+| `default_result_ttl_seconds` | int | `86400` | — | TTL for successful job results. |
+| `default_poll_delay_seconds` | float | `0.1` | — | Worker sleep when queues are empty. |
+| `runner_connect_timeout_ms` | int | `15000` | — | Time (ms) to wait for runner sockets to come online. |
+| `default_unique_job_lock_ttl_seconds` | int | `21600` | — | TTL for unique job locks. |
+| `default_runner_name` | string | `"python"` | — | Must match a configured runner. |
 | `runners` | table | `{}` | — | Map of runner configs. See below. |
 | `runner_routes` | table | `{}` | — | Map of `queue_name = "runner"`. |
-| `worker_health_check_interval_seconds` | float | `60` | `RRQ_WORKER_HEALTH_CHECK_INTERVAL_SECONDS` | Heartbeat interval. |
-| `worker_health_check_ttl_buffer_seconds` | float | `10` | `RRQ_WORKER_HEALTH_CHECK_TTL_BUFFER_SECONDS` | Extra TTL buffer added to worker health records. |
-| `base_retry_delay_seconds` | float | `5.0` | `RRQ_BASE_RETRY_DELAY_SECONDS` | Initial retry delay for backoff. |
-| `max_retry_delay_seconds` | float | `3600` | `RRQ_MAX_RETRY_DELAY_SECONDS` | Max retry delay. |
-| `worker_shutdown_grace_period_seconds` | float | `10.0` | `RRQ_WORKER_SHUTDOWN_GRACE_PERIOD_SECONDS` | Grace period before forced shutdown. |
-| `expected_job_ttl` | int | `30` | `RRQ_EXPECTED_JOB_TTL` | Buffer used in internal lock timing. |
+| `worker_health_check_interval_seconds` | float | `60` | — | Heartbeat interval. |
+| `worker_health_check_ttl_buffer_seconds` | float | `10` | — | Extra TTL buffer added to worker health records. |
+| `base_retry_delay_seconds` | float | `5.0` | — | Initial retry delay for backoff. |
+| `max_retry_delay_seconds` | float | `3600` | — | Max retry delay. |
+| `worker_shutdown_grace_period_seconds` | float | `10.0` | — | Grace period before forced shutdown. |
+| `expected_job_ttl` | int | `30` | — | Buffer used in internal lock timing. |
 
 Notes:
 - Queue and DLQ names can be bare (for example, `"default"`). RRQ prefixes them
@@ -74,7 +74,7 @@ other).
 
 Notes:
 - `cmd` must be present for runners; RRQ will start one process per
-  pool slot and pass `RRQ_RUNNER_TCP_SOCKET` for each process.
+  pool slot and pass `--tcp-socket host:port` for each process.
 - `tcp_socket` must point to a localhost address. When `pool_size > 1`, RRQ
   assigns one port per runner process starting at the configured port (for
   example, `9000`, `9001`, ...).

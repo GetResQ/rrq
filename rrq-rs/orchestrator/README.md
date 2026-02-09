@@ -183,7 +183,8 @@ pre_restart_cwd = "."
 |----------|-------------|
 | `RRQ_CONFIG` | Path to configuration file |
 | `RRQ_REDIS_DSN` | Redis connection (overrides config) |
-| `RRQ_LOG_LEVEL` | Log level: trace, debug, info, warn, error |
+| `RUST_LOG` | Log filter/level (e.g. `info`, `debug`) |
+| `RUST_LOG_FORMAT` | Log output format: `json` (default) or `pretty` |
 
 ## Related Crates
 

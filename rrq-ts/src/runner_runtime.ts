@@ -1,7 +1,6 @@
 import net from "node:net";
 import { fileURLToPath } from "node:url";
 
-export const ENV_RUNNER_TCP_SOCKET = "RRQ_RUNNER_TCP_SOCKET";
 export const PROTOCOL_VERSION = "2";
 const MAX_FRAME_LEN = 16 * 1024 * 1024;
 const MAX_IN_FLIGHT_PER_CONNECTION = 64;
@@ -155,14 +154,13 @@ export class RunnerRuntime {
     this.telemetry = telemetry;
   }
 
-  async runFromEnv(): Promise<void> {
-    const tcpSocket = process.env[ENV_RUNNER_TCP_SOCKET];
-    if (tcpSocket) {
-      const address = parseTcpSocket(tcpSocket);
-      await this.runTcp(address.host, address.port);
-      return;
+  async runFromArgs(argv: string[] = process.argv.slice(2)): Promise<void> {
+    const tcpSocket = readArgValue(argv, "--tcp-socket");
+    if (!tcpSocket) {
+      throw new Error("--tcp-socket must be provided");
     }
-    throw new Error(`${ENV_RUNNER_TCP_SOCKET} must be set`);
+    const address = parseTcpSocket(tcpSocket);
+    await this.runTcp(address.host, address.port);
   }
 
   async runTcp(host: string, port: number): Promise<void> {
@@ -381,6 +379,15 @@ export class RunnerRuntime {
     }
     activeRequests.delete(requestId);
   }
+}
+
+function readArgValue(argv: string[], name: string): string | null {
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === name && i + 1 < argv.length) {
+      return argv[i + 1] ?? null;
+    }
+  }
+  return null;
 }
 
 export function parseTcpSocket(value: string): { host: string; port: number } {
@@ -636,7 +643,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 
   const runtime = new RunnerRuntime(registry);
   runtime
-    .runFromEnv()
+    .runFromArgs()
     .catch((error) => {
       console.error(error);
       process.exitCode = 1;

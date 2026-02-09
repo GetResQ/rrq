@@ -26,7 +26,7 @@ static OTEL_PROVIDER: OnceLock<sdktrace::SdkTracerProvider> = OnceLock::new();
 
 pub fn log_format() -> LogFormat {
     *LOG_FORMAT.get_or_init(|| {
-        let value = env::var("RRQ_LOG_FORMAT").unwrap_or_else(|_| "json".to_string());
+        let value = env::var("RUST_LOG_FORMAT").unwrap_or_else(|_| "json".to_string());
         parse_log_format(&value)
     })
 }
@@ -112,12 +112,9 @@ fn init_otel_layer() -> (
 
     let service_name = env_optional_nonempty("OTEL_SERVICE_NAME")
         .or_else(|| otel_resource_attribute("service.name"))
-        .or_else(|| env_optional_nonempty("RRQ_SERVICE_NAME"))
         .unwrap_or_else(|| "rrq".to_string());
-    let environment = otel_resource_attribute("deployment.environment")
-        .or_else(|| env_optional_nonempty("ENVIRONMENT"));
-    let version = otel_resource_attribute("service.version")
-        .or_else(|| env_optional_nonempty("SERVICE_VERSION"));
+    let environment = otel_resource_attribute("deployment.environment");
+    let version = otel_resource_attribute("service.version");
 
     let exporter = match build_otlp_exporter() {
         Ok(exporter) => exporter,
@@ -163,10 +160,7 @@ fn otel_enabled() -> bool {
 fn build_otlp_exporter() -> Result<SpanExporter, String> {
     let endpoint = resolve_otlp_endpoint();
 
-    let mut headers = parse_otlp_headers(env::var("OTEL_EXPORTER_OTLP_HEADERS").ok());
-    if let Ok(api_key) = env::var("DD_API_KEY") {
-        headers.entry("DD-API-KEY".to_string()).or_insert(api_key);
-    }
+    let headers = parse_otlp_headers(env::var("OTEL_EXPORTER_OTLP_HEADERS").ok());
 
     let mut exporter_builder = SpanExporter::builder().with_http().with_endpoint(endpoint);
     if !headers.is_empty() {

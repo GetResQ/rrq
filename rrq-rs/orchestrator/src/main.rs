@@ -270,9 +270,9 @@ enum DebugCommand {
 enum RunnerCommand {
     Python {
         #[arg(long)]
-        settings: Option<String>,
+        settings: String,
         #[arg(long)]
-        tcp_socket: Option<String>,
+        tcp_socket: String,
     },
 }
 
@@ -469,6 +469,9 @@ async fn dispatch_command(command: Commands) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_crypto_provider();
+    // Load `.env` before reading env-controlled settings like RUST_LOG_FORMAT / OTEL_*.
+    // rrq-config also loads `.env` when loading rrq.toml, but tracing is initialized earlier.
+    dotenvy::dotenv().ok();
     telemetry::init_tracing();
     let cli = Cli::parse();
     dispatch_command(cli.command).await
@@ -536,13 +539,17 @@ mod tests {
     async fn write_runner_script(dir: &Path) -> Result<PathBuf> {
         let script_path = dir.join("rrq-dummy-runner.py");
         let script = r#"#!/usr/bin/env python3
-import os
 import socket
+import sys
 import time
 
-tcp_socket = os.environ.get("RRQ_RUNNER_TCP_SOCKET")
-if not tcp_socket:
+def resolve_tcp_socket(argv: list[str]) -> str:
+    for i, value in enumerate(argv):
+        if value == "--tcp-socket" and i + 1 < len(argv):
+            return argv[i + 1]
     raise SystemExit(1)
+
+tcp_socket = resolve_tcp_socket(sys.argv[1:])
 host, _, port_str = tcp_socket.rpartition(":")
 if not host:
     raise SystemExit(1)
@@ -797,8 +804,8 @@ while True:
 
         dispatch_command(Commands::Runner {
             command: RunnerCommand::Python {
-                settings: None,
-                tcp_socket: None,
+                settings: "settings.path".to_string(),
+                tcp_socket: "127.0.0.1:1234".to_string(),
             },
         })
         .await?;

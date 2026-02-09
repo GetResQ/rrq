@@ -689,13 +689,17 @@ mod tests {
     async fn write_runner_script(dir: &Path) -> Result<PathBuf> {
         let script_path = dir.join("rrq-dummy-runner.py");
         let script = r#"#!/usr/bin/env python3
-import os
 import socket
+import sys
 import time
 
-tcp_socket = os.environ.get("RRQ_RUNNER_TCP_SOCKET")
-if not tcp_socket:
+def resolve_tcp_socket(argv: list[str]) -> str:
+    for i, value in enumerate(argv):
+        if value == "--tcp-socket" and i + 1 < len(argv):
+            return argv[i + 1]
     raise SystemExit(1)
+
+tcp_socket = resolve_tcp_socket(sys.argv[1:])
 host, _, port_str = tcp_socket.rpartition(":")
 if not host:
     raise SystemExit(1)
@@ -725,17 +729,21 @@ while True:
         let marker = marker_path.to_string_lossy();
         let script = format!(
             r#"#!/usr/bin/env python3
-import os
 import socket
+import sys
 import time
 
 marker_path = r"{marker}"
 with open(marker_path, "w", encoding="utf-8") as f:
     f.write("started\n")
 
-tcp_socket = os.environ.get("RRQ_RUNNER_TCP_SOCKET")
-if not tcp_socket:
+def resolve_tcp_socket(argv: list[str]) -> str:
+    for i, value in enumerate(argv):
+        if value == "--tcp-socket" and i + 1 < len(argv):
+            return argv[i + 1]
     raise SystemExit(1)
+
+tcp_socket = resolve_tcp_socket(sys.argv[1:])
 host, _, port_str = tcp_socket.rpartition(":")
 if not host:
     raise SystemExit(1)

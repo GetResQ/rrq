@@ -13,8 +13,6 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{Duration, timeout};
-
-pub const ENV_RUNNER_TCP_SOCKET: &str = "RRQ_RUNNER_TCP_SOCKET";
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 const RESPONSE_CHANNEL_CAPACITY: usize = 64;
 const RESPONSE_SEND_TIMEOUT: Duration = Duration::from_secs(1);

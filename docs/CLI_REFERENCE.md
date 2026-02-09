@@ -32,7 +32,7 @@ Notes:
   `cargo build`) and include `*.rs` / build inputs in the watch patterns.
 - Runners can write to stdout/stderr; the orchestrator will capture and emit
   those lines with runner prefixes. Use `RUST_LOG` to control orchestrator
-  verbosity.
+  verbosity and `RUST_LOG_FORMAT=pretty|json` to control output format.
 - Watch defaults can be set in `rrq.toml` under `[rrq.watch]`. CLI flags take
   precedence over config values.
 
@@ -42,14 +42,12 @@ Notes:
 Spawn the Python runner runtime (`rrq-runner`).
 
 Options:
-- `--settings` PythonRunnerSettings object path (optional; falls back to
-  `RRQ_RUNNER_SETTINGS`)
-- `--tcp-socket` Localhost TCP socket in `host:port` form (optional; falls back
-  to `RRQ_RUNNER_TCP_SOCKET`)
+- `--settings` PythonRunnerSettings object path (required)
+- `--tcp-socket` Localhost TCP socket in `host:port` form (required)
 
 Notes:
-- The orchestrator sets `RRQ_RUNNER_TCP_SOCKET` automatically when it launches
-  runners. For manual runs, pass `--tcp-socket` or set the env var.
+- The orchestrator launches runners with `--tcp-socket` and manages port
+  assignment for runner pools.
 - TCP sockets must bind to localhost.
 
 ## Health

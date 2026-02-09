@@ -87,7 +87,7 @@ cargo build -p rrq --release
 
 ```bash
 cd runner
-RRQ_RUNNER_TCP_SOCKET=127.0.0.1:9000 cargo run --example socket_runner
+cargo run --example socket_runner -- --tcp-socket 127.0.0.1:9000
 ```
 
 ## Related Packages

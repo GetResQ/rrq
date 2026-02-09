@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib
-import os
 import logging
 from dataclasses import dataclass
 from contextlib import suppress
@@ -20,9 +19,6 @@ from .registry import Registry
 
 logger = logging.getLogger(__name__)
 
-
-ENV_RUNNER_SETTINGS = "RRQ_RUNNER_SETTINGS"
-ENV_RUNNER_TCP_SOCKET = "RRQ_RUNNER_TCP_SOCKET"
 _LOCALHOST_ALIASES = {"localhost", "127.0.0.1", "::1"}
 MAX_IN_FLIGHT_PER_CONNECTION = 64
 
@@ -234,12 +230,7 @@ def load_runner_settings(
     settings_object_path: str | None,
 ) -> PythonRunnerSettings:
     if settings_object_path is None:
-        settings_object_path = os.getenv(ENV_RUNNER_SETTINGS)
-    if settings_object_path is None:
-        raise ValueError(
-            "Python runner settings not provided. Use --settings or "
-            f"{ENV_RUNNER_SETTINGS}."
-        )
+        raise ValueError("Python runner settings not provided. Use --settings.")
 
     parts = settings_object_path.split(".")
     if len(parts) < 2:
@@ -295,14 +286,9 @@ def _parse_tcp_socket(tcp_socket: str) -> tuple[str, int]:
 
 
 def resolve_tcp_socket(tcp_socket: str | None) -> tuple[str, int]:
-    if tcp_socket is None:
-        tcp_socket = os.getenv(ENV_RUNNER_TCP_SOCKET)
     if tcp_socket:
         return _parse_tcp_socket(tcp_socket)
-    raise ValueError(
-        "Runner TCP socket not provided. Use --tcp-socket or set "
-        f"{ENV_RUNNER_TCP_SOCKET}."
-    )
+    raise ValueError("Runner TCP socket not provided. Use --tcp-socket.")
 
 
 async def _handle_connection(
@@ -446,19 +432,17 @@ def main() -> None:
     parser.add_argument(
         "--settings",
         dest="settings_object_path",
+        required=True,
         help=(
             "PythonRunnerSettings object path "
             "(e.g., myapp.runner_config.python_runner_settings). "
-            f"Defaults to {ENV_RUNNER_SETTINGS} if unset."
         ),
     )
     parser.add_argument(
         "--tcp-socket",
         dest="tcp_socket",
-        help=(
-            "TCP socket in host:port form (localhost only). Defaults to "
-            f"{ENV_RUNNER_TCP_SOCKET} if unset."
-        ),
+        required=True,
+        help=("TCP socket in host:port form (localhost only)."),
     )
     args = parser.parse_args()
     try:

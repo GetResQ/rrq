@@ -13,7 +13,6 @@ from rrq.runner_runtime import (
     _execute_with_deadline,
     _handle_connection,
     _parse_tcp_socket,
-    ENV_RUNNER_TCP_SOCKET,
     resolve_tcp_socket,
 )
 from rrq.protocol import read_message, write_message
@@ -406,7 +405,6 @@ def test_parse_tcp_socket_rejects_non_localhost() -> None:
         _parse_tcp_socket("example.com:1234")
 
 
-def test_resolve_tcp_socket_requires_value(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(ENV_RUNNER_TCP_SOCKET, raising=False)
+def test_resolve_tcp_socket_requires_value() -> None:
     with pytest.raises(ValueError):
         resolve_tcp_socket(None)

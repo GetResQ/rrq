@@ -3,17 +3,10 @@ use std::process::Stdio;
 use anyhow::Result;
 use tokio::process::Command;
 
-pub(crate) async fn runner_python(
-    settings: Option<String>,
-    tcp_socket: Option<String>,
-) -> Result<()> {
+pub(crate) async fn runner_python(settings: String, tcp_socket: String) -> Result<()> {
     let mut cmd = Command::new("rrq-runner");
-    if let Some(settings) = settings {
-        cmd.arg("--settings").arg(settings);
-    }
-    if let Some(tcp_socket) = tcp_socket {
-        cmd.arg("--tcp-socket").arg(tcp_socket);
-    }
+    cmd.arg("--settings").arg(settings);
+    cmd.arg("--tcp-socket").arg(tcp_socket);
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -77,11 +70,7 @@ mod tests {
         let new_path = format!("{}:{}", dir.to_string_lossy(), original);
         let _guard = EnvGuard::set("PATH", new_path);
 
-        runner_python(
-            Some("settings.toml".to_string()),
-            Some("127.0.0.1:1234".to_string()),
-        )
-        .await?;
+        runner_python("settings.toml".to_string(), "127.0.0.1:1234".to_string()).await?;
 
         let _ = fs::remove_file(&script_path).await;
         let _ = fs::remove_dir_all(&dir).await;
