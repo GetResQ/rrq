@@ -90,7 +90,8 @@ import { OtelTelemetry } from "rrq-ts";
 
 const registry = new Registry();
 const runtime = new RunnerRuntime(registry, new OtelTelemetry());
-await runtime.runFromEnv();
+// RRQ launches runners with: --tcp-socket host:port
+await runtime.runFromArgs();
 ```
 
 ### Rust runner

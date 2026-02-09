@@ -139,7 +139,8 @@ registry.register("send_email", async (request) => ({
   result: { sent: true }
 }));
 const runtime = new RunnerRuntime(registry);
-await runtime.runFromEnv();
+// RRQ launches runners with: --tcp-socket host:port
+await runtime.runFromArgs();
 ```
 
 ## Features

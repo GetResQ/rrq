@@ -71,7 +71,8 @@ registry.register("send_email", async (request, signal) => {
 });
 
 const runtime = new RunnerRuntime(registry);
-await runtime.runFromEnv();
+// RRQ launches runners with: --tcp-socket host:port
+await runtime.runFromArgs();
 ```
 
 ### 4. Configure (`rrq.toml`)
@@ -226,7 +227,8 @@ const retry: ExecutionOutcome = {
 import { RunnerRuntime, Registry, OtelTelemetry } from "rrq-ts";
 
 const runtime = new RunnerRuntime(registry, new OtelTelemetry());
-await runtime.runFromEnv();
+// RRQ launches runners with: --tcp-socket host:port
+await runtime.runFromArgs();
 ```
 
 ## Producer FFI Setup
