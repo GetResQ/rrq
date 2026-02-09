@@ -130,6 +130,9 @@ also forces runner pool sizes and `max_in_flight` to `1` and sets
 | `include_patterns` | array | `["*.py", "*.toml"]` | Restart on matching changes. |
 | `ignore_patterns` | array | see below | Ignored globs. |
 | `no_gitignore` | bool | `false` | Disable `.gitignore` and `.git/info/exclude`. |
+| `pre_restart_cmds` | array of arrays | `[]` | Commands to run before starting/restarting the worker in watch mode (for example, `cargo build`). Each entry is an argv array. A non-zero exit code keeps the worker stopped until the next change. |
+| `pre_restart_cwd` | string | `path` | Working directory for `pre_restart_cmds`. |
+| `pre_restart_timeout_seconds` | float | unset | Optional timeout applied per `pre_restart_cmds` entry. |
 
 Default `ignore_patterns` when not provided:
 

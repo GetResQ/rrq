@@ -42,6 +42,14 @@ pub struct WatchSettings {
     pub include_patterns: Vec<String>,
     pub ignore_patterns: Vec<String>,
     pub no_gitignore: Option<bool>,
+    /// Optional commands to run before starting/restarting a worker in watch mode.
+    /// Each entry is an argv array: `["cmd", "arg1", ...]`.
+    pub pre_restart_cmds: Vec<Vec<String>>,
+    /// Optional working directory for `pre_restart_cmds`.
+    /// Defaults to the resolved watch root.
+    pub pre_restart_cwd: Option<String>,
+    /// Optional timeout (seconds) applied to each `pre_restart_cmds` entry.
+    pub pre_restart_timeout_seconds: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -28,6 +28,8 @@ Notes:
 - Watch mode forces runner pool sizes and `max_in_flight` to 1.
 - A change that matches `--pattern` and does not match `--ignore-pattern`
   triggers a worker restart.
+- For compiled languages, configure `[rrq.watch].pre_restart_cmds` (for example,
+  `cargo build`) and include `*.rs` / build inputs in the watch patterns.
 - Runners can write to stdout/stderr; the orchestrator will capture and emit
   those lines with runner prefixes. Use `RUST_LOG` to control orchestrator
   verbosity.

@@ -7,6 +7,7 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{Event, EventKind, RecursiveMode, Watcher, event::ModifyKind, recommended_watcher};
 use tokio::sync::mpsc;
 use tokio::time::Duration;
+use tokio::{process::Command, time::timeout};
 
 use rrq::runner::{
     build_runners_from_settings_filtered, determine_needed_runners, resolve_runner_max_in_flight,
@@ -154,6 +155,61 @@ fn load_gitignore(root: &Path) -> Result<Option<Gitignore>> {
     }
 }
 
+async fn run_pre_restart_cmds(
+    cmds: &[Vec<String>],
+    cwd: &Path,
+    per_cmd_timeout: Option<Duration>,
+) -> Result<bool> {
+    for (idx, cmd) in cmds.iter().enumerate() {
+        let Some((exe, args)) = cmd.split_first() else {
+            return Err(anyhow::anyhow!(
+                "invalid rrq.watch.pre_restart_cmds[{idx}]: command is empty"
+            ));
+        };
+        println!(
+            "Running watch pre-restart command: {}{}",
+            exe,
+            if args.is_empty() {
+                "".to_string()
+            } else {
+                format!(" {}", args.join(" "))
+            }
+        );
+        let mut child = Command::new(exe)
+            .args(args)
+            .current_dir(cwd)
+            // Inherit IO so build errors are visible in the terminal.
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .with_context(|| format!("failed to spawn rrq.watch.pre_restart_cmds[{idx}]"))?;
+
+        let status = if let Some(limit) = per_cmd_timeout {
+            match timeout(limit, child.wait()).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    eprintln!(
+                        "watch pre-restart command timed out after {:.3}s (idx={idx})",
+                        limit.as_secs_f64()
+                    );
+                    return Ok(false);
+                }
+            }
+        } else {
+            child.wait().await?
+        };
+
+        if !status.success() {
+            eprintln!("watch pre-restart command failed (idx={idx}, status={status})");
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn should_restart_for_event(
     event: &Event,
     base: &Path,
@@ -212,13 +268,13 @@ pub(crate) async fn run_worker_watch(
     let initial_settings = load_toml_settings(config.as_deref())?;
     let watch_settings = initial_settings.watch.clone();
     let watch_path = path
-        .or(watch_settings.path)
+        .or(watch_settings.path.clone())
         .unwrap_or_else(|| ".".to_string());
     let include_patterns = if include_patterns.is_empty() {
         if watch_settings.include_patterns.is_empty() {
             vec!["*.py".to_string(), "*.toml".to_string()]
         } else {
-            watch_settings.include_patterns
+            watch_settings.include_patterns.clone()
         }
     } else {
         include_patterns
@@ -247,12 +303,24 @@ pub(crate) async fn run_worker_watch(
                 ".pytest_cache/**".to_string(),
             ]
         } else {
-            watch_settings.ignore_patterns
+            watch_settings.ignore_patterns.clone()
         }
     } else {
         ignore_patterns
     };
     let no_gitignore = no_gitignore || watch_settings.no_gitignore.unwrap_or(false);
+    let pre_restart_cmds = watch_settings.pre_restart_cmds.clone();
+    let pre_restart_cwd = watch_settings.pre_restart_cwd.clone();
+    let pre_restart_timeout = watch_settings
+        .pre_restart_timeout_seconds
+        .and_then(|s| {
+            if s.is_finite() && s > 0.0 {
+                Some(s)
+            } else {
+                None
+            }
+        })
+        .map(Duration::from_secs_f64);
 
     let watch_root =
         std::fs::canonicalize(&watch_path).unwrap_or_else(|_| PathBuf::from(&watch_path));
@@ -286,6 +354,73 @@ pub(crate) async fn run_worker_watch(
             Some(settings) => settings,
             None => load_toml_settings(config.as_deref())?,
         };
+
+        // If configured, run build steps (or other commands) before starting/restarting the worker.
+        if !pre_restart_cmds.is_empty() {
+            let cwd = pre_restart_cwd
+                .as_deref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| watch_root.clone());
+            let ok = run_pre_restart_cmds(&pre_restart_cmds, &cwd, pre_restart_timeout).await?;
+            if !ok {
+                eprintln!(
+                    "watch pre-restart commands failed; worker will remain stopped until next change."
+                );
+                // Stay stopped and wait for a change event that matches the patterns, then retry.
+                loop {
+                    tokio::select! {
+                        _ = wait_for_shutdown_signal() => {
+                            exit_loop = true;
+                        }
+                        Some(event) = rx.recv() => {
+                            match event {
+                                Ok(event) => {
+                                    if should_restart_for_event(
+                                        &event,
+                                        &watch_root,
+                                        &include_set,
+                                        &ignore_set,
+                                        gitignore.as_ref(),
+                                    ) {
+                                        println!(
+                                            "Change detected while stopped (event={:?}, paths={:?}).",
+                                            event.kind, event.paths
+                                        );
+                                        // Drain a little to coalesce rapid edits before retrying.
+                                        while tokio::time::timeout(Duration::from_millis(200), rx.recv())
+                                            .await
+                                            .ok()
+                                            .flatten()
+                                            .is_some()
+                                        {}
+                                        break;
+                                    }
+                                }
+                                Err(err) => {
+                                    eprintln!("watch error: {err}");
+                                    while tokio::time::timeout(Duration::from_millis(200), rx.recv())
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                        .is_some()
+                                    {}
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if exit_loop {
+                        break;
+                    }
+                }
+                if exit_loop {
+                    break;
+                }
+                // Force reload settings on next iteration (config may have changed).
+                cached_settings = None;
+                continue;
+            }
+        }
 
         // Determine which runners are needed based on the queues being listened to
         let queues_slice = if queues.is_empty() {
@@ -585,6 +720,65 @@ while True:
         Ok(script_path)
     }
 
+    async fn write_runner_script_with_marker(dir: &Path, marker_path: &Path) -> Result<PathBuf> {
+        let script_path = dir.join("rrq-dummy-runner-marker.py");
+        let marker = marker_path.to_string_lossy();
+        let script = format!(
+            r#"#!/usr/bin/env python3
+import os
+import socket
+import time
+
+marker_path = r"{marker}"
+with open(marker_path, "w", encoding="utf-8") as f:
+    f.write("started\n")
+
+tcp_socket = os.environ.get("RRQ_RUNNER_TCP_SOCKET")
+if not tcp_socket:
+    raise SystemExit(1)
+host, _, port_str = tcp_socket.rpartition(":")
+if not host:
+    raise SystemExit(1)
+port = int(port_str)
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind((host, port))
+sock.listen(1)
+try:
+    conn, _ = sock.accept()
+    conn.close()
+except Exception:
+    pass
+while True:
+    time.sleep(1)
+"#
+        );
+        tokio_fs::write(&script_path, script).await?;
+        let mut perms = tokio_fs::metadata(&script_path).await?.permissions();
+        perms.set_mode(0o755);
+        tokio_fs::set_permissions(&script_path, perms).await?;
+        Ok(script_path)
+    }
+
+    async fn write_build_gate_script(dir: &Path) -> Result<PathBuf> {
+        let script_path = dir.join("rrq-build-gate.py");
+        let script = r#"import pathlib
+import sys
+
+p = pathlib.Path("rrq-build-counter.txt")
+try:
+    n = int(p.read_text(encoding="utf-8"))
+except Exception:
+    n = 0
+n += 1
+p.write_text(str(n), encoding="utf-8")
+sys.exit(1 if n == 1 else 0)
+"#;
+        tokio_fs::write(&script_path, script).await?;
+        Ok(script_path)
+    }
+
     async fn write_worker_config(
         settings: &rrq::RRQSettings,
         script_path: &Path,
@@ -598,6 +792,26 @@ while True:
             settings.default_dlq_name,
             script_path.to_string_lossy(),
             port,
+        );
+        tokio_fs::write(&path, payload).await?;
+        Ok(path)
+    }
+
+    async fn write_worker_config_with_watch(
+        settings: &rrq::RRQSettings,
+        script_path: &Path,
+        watch_payload: &str,
+    ) -> Result<PathBuf> {
+        let path = std::env::temp_dir().join(format!("rrq-worker-{}.toml", Uuid::new_v4()));
+        let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+        let payload = format!(
+            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_runner_name = \"python\"\n\n[rrq.runners.python]\ncmd = [\"python3\", \"{}\"]\ntcp_socket = \"127.0.0.1:{}\"\npool_size = 1\nmax_in_flight = 1\n\n{}\n",
+            settings.redis_dsn,
+            settings.default_queue_name,
+            settings.default_dlq_name,
+            script_path.to_string_lossy(),
+            port,
+            watch_payload,
         );
         tokio_fs::write(&path, payload).await?;
         Ok(path)
@@ -661,6 +875,74 @@ while True:
 
         let _ = tokio_fs::remove_file(&config_path).await;
         let _ = tokio_fs::remove_file(&script_path).await;
+        let _ = tokio_fs::remove_dir_all(&temp_dir).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_worker_watch_pre_restart_cmds_gate_worker_start() -> Result<()> {
+        let ctx = RedisTestContext::new().await?;
+        let temp_dir = std::env::temp_dir().join(format!("rrq-watch-build-{}", Uuid::new_v4()));
+        tokio_fs::create_dir_all(&temp_dir).await?;
+        let watch_root = temp_dir.join("watch");
+        tokio_fs::create_dir_all(&watch_root).await?;
+
+        let runner_marker = temp_dir.join("runner-started.txt");
+        let script_path = write_runner_script_with_marker(&temp_dir, &runner_marker).await?;
+        let build_script_path = write_build_gate_script(&temp_dir).await?;
+        let watch_payload = format!(
+            "[rrq.watch]\npre_restart_cmds = [[\"python3\", \"{}\"]]\npre_restart_cwd = \"{}\"\n",
+            build_script_path.file_name().unwrap().to_string_lossy(),
+            temp_dir.to_string_lossy()
+        );
+        let config_path =
+            write_worker_config_with_watch(&ctx.settings, &script_path, &watch_payload).await?;
+
+        let handle = tokio::spawn(run_worker_watch(
+            Some(config_path.to_string_lossy().to_string()),
+            Vec::new(),
+            Some(watch_root.to_string_lossy().to_string()),
+            vec!["*.txt".to_string()],
+            Vec::new(),
+            true,
+        ));
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // First pre-restart command fails, so the worker should remain stopped.
+        assert!(!runner_marker.exists());
+
+        let trigger = watch_root.join("trigger.txt");
+        tokio_fs::write(&trigger, "ping-1").await?;
+
+        // Next change should let the build succeed and the worker should start.
+        let started = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if runner_marker.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(started.is_ok());
+
+        // Trigger a restart so the test-only watch restart limit can terminate the loop.
+        tokio_fs::write(&trigger, "ping-2").await?;
+        let result = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        assert!(result.is_ok());
+        let join = result.unwrap();
+        assert!(join.is_ok());
+
+        let counter_path = temp_dir.join("rrq-build-counter.txt");
+        let counter = tokio_fs::read_to_string(&counter_path).await?;
+        let n: i64 = counter.trim().parse().unwrap_or(0);
+        assert!(n >= 2);
+
+        let _ = tokio_fs::remove_file(&config_path).await;
+        let _ = tokio_fs::remove_file(&script_path).await;
+        let _ = tokio_fs::remove_file(&build_script_path).await;
+        let _ = tokio_fs::remove_file(&counter_path).await;
+        let _ = tokio_fs::remove_file(&runner_marker).await;
         let _ = tokio_fs::remove_dir_all(&temp_dir).await;
         Ok(())
     }

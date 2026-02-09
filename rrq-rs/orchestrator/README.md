@@ -144,6 +144,12 @@ queue_name = "maintenance"
 path = "."
 include_patterns = ["*.py", "*.toml"]
 ignore_patterns = [".venv/**", "dist/**"]
+#
+# Optional build steps (useful for compiled handlers/runners):
+# - Each entry is an argv array.
+# - If any command fails, the worker remains stopped until the next change.
+pre_restart_cmds = [["cargo", "build"]]
+pre_restart_cwd = "."
 ```
 
 ## Architecture
