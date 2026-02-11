@@ -82,6 +82,7 @@ fn env_overrides() -> Result<Value> {
     let mut payload = Map::new();
 
     set_env_string(&mut payload, "redis_dsn", "RRQ_REDIS_DSN");
+    set_env_bool(&mut payload, "capture_runner_output", "RRQ_CAPTURE_RUNNER_OUTPUT");
 
     Ok(Value::Object(payload))
 }
@@ -91,6 +92,15 @@ fn set_env_string(map: &mut Map<String, Value>, key: &str, env: &str) {
         && !value.is_empty()
     {
         map.insert(key.to_string(), Value::String(value));
+    }
+}
+
+fn set_env_bool(map: &mut Map<String, Value>, key: &str, env: &str) {
+    if let Ok(value) = std::env::var(env)
+        && !value.is_empty()
+    {
+        let b = matches!(value.as_str(), "1" | "true" | "yes");
+        map.insert(key.to_string(), Value::Bool(b));
     }
 }
 

@@ -159,6 +159,7 @@ pub struct SocketRunnerPool {
     availability: Arc<Notify>,
     response_timeout: Option<Duration>,
     connect_timeout: Duration,
+    capture_output: bool,
     #[cfg(test)]
     spawn_override: Option<Arc<dyn Fn() -> SocketProcess + Send + Sync>>,
 }
@@ -186,6 +187,7 @@ impl SocketRunnerPool {
         tcp_socket: Option<String>,
         response_timeout: Option<Duration>,
         connect_timeout: Duration,
+        capture_output: bool,
     ) -> Result<Self> {
         let name = name.into();
         if pool_size == 0 {
@@ -223,6 +225,7 @@ impl SocketRunnerPool {
             availability: Arc::new(Notify::new()),
             response_timeout,
             connect_timeout,
+            capture_output,
             #[cfg(test)]
             spawn_override: None,
         };
@@ -306,10 +309,12 @@ impl SocketRunnerPool {
             }
             // Standard runner contract: accept `--tcp-socket host:port` (localhost only).
             command.arg("--tcp-socket").arg(socket.to_string());
-            command
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
+            command.stdin(Stdio::null());
+            if self.capture_output {
+                command.stdout(Stdio::piped()).stderr(Stdio::piped());
+            } else {
+                command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+            }
             if let Some(env) = &self.env {
                 command.envs(env);
             }
@@ -317,24 +322,32 @@ impl SocketRunnerPool {
                 command.current_dir(cwd);
             }
             let mut child = command.spawn().context("failed to spawn runner")?;
-            let stdout_name = self.name.clone();
-            let stderr_name = self.name.clone();
-            let stdout_task = child.stdout.take().map(|stdout| {
-                tokio::spawn(async move {
-                    let mut reader = BufReader::new(stdout).lines();
-                    while let Ok(Some(line)) = reader.next_line().await {
-                        emit_runner_log(&stdout_name, RunnerLogStream::Stdout, &line);
-                    }
+            let stdout_task = if self.capture_output {
+                let stdout_name = self.name.clone();
+                child.stdout.take().map(|stdout| {
+                    tokio::spawn(async move {
+                        let mut reader = BufReader::new(stdout).lines();
+                        while let Ok(Some(line)) = reader.next_line().await {
+                            emit_runner_log(&stdout_name, RunnerLogStream::Stdout, &line);
+                        }
+                    })
                 })
-            });
-            let stderr_task = child.stderr.take().map(|stderr| {
-                tokio::spawn(async move {
-                    let mut reader = BufReader::new(stderr).lines();
-                    while let Ok(Some(line)) = reader.next_line().await {
-                        emit_runner_log(&stderr_name, RunnerLogStream::Stderr, &line);
-                    }
+            } else {
+                None
+            };
+            let stderr_task = if self.capture_output {
+                let stderr_name = self.name.clone();
+                child.stderr.take().map(|stderr| {
+                    tokio::spawn(async move {
+                        let mut reader = BufReader::new(stderr).lines();
+                        while let Ok(Some(line)) = reader.next_line().await {
+                            emit_runner_log(&stderr_name, RunnerLogStream::Stderr, &line);
+                        }
+                    })
                 })
-            });
+            } else {
+                None
+            };
 
             match self.connect_socket(&socket, &mut child).await {
                 Ok(()) => {
@@ -575,6 +588,7 @@ impl SocketRunner {
         tcp_socket: Option<String>,
         response_timeout_seconds: Option<f64>,
         connect_timeout: Duration,
+        capture_output: bool,
     ) -> Result<Self> {
         let response_timeout = response_timeout_seconds.map(Duration::from_secs_f64);
         let pool = SocketRunnerPool::new(
@@ -587,6 +601,7 @@ impl SocketRunner {
             tcp_socket,
             response_timeout,
             connect_timeout,
+            capture_output,
         )
         .await?;
         Ok(Self {
@@ -898,6 +913,7 @@ pub async fn build_runners_from_settings_filtered(
             config.tcp_socket.clone(),
             config.response_timeout_seconds,
             connect_timeout,
+            settings.capture_runner_output,
         )
         .await?;
         runners.insert(name.clone(), Arc::new(runner));
@@ -1063,6 +1079,7 @@ mod tests {
             availability: Arc::new(Notify::new()),
             response_timeout: None,
             connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            capture_output: true,
             spawn_override: None,
         }
     }
@@ -1131,6 +1148,7 @@ mod tests {
             availability: Arc::new(Notify::new()),
             response_timeout: None,
             connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            capture_output: true,
             spawn_override: Some(spawn_override),
         };
         pool.ensure_started().await.unwrap();
@@ -1168,6 +1186,7 @@ mod tests {
             availability: Arc::new(Notify::new()),
             response_timeout: None,
             connect_timeout: Duration::from_millis(50),
+            capture_output: true,
             spawn_override: None,
         };
         let mut child = Command::new("true").spawn().unwrap();
@@ -1256,6 +1275,7 @@ mod tests {
             Some("127.0.0.1:65535".to_string()),
             None,
             Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            true,
         )
         .await;
         match err {
@@ -1283,6 +1303,7 @@ mod tests {
             availability: Arc::new(Notify::new()),
             response_timeout: None,
             connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            capture_output: true,
             spawn_override: None,
         };
 
@@ -1325,6 +1346,7 @@ mod tests {
             availability: Arc::new(Notify::new()),
             response_timeout: None,
             connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            capture_output: true,
             spawn_override: None,
         };
 
@@ -1455,6 +1477,7 @@ mod tests {
             availability: Arc::new(Notify::new()),
             response_timeout: Some(Duration::from_millis(50)),
             connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            capture_output: true,
             spawn_override: None,
         };
         let runner = SocketRunner {
@@ -1565,6 +1588,7 @@ mod tests {
             availability: Arc::new(Notify::new()),
             response_timeout: None,
             connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            capture_output: true,
             spawn_override: None,
         };
 
@@ -1614,6 +1638,7 @@ mod tests {
             availability: Arc::new(Notify::new()),
             response_timeout: None,
             connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            capture_output: true,
             spawn_override: Some(spawn_override),
         };
 

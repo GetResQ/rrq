@@ -64,6 +64,10 @@ pub struct RRQSettings {
     pub default_result_ttl_seconds: i64,
     pub default_poll_delay_seconds: f64,
     pub runner_connect_timeout_ms: i64,
+    /// When true, capture runner stdout/stderr and re-emit through rrq's
+    /// structured logging.  When false (default), runner output goes directly
+    /// to the terminal.  Enable in production for unified log shipping.
+    pub capture_runner_output: bool,
     pub default_unique_job_lock_ttl_seconds: i64,
     pub default_runner_name: String,
     pub runners: HashMap<String, RunnerConfig>,
@@ -90,6 +94,7 @@ impl Default for RRQSettings {
             default_result_ttl_seconds: DEFAULT_RESULT_TTL_SECONDS,
             default_poll_delay_seconds: DEFAULT_POLL_DELAY_SECONDS,
             runner_connect_timeout_ms: DEFAULT_RUNNER_CONNECT_TIMEOUT_MS,
+            capture_runner_output: false,
             default_unique_job_lock_ttl_seconds: DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
             default_runner_name: "python".to_string(),
             runners: HashMap::new(),
