@@ -82,7 +82,11 @@ fn env_overrides() -> Result<Value> {
     let mut payload = Map::new();
 
     set_env_string(&mut payload, "redis_dsn", "RRQ_REDIS_DSN");
-    set_env_bool(&mut payload, "capture_runner_output", "RRQ_CAPTURE_RUNNER_OUTPUT");
+    set_env_bool(
+        &mut payload,
+        "capture_runner_output",
+        "RRQ_CAPTURE_RUNNER_OUTPUT",
+    );
 
     Ok(Value::Object(payload))
 }
