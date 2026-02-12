@@ -94,6 +94,10 @@ export class OtelTelemetry implements Telemetry {
     if (request.context.worker_id) {
       attributes["rrq.worker_id"] = request.context.worker_id;
     }
+    const enqueueMs = Date.parse(request.context.enqueue_time);
+    if (!Number.isNaN(enqueueMs)) {
+      attributes["rrq.queue_wait_ms"] = Math.max(Date.now() - enqueueMs, 0);
+    }
     const span = tracer.startSpan(
       "rrq.runner",
       {
@@ -104,6 +108,10 @@ export class OtelTelemetry implements Telemetry {
     );
     if (request.context.deadline) {
       span.setAttribute("rrq.deadline", request.context.deadline);
+      const deadlineMs = Date.parse(request.context.deadline);
+      if (!Number.isNaN(deadlineMs)) {
+        span.setAttribute("rrq.deadline_remaining_ms", Math.max(deadlineMs - Date.now(), 0));
+      }
     }
     return new OtelRunnerSpan(span);
   }

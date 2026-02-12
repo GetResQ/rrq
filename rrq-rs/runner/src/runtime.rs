@@ -216,6 +216,7 @@ where
                         continue;
                     }
                     active.insert(request_id.clone());
+                    crate::telemetry::record_runner_channel_pressure(active.len());
                 }
                 let response_tx = response_tx.clone();
                 let registry = registry.clone();
@@ -246,7 +247,9 @@ where
                     }
                     {
                         let mut in_flight = in_flight_for_task.lock().await;
-                        in_flight.remove(&request_id_for_task);
+                        if in_flight.remove(&request_id_for_task).is_some() {
+                            crate::telemetry::record_runner_inflight_delta(-1);
+                        }
                     }
                     {
                         let mut job_index = job_index_for_task.lock().await;
@@ -260,6 +263,7 @@ where
                     {
                         let mut active = active_for_task.lock().await;
                         active.remove(&request_id_for_task);
+                        crate::telemetry::record_runner_channel_pressure(active.len());
                     }
                 });
 
@@ -276,6 +280,7 @@ where
                         },
                     );
                 }
+                crate::telemetry::record_runner_inflight_delta(1);
                 {
                     let mut job_index = job_index.lock().await;
                     job_index
@@ -310,6 +315,7 @@ where
         let mut active = connection_requests.lock().await;
         active.drain().collect::<Vec<_>>()
     };
+    crate::telemetry::record_runner_channel_pressure(0);
     for request_id in request_ids {
         let task = {
             let mut in_flight = in_flight.lock().await;
@@ -317,6 +323,7 @@ where
         };
         if let Some(task) = task {
             task.handle.abort();
+            crate::telemetry::record_runner_inflight_delta(-1);
             let mut job_index = job_index.lock().await;
             if let Some(entries) = job_index.get_mut(&task.job_id) {
                 entries.remove(&request_id);
@@ -359,6 +366,12 @@ async fn handle_cancel(
     if request_ids.is_empty() {
         return;
     }
+    let scope = if payload.request_id.is_some() {
+        "request"
+    } else {
+        "job"
+    };
+    crate::telemetry::record_cancellation(scope);
 
     for request_id in request_ids {
         let task = {
@@ -373,9 +386,11 @@ async fn handle_cancel(
         };
         if let Some(task) = task {
             task.handle.abort();
+            crate::telemetry::record_runner_inflight_delta(-1);
             {
                 let mut active = task.connection_requests.lock().await;
                 active.remove(&request_id);
+                crate::telemetry::record_runner_channel_pressure(active.len());
             }
             let outcome = ExecutionOutcome {
                 job_id: Some(payload.job_id.clone()),
@@ -422,6 +437,7 @@ async fn execute_with_deadline<T: Telemetry + ?Sized>(
     if let Some(deadline) = deadline {
         let now: DateTime<Utc> = Utc::now();
         if deadline <= now {
+            crate::telemetry::record_deadline_expired();
             return ExecutionOutcome::timeout(
                 job_id.clone(),
                 request_id.clone(),
@@ -432,6 +448,7 @@ async fn execute_with_deadline<T: Telemetry + ?Sized>(
             match tokio::time::timeout(remaining, registry.execute_with(request, telemetry)).await {
                 Ok(outcome) => return outcome,
                 Err(_) => {
+                    crate::telemetry::record_deadline_expired();
                     return ExecutionOutcome::timeout(
                         job_id.clone(),
                         request_id.clone(),
@@ -440,6 +457,7 @@ async fn execute_with_deadline<T: Telemetry + ?Sized>(
                 }
             }
         }
+        crate::telemetry::record_deadline_expired();
         return ExecutionOutcome::timeout(job_id, request_id, "Job deadline exceeded");
     }
     registry.execute_with(request, telemetry).await

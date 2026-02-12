@@ -12,7 +12,7 @@ use rrq_protocol::{ExecutionContext, ExecutionOutcome, ExecutionRequest, Outcome
 use serde_json::Value;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{Duration, sleep, timeout};
-use tracing::field::Empty;
+use tracing::{Instrument, field::Empty};
 use uuid::Uuid;
 
 use crate::client::{EnqueueOptions, RRQClient};
@@ -216,6 +216,7 @@ impl RRQWorker {
                 .saturating_sub(self.semaphore.available_permits());
             let fetch_count = self.worker_concurrency.saturating_sub(running);
             if fetch_count == 0 {
+                telemetry::record_poll_cycle("no_capacity");
                 self.set_status("idle (concurrency limit)").await;
                 let delay =
                     self.calculate_jittered_delay(self.settings.default_poll_delay_seconds, 0.5);
@@ -226,6 +227,7 @@ impl RRQWorker {
             self.set_status("polling").await;
             let fetched = self.poll_for_jobs(fetch_count).await?;
             if fetched == 0 {
+                telemetry::record_poll_cycle("no_jobs");
                 let running_jobs = self.running_jobs.lock().await.len();
                 if self.burst && running_jobs == 0 {
                     break;
@@ -234,6 +236,8 @@ impl RRQWorker {
                 let delay =
                     self.calculate_jittered_delay(self.settings.default_poll_delay_seconds, 0.5);
                 sleep_with_shutdown(&self.shutdown, delay).await;
+            } else {
+                telemetry::record_poll_cycle("fetched");
             }
         }
 
@@ -251,123 +255,161 @@ impl RRQWorker {
         let start_index = self.queue_cursor % total_queues;
         self.queue_cursor = (start_index + 1) % total_queues;
         let fair_share = count.div_ceil(total_queues).max(1);
-
-        for pass in 0..2 {
-            for offset in 0..total_queues {
-                if fetched >= count || self.shutdown.load(Ordering::SeqCst) {
-                    return Ok(fetched);
-                }
-                let queue_index = (start_index + offset) % total_queues;
-                let queue_name = &self.queues[queue_index];
-                let remaining = count - fetched;
-                let request_count = if pass == 0 {
-                    remaining.min(fair_share)
-                } else {
-                    remaining
-                };
-                if request_count == 0 {
-                    continue;
-                }
-                let ready = self
-                    .job_store
-                    .get_ready_job_ids(queue_name, request_count)
-                    .await?;
-                if ready.is_empty() {
-                    continue;
-                }
-                let job_defs = self.job_store.get_job_definitions(&ready).await?;
-
-                for (job_id, job_opt) in ready.into_iter().zip(job_defs.into_iter()) {
+        let poll_span = tracing::debug_span!(
+            "rrq.poll_cycle",
+            "rrq.worker_id" = %self.worker_id,
+            "rrq.requested" = count,
+            "rrq.fetched" = Empty
+        );
+        async {
+            for pass in 0..2 {
+                for offset in 0..total_queues {
                     if fetched >= count || self.shutdown.load(Ordering::SeqCst) {
+                        poll_span.record("rrq.fetched", fetched as i64);
                         return Ok(fetched);
                     }
-                    let job = match job_opt {
-                        Some(job) => job,
-                        None => {
-                            let _ = self
-                                .job_store
-                                .remove_job_from_queue(queue_name, &job_id)
-                                .await;
-                            continue;
-                        }
+                    let queue_index = (start_index + offset) % total_queues;
+                    let queue_name = &self.queues[queue_index];
+                    let remaining = count - fetched;
+                    let request_count = if pass == 0 {
+                        remaining.min(fair_share)
+                    } else {
+                        remaining
                     };
-
-                    let job_timeout = job
-                        .job_timeout_seconds
-                        .unwrap_or(self.settings.default_job_timeout_seconds);
-                    let lock_timeout_ms = job_timeout
-                        .checked_add(self.settings.default_lock_timeout_extension_seconds)
-                        .and_then(|sum| sum.checked_mul(1000))
-                        .ok_or_else(|| anyhow::anyhow!("lock_timeout_ms overflow"))?;
-                    if lock_timeout_ms <= 0 {
-                        return Err(anyhow::anyhow!("lock_timeout_ms must be positive"));
-                    }
-
-                    let start_time = Utc::now();
-                    let (locked, removed) = self
-                        .job_store
-                        .atomic_lock_and_start_job(
-                            &job.id,
-                            queue_name,
-                            &self.worker_id,
-                            lock_timeout_ms,
-                            start_time,
-                        )
-                        .await?;
-                    if !locked || removed == 0 {
+                    if request_count == 0 {
                         continue;
                     }
-
-                    let permit = self.semaphore.clone().acquire_owned().await?;
-                    let job_store = self.job_store.clone();
-                    let runners = self.runners.clone();
-                    let runner_routes = self.runner_routes.clone();
-                    let default_runner_name = self.default_runner_name.clone();
-                    let settings = self.settings.clone();
-                    let worker_id = self.worker_id.clone();
-                    let running_jobs = self.running_jobs.clone();
-                    let running_aborts = self.running_aborts.clone();
-                    let queue_name = queue_name.clone();
-                    let mut job_for_task = job.clone();
-                    job_for_task.start_time = Some(start_time);
-                    {
-                        let mut running = running_jobs.lock().await;
-                        running.insert(
-                            job.id.clone(),
-                            RunningJobInfo {
-                                queue_name: queue_name.clone(),
-                                runner_name: None,
-                                request_id: None,
-                            },
-                        );
+                    let fetch_span = tracing::debug_span!(
+                        "rrq.fetch_queue",
+                        "rrq.queue" = %queue_name,
+                        "rrq.pass" = pass,
+                        "rrq.requested" = request_count,
+                        "rrq.ready" = Empty,
+                        "rrq.fetch_ms" = Empty
+                    );
+                    let fetch_started = Instant::now();
+                    let ready = self
+                        .job_store
+                        .get_ready_job_ids(queue_name, request_count)
+                        .instrument(fetch_span.clone())
+                        .await?;
+                    fetch_span.record(
+                        "rrq.fetch_ms",
+                        fetch_started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                    fetch_span.record("rrq.ready", ready.len() as i64);
+                    if ready.is_empty() {
+                        continue;
                     }
+                    telemetry::record_jobs_fetched(queue_name, ready.len() as u64);
+                    let job_defs = self
+                        .job_store
+                        .get_job_definitions(&ready)
+                        .instrument(fetch_span.clone())
+                        .await?;
 
-                    let handle = tokio::spawn(async move {
-                        let _permit = permit;
-                        let context = ExecuteJobContext {
-                            settings,
-                            job_store,
-                            runners,
-                            default_runner_name,
-                            runner_routes,
-                            worker_id,
-                            running_jobs,
-                            running_aborts,
-                        };
-                        if let Err(err) = execute_job(job_for_task, queue_name, context).await {
-                            tracing::error!("job execution error: {err}");
+                    for (job_id, job_opt) in ready.into_iter().zip(job_defs.into_iter()) {
+                        if fetched >= count || self.shutdown.load(Ordering::SeqCst) {
+                            poll_span.record("rrq.fetched", fetched as i64);
+                            return Ok(fetched);
                         }
-                    });
-                    {
-                        let mut aborts = self.running_aborts.lock().await;
-                        aborts.insert(job.id.clone(), handle.abort_handle());
-                    }
+                        let job = match job_opt {
+                            Some(job) => job,
+                            None => {
+                                let _ = self
+                                    .job_store
+                                    .remove_job_from_queue(queue_name, &job_id)
+                                    .await;
+                                continue;
+                            }
+                        };
 
-                    fetched += 1;
+                        let job_timeout = job
+                            .job_timeout_seconds
+                            .unwrap_or(self.settings.default_job_timeout_seconds);
+                        let lock_timeout_ms = job_timeout
+                            .checked_add(self.settings.default_lock_timeout_extension_seconds)
+                            .and_then(|sum| sum.checked_mul(1000))
+                            .ok_or_else(|| anyhow::anyhow!("lock_timeout_ms overflow"))?;
+                        if lock_timeout_ms <= 0 {
+                            return Err(anyhow::anyhow!("lock_timeout_ms must be positive"));
+                        }
+
+                        let start_time = Utc::now();
+                        let (locked, removed) = self
+                            .job_store
+                            .atomic_lock_and_start_job(
+                                &job.id,
+                                queue_name,
+                                &self.worker_id,
+                                lock_timeout_ms,
+                                start_time,
+                            )
+                            .await?;
+                        let lock_result = if locked && removed > 0 {
+                            "acquired"
+                        } else {
+                            "contended"
+                        };
+                        telemetry::record_lock_acquire(queue_name, lock_result);
+                        if !locked || removed == 0 {
+                            continue;
+                        }
+
+                        let permit = self.semaphore.clone().acquire_owned().await?;
+                        let job_store = self.job_store.clone();
+                        let runners = self.runners.clone();
+                        let runner_routes = self.runner_routes.clone();
+                        let default_runner_name = self.default_runner_name.clone();
+                        let settings = self.settings.clone();
+                        let worker_id = self.worker_id.clone();
+                        let running_jobs = self.running_jobs.clone();
+                        let running_aborts = self.running_aborts.clone();
+                        let queue_name = queue_name.clone();
+                        let mut job_for_task = job.clone();
+                        job_for_task.start_time = Some(start_time);
+                        {
+                            let mut running = running_jobs.lock().await;
+                            running.insert(
+                                job.id.clone(),
+                                RunningJobInfo {
+                                    queue_name: queue_name.clone(),
+                                    runner_name: None,
+                                    request_id: None,
+                                },
+                            );
+                        }
+
+                        let handle = tokio::spawn(async move {
+                            let _permit = permit;
+                            let context = ExecuteJobContext {
+                                settings,
+                                job_store,
+                                runners,
+                                default_runner_name,
+                                runner_routes,
+                                worker_id,
+                                running_jobs,
+                                running_aborts,
+                            };
+                            if let Err(err) = execute_job(job_for_task, queue_name, context).await {
+                                tracing::error!("job execution error: {err}");
+                            }
+                        });
+                        {
+                            let mut aborts = self.running_aborts.lock().await;
+                            aborts.insert(job.id.clone(), handle.abort_handle());
+                        }
+
+                        fetched += 1;
+                    }
                 }
             }
+            poll_span.record("rrq.fetched", fetched as i64);
+            Ok(fetched)
         }
-        Ok(fetched)
+        .instrument(poll_span.clone())
+        .await
     }
 
     async fn drain_tasks(&self) -> Result<()> {
@@ -512,6 +554,12 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
     } = context;
     let attempt = job.current_retries + 1;
     let started_at = Instant::now();
+    let start_time_utc = job.start_time.unwrap_or_else(Utc::now);
+    let queue_wait_ms = start_time_utc
+        .signed_duration_since(job.enqueue_time)
+        .num_milliseconds()
+        .max(0) as f64;
+    telemetry::record_queue_wait_ms(&queue_name, queue_wait_ms);
     let span = tracing::info_span!(
         "rrq.job",
         "span.kind" = "consumer",
@@ -523,6 +571,8 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
         "rrq.queue" = %queue_name,
         "rrq.attempt" = attempt,
         "rrq.worker_id" = %worker_id,
+        "rrq.runner" = Empty,
+        "rrq.queue_wait_ms" = queue_wait_ms,
         "rrq.outcome" = Empty,
         "rrq.duration_ms" = Empty,
         "rrq.retry_delay_ms" = Empty,
@@ -538,6 +588,11 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
         .unwrap_or(settings.default_job_timeout_seconds);
     if job_timeout <= 0 {
         let message = format!("Invalid job timeout: {job_timeout}. Must be positive.");
+        let duration_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+        span.record("rrq.outcome", "fatal");
+        span.record("rrq.error_message", message.as_str());
+        span.record("rrq.duration_ms", duration_ms);
+        telemetry::record_job_processed(&queue_name, "unknown", "fatal", duration_ms);
         handle_fatal_job_error(&job, &queue_name, &message, &mut job_store).await?;
         cleanup_running(
             &job.id,
@@ -553,6 +608,11 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
 
     let (runner_name, handler_name) = split_runner_name(&job.function_name);
     if handler_name.is_empty() {
+        let duration_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+        span.record("rrq.outcome", "fatal");
+        span.record("rrq.error_message", "Handler name is missing");
+        span.record("rrq.duration_ms", duration_ms);
+        telemetry::record_job_processed(&queue_name, "unknown", "fatal", duration_ms);
         handle_fatal_job_error(&job, &queue_name, "Handler name is missing", &mut job_store)
             .await?;
         cleanup_running(
@@ -571,6 +631,7 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
         None => resolve_routed_runner(&runner_routes, &queue_name)
             .unwrap_or(default_runner_name.clone()),
     };
+    span.record("rrq.runner", resolved_runner.as_str());
     {
         let mut running = running_jobs.lock().await;
         if let Some(info) = running.get_mut(&job.id) {
@@ -583,6 +644,11 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
         Some(exec) => exec,
         None => {
             let message = format!("No runner configured for '{resolved_runner}'.");
+            let duration_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+            span.record("rrq.outcome", "fatal");
+            span.record("rrq.error_message", message.as_str());
+            span.record("rrq.duration_ms", duration_ms);
+            telemetry::record_job_processed(&queue_name, &resolved_runner, "fatal", duration_ms);
             handle_fatal_job_error(&job, &queue_name, &message, &mut job_store).await?;
             cleanup_running(
                 &job.id,
@@ -625,16 +691,25 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
         }
     }
 
+    let dispatch_span = tracing::debug_span!(
+        "rrq.dispatch",
+        "rrq.job_id" = %job.id,
+        "rrq.request_id" = %request_id,
+        "rrq.runner" = %resolved_runner,
+        "rrq.queue" = %queue_name,
+        "rrq.timeout_seconds" = job_timeout
+    );
     let exec_result = timeout(
         Duration::from_secs(job_timeout as u64),
-        runner.execute(request),
+        runner.execute(request).instrument(dispatch_span),
     )
     .await;
 
     let duration_ms = started_at.elapsed().as_secs_f64() * 1000.0;
-    let outcome_result = match exec_result {
+    let (outcome_result, outcome_label) = match exec_result {
         Ok(Ok(outcome)) => {
-            handle_execution_outcome(
+            let outcome_label = classify_outcome(&outcome);
+            let outcome_result = handle_execution_outcome(
                 &job,
                 &queue_name,
                 &settings,
@@ -642,7 +717,8 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
                 outcome,
                 duration_ms,
             )
-            .await
+            .await;
+            (outcome_result, outcome_label)
         }
         Ok(Err(err)) => {
             let message = format!("Runner transport error: {err}");
@@ -655,7 +731,9 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
                 error_message = %message,
                 "job failed before runner response"
             );
-            process_failure_job(&job, &queue_name, &settings, &mut job_store, &message).await
+            let outcome_result =
+                process_failure_job(&job, &queue_name, &settings, &mut job_store, &message).await;
+            (outcome_result, "transport_error")
         }
         Err(_) => {
             let _ = runner.cancel(&job.id, Some(request_id.as_str())).await;
@@ -669,9 +747,12 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
                 error_message = %message,
                 "job timed out before runner response"
             );
-            handle_job_timeout(&job, &queue_name, &mut job_store, &message).await
+            let outcome_result =
+                handle_job_timeout(&job, &queue_name, &mut job_store, &message).await;
+            (outcome_result, "timeout")
         }
     };
+    telemetry::record_job_processed(&queue_name, &resolved_runner, outcome_label, duration_ms);
 
     let cleanup_result = cleanup_running(
         &job.id,
@@ -691,6 +772,25 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
 
     cleanup_result?;
     Ok(())
+}
+
+fn classify_outcome(outcome: &ExecutionOutcome) -> &'static str {
+    match outcome.status {
+        OutcomeStatus::Success => "success",
+        OutcomeStatus::Retry => "retry",
+        OutcomeStatus::Timeout => "timeout",
+        OutcomeStatus::Error => {
+            let error_type = outcome
+                .error
+                .as_ref()
+                .and_then(|error| error.error_type.as_deref());
+            if error_type == Some("handler_not_found") {
+                "fatal"
+            } else {
+                "error"
+            }
+        }
+    }
 }
 
 async fn cleanup_running(
@@ -1139,10 +1239,19 @@ async fn recover_orphaned_jobs(
         cursor = next;
     }
     if recovered > 0 {
-        tracing::warn!("re-queued {recovered} orphaned job(s)");
+        telemetry::record_orphan_recovered(recovered);
+        tracing::warn!(
+            event = "rrq.orphan_recovery",
+            recovered_jobs = recovered,
+            "re-queued orphaned jobs"
+        );
     }
     if recovery_limited {
-        tracing::warn!("orphan recovery hit per-tick limit of {MAX_RECOVERIES_PER_TICK}");
+        tracing::warn!(
+            event = "rrq.orphan_recovery_limited",
+            per_tick_limit = MAX_RECOVERIES_PER_TICK,
+            "orphan recovery hit per-tick limit"
+        );
     }
     Ok(())
 }
