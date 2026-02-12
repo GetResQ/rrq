@@ -1,4 +1,5 @@
 pub const DEFAULT_REDIS_DSN: &str = "redis://localhost:6379/0";
+pub const QUEUE_KEY_PREFIX: &str = "rrq:queue:";
 pub const DEFAULT_QUEUE_NAME: &str = "rrq:queue:default";
 pub const DEFAULT_DLQ_NAME: &str = "rrq:dlq:default";
 

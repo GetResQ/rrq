@@ -390,6 +390,14 @@ mod tests {
         job_replay(job.id.clone(), config_path.clone(), None).await?;
         let (_, after_keys) = ctx.store.scan_job_keys(0, 200).await?;
         assert!(after_keys.len() > before_keys.len());
+        job_replay(
+            job.id.clone(),
+            config_path.clone(),
+            Some("manual-bare".to_string()),
+        )
+        .await?;
+        let manual_queue_size = ctx.store.queue_size("rrq:queue:manual-bare").await?;
+        assert!(manual_queue_size >= 1);
 
         let cancel_job = client
             .enqueue(

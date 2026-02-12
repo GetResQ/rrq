@@ -1,15 +1,9 @@
 use std::collections::HashMap;
 
-use rrq::constants::QUEUE_KEY_PREFIX;
+use rrq_config::normalize_queue_name;
 
 pub(crate) fn queue_matches(filter: &str, job_queue: &str) -> bool {
-    if filter == job_queue {
-        return true;
-    }
-    if job_queue == format!("{}{}", QUEUE_KEY_PREFIX, filter) {
-        return true;
-    }
-    false
+    normalize_queue_name(filter) == normalize_queue_name(job_queue)
 }
 
 pub(crate) fn top_counts(map: &HashMap<String, usize>, limit: usize) -> Vec<(String, usize)> {
@@ -26,6 +20,7 @@ mod tests {
     fn queue_matches_accepts_exact_and_prefixed() {
         assert!(queue_matches("default", "default"));
         assert!(queue_matches("default", "rrq:queue:default"));
+        assert!(queue_matches("rrq:queue:default", "default"));
         assert!(!queue_matches("default", "other"));
     }
 

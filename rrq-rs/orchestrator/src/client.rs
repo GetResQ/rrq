@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
+use rrq_config::normalize_queue_name;
 use serde_json::Value;
 
 use crate::job::{Job, JobStatus};
@@ -40,9 +41,11 @@ impl RRQClient {
         options: EnqueueOptions,
     ) -> Result<Job> {
         let job_id = options.job_id.unwrap_or_else(Job::new_id);
-        let queue_name = options
-            .queue_name
-            .unwrap_or_else(|| self.settings.default_queue_name.clone());
+        let queue_name = normalize_queue_name(
+            &options
+                .queue_name
+                .unwrap_or_else(|| self.settings.default_queue_name.clone()),
+        );
 
         let span = tracing::info_span!(
             "rrq.enqueue",
@@ -344,5 +347,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(queue_size, 1);
+    }
+
+    #[tokio::test]
+    async fn enqueue_normalizes_bare_queue_name_in_job_metadata() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let queue_name = "bare-queue";
+        let job = client
+            .enqueue(
+                "task",
+                serde_json::Map::new(),
+                EnqueueOptions {
+                    queue_name: Some(queue_name.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(job.queue_name.as_deref(), Some("rrq:queue:bare-queue"));
+        let stored = ctx
+            .store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.queue_name.as_deref(), Some("rrq:queue:bare-queue"));
+    }
+
+    #[tokio::test]
+    async fn enqueue_preserves_prefixed_queue_name_in_job_metadata() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let queue_name = "rrq:queue:already-normalized";
+        let job = client
+            .enqueue(
+                "task",
+                serde_json::Map::new(),
+                EnqueueOptions {
+                    queue_name: Some(queue_name.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(job.queue_name.as_deref(), Some(queue_name));
+        let stored = ctx
+            .store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.queue_name.as_deref(), Some(queue_name));
     }
 }

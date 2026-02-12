@@ -16,7 +16,8 @@ _CONSTANTS = get_producer_constants()
 JOB_KEY_PREFIX = _CONSTANTS.job_key_prefix
 QUEUE_KEY_PREFIX = _CONSTANTS.queue_key_prefix
 IDEMPOTENCY_KEY_PREFIX = _CONSTANTS.idempotency_key_prefix
-TEST_QUEUE_NAME = f"{QUEUE_KEY_PREFIX}client_default"
+TEST_QUEUE_NAME = "client_default"
+TEST_QUEUE_KEY = f"{QUEUE_KEY_PREFIX}{TEST_QUEUE_NAME}"
 
 
 @pytest.fixture(scope="session")
@@ -67,8 +68,9 @@ async def test_enqueue_job_writes_job_and_queue(
     )
     assert job_data["function_name"] == func_name
     assert job_data["status"] == "PENDING"
+    assert job_data["queue_name"] == TEST_QUEUE_KEY
 
-    score = await redis_for_client_tests.zscore(TEST_QUEUE_NAME, job_id)
+    score = await redis_for_client_tests.zscore(TEST_QUEUE_KEY, job_id)
     assert score is not None
 
 
@@ -85,7 +87,7 @@ async def test_enqueue_job_with_defer_by(
         {"defer_by_seconds": defer_seconds},
     )
 
-    score = await redis_for_client_tests.zscore(TEST_QUEUE_NAME, job_id)
+    score = await redis_for_client_tests.zscore(TEST_QUEUE_KEY, job_id)
     assert score is not None
     min_score = start_ms + defer_seconds * 1000 - 1000
     assert score >= min_score
@@ -103,7 +105,7 @@ async def test_enqueue_job_with_defer_until(
         {"defer_until": defer_until_dt},
     )
 
-    score = await redis_for_client_tests.zscore(TEST_QUEUE_NAME, job_id)
+    score = await redis_for_client_tests.zscore(TEST_QUEUE_KEY, job_id)
     assert score is not None
     expected_score_ms = int(defer_until_dt.timestamp() * 1000)
     assert score == pytest.approx(expected_score_ms, abs=100)
@@ -133,16 +135,35 @@ async def test_enqueue_unique_key_defer_extends_idempotency_ttl(
 async def test_enqueue_job_to_specific_queue(
     rrq_client: RRQClient, redis_for_client_tests: AsyncRedis
 ) -> None:
-    custom_queue_name = f"{QUEUE_KEY_PREFIX}custom_test_queue"
+    custom_queue_name = "custom_test_queue"
+    custom_queue_key = f"{QUEUE_KEY_PREFIX}{custom_queue_name}"
     func_name = "custom_queue_func"
 
     job_id = await rrq_client.enqueue(func_name, {"queue_name": custom_queue_name})
 
-    score_default = await redis_for_client_tests.zscore(TEST_QUEUE_NAME, job_id)
+    score_default = await redis_for_client_tests.zscore(TEST_QUEUE_KEY, job_id)
     assert score_default is None
 
-    score_custom = await redis_for_client_tests.zscore(custom_queue_name, job_id)
+    score_custom = await redis_for_client_tests.zscore(custom_queue_key, job_id)
     assert score_custom is not None
+
+
+@pytest.mark.asyncio
+async def test_enqueue_job_preserves_prefixed_queue_name(
+    rrq_client: RRQClient, redis_for_client_tests: AsyncRedis
+) -> None:
+    prefixed_queue_name = f"{QUEUE_KEY_PREFIX}prefixed_queue"
+    func_name = "prefixed_queue_func"
+
+    job_id = await rrq_client.enqueue(func_name, {"queue_name": prefixed_queue_name})
+
+    job_key = f"{JOB_KEY_PREFIX}{job_id}"
+    job_data = await cast(
+        Awaitable[dict[str, str]], redis_for_client_tests.hgetall(job_key)
+    )
+    assert job_data["queue_name"] == prefixed_queue_name
+    score = await redis_for_client_tests.zscore(prefixed_queue_name, job_id)
+    assert score is not None
 
 
 @pytest.mark.asyncio

@@ -11,7 +11,9 @@ use crate::telemetry::{self, LogFormat};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rrq_config::{RRQSettings, TcpSocketSpec, parse_tcp_socket};
+use rrq_config::{
+    QUEUE_KEY_PREFIX, RRQSettings, TcpSocketSpec, normalize_queue_name, parse_tcp_socket,
+};
 use rrq_protocol::{
     CancelRequest, ExecutionOutcome, ExecutionRequest, FRAME_HEADER_LEN, PROTOCOL_VERSION,
     RunnerMessage, encode_frame,
@@ -796,13 +798,21 @@ pub fn determine_needed_runners(
 
     // Get the effective queues (CLI override or default)
     let effective_queues: Vec<String> = match queues {
-        Some(q) if !q.is_empty() => q.to_vec(),
-        _ => vec![settings.default_queue_name.clone()],
+        Some(q) if !q.is_empty() => q
+            .iter()
+            .map(|queue_name| normalize_queue_name(queue_name))
+            .collect(),
+        _ => vec![normalize_queue_name(&settings.default_queue_name)],
     };
 
     // Add runners that are explicitly routed to these queues
     for queue in &effective_queues {
-        if let Some(runner_name) = settings.runner_routes.get(queue) {
+        let runner_name = settings.runner_routes.get(queue).or_else(|| {
+            queue
+                .strip_prefix(QUEUE_KEY_PREFIX)
+                .and_then(|bare| settings.runner_routes.get(bare))
+        });
+        if let Some(runner_name) = runner_name {
             needed.insert(runner_name.clone());
         }
     }
@@ -1726,6 +1736,32 @@ mod tests {
         assert!(needed.contains("python")); // default runner
         assert!(needed.contains("special_runner")); // routed for default queue
         assert_eq!(needed.len(), 2);
+    }
+
+    #[test]
+    fn determine_needed_runners_handles_bare_and_prefixed_queue_names() {
+        let mut settings = RRQSettings {
+            default_runner_name: "python".to_string(),
+            default_queue_name: "default".to_string(),
+            ..Default::default()
+        };
+        settings.runner_routes.insert(
+            "rrq:queue:mail-ingest".to_string(),
+            "mail_runner".to_string(),
+        );
+        settings
+            .runner_routes
+            .insert("legacy-mail".to_string(), "legacy_runner".to_string());
+
+        let needed_from_bare =
+            super::determine_needed_runners(&settings, Some(&["mail-ingest".to_string()]));
+        assert!(needed_from_bare.contains("mail_runner"));
+
+        let needed_from_prefixed = super::determine_needed_runners(
+            &settings,
+            Some(&["rrq:queue:legacy-mail".to_string()]),
+        );
+        assert!(needed_from_prefixed.contains("legacy_runner"));
     }
 
     #[test]

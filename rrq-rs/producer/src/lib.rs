@@ -209,6 +209,7 @@ impl Producer {
             .queue_name
             .unwrap_or_else(|| self.default_queue_name.clone());
         validate_name("queue_name", &queue_name)?;
+        let queue_name = format_queue_key(&queue_name);
         let job_id = options.job_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let enqueue_time = options.enqueue_time.unwrap_or_else(Utc::now);
         let scheduled_time = options.scheduled_time.unwrap_or(enqueue_time);
@@ -224,7 +225,7 @@ impl Producer {
             .unwrap_or(self.default_result_ttl_seconds);
 
         let job_key = format!("{JOB_KEY_PREFIX}{job_id}");
-        let queue_key = format_queue_key(&queue_name);
+        let queue_key = queue_name.clone();
         let score_ms = scheduled_time.timestamp_millis() as f64;
         let idempotency_key = if let Some(key) = options.idempotency_key.as_deref() {
             validate_name("idempotency_key", key)?;
@@ -307,6 +308,7 @@ impl Producer {
             .queue_name
             .unwrap_or_else(|| self.default_queue_name.clone());
         validate_name("queue_name", &queue_name)?;
+        let queue_name = format_queue_key(&queue_name);
         let job_id = options.job_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let enqueue_time = options.enqueue_time.unwrap_or_else(Utc::now);
         let scheduled_time = options.scheduled_time.unwrap_or(enqueue_time);
@@ -327,7 +329,7 @@ impl Producer {
         }
 
         let job_key = format!("{JOB_KEY_PREFIX}{job_id}");
-        let queue_key = format_queue_key(&queue_name);
+        let queue_key = queue_name.clone();
         let rate_limit_key = format_rate_limit_key(rate_limit_key);
         let score_ms = scheduled_time.timestamp_millis() as f64;
 
@@ -388,6 +390,7 @@ impl Producer {
             .queue_name
             .unwrap_or_else(|| self.default_queue_name.clone());
         validate_name("queue_name", &queue_name)?;
+        let queue_name = format_queue_key(&queue_name);
         let job_id = options.job_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let enqueue_time = options.enqueue_time.unwrap_or_else(Utc::now);
         let scheduled_time = options.scheduled_time.unwrap_or_else(|| {
@@ -409,7 +412,7 @@ impl Producer {
             anyhow::bail!("debounce_window must be positive");
         }
 
-        let queue_key = format_queue_key(&queue_name);
+        let queue_key = queue_name.clone();
         let debounce_key = format_debounce_key(debounce_key);
         let score_ms = scheduled_time.timestamp_millis() as f64;
 
@@ -767,6 +770,8 @@ mod tests {
         let job_key = format!("{JOB_KEY_PREFIX}{job_id}");
         let status: String = conn.hget(&job_key, "status").await.unwrap();
         assert_eq!(status, "PENDING");
+        let queue_name: String = conn.hget(&job_key, "queue_name").await.unwrap();
+        assert_eq!(queue_name, format_queue_key("default"));
         let queue_key = format_queue_key("default");
         let score: Option<f64> = conn.zscore(queue_key, &job_id).await.unwrap();
         assert!(score.is_some());
@@ -798,7 +803,36 @@ mod tests {
         let max_retries: i64 = conn.hget(&job_key, "max_retries").await.unwrap();
         assert_eq!(max_retries, 5);
         let queue_name: String = conn.hget(&job_key, "queue_name").await.unwrap();
-        assert_eq!(queue_name, "custom-queue");
+        assert_eq!(queue_name, format_queue_key("custom-queue"));
+    }
+
+    #[tokio::test]
+    async fn producer_enqueue_with_custom_queue_option_normalizes_name() {
+        let _guard = redis_lock().lock().await;
+        let dsn = std::env::var("RRQ_TEST_REDIS_DSN")
+            .unwrap_or_else(|_| "redis://localhost:6379/15".to_string());
+        let client = redis::Client::open(dsn.as_str()).unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let _: () = redis::cmd("FLUSHDB").query_async(&mut conn).await.unwrap();
+
+        let producer = Producer::new(&dsn).await.unwrap();
+        let options = EnqueueOptions {
+            queue_name: Some("custom-queue".to_string()),
+            ..Default::default()
+        };
+        let job_id = producer
+            .enqueue("work", serde_json::Map::new(), options)
+            .await
+            .unwrap();
+
+        let job_key = format!("{JOB_KEY_PREFIX}{job_id}");
+        let queue_name: String = conn.hget(&job_key, "queue_name").await.unwrap();
+        assert_eq!(queue_name, format_queue_key("custom-queue"));
+        let score: Option<f64> = conn
+            .zscore(format_queue_key("custom-queue"), &job_id)
+            .await
+            .unwrap();
+        assert!(score.is_some());
     }
 
     #[tokio::test]

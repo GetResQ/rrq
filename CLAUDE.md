@@ -1,17 +1,27 @@
 # RRQ
 
-Redis-based async job queue library for Python.
+Rust-first distributed Redis job queue, with Python and TypeScript bindings.
 
-See @rrq-py/tests/CLAUDE.md for testing guidelines.
+See @rrq-py/tests/CLAUDE.md for Python-specific testing guidelines.
 
 ## Commands
 ```bash
+# Rust core (primary)
+cd rrq-rs
+cargo fmt && cargo clippy
+cargo test
+
+# TypeScript bindings
+sh scripts/with-producer-lib.sh -- sh -c "cd rrq-ts && bun test"
+cd rrq-ts && bun run lint
+
+# Python bindings
 cd rrq-py
-uv run pytest                     # Run tests
-uv run pytest --maxfail=1         # Debug failing tests
-uv run ruff format && uv run ruff check --fix   # Format and lint (run before commits)
-uv run ty check                   # Type check (must pass before commits)
-uv add <package>                  # Add dependency
+uv run pytest
+uv run pytest --maxfail=1
+uv run ruff format && uv run ruff check --fix
+uv run ty check
+uv add <package>
 ```
 
 ## Repo-Wide Testing
@@ -44,19 +54,24 @@ Notes:
 - The `with-producer-lib.sh` wrapper builds and exports the producer FFI lib.
 
 ## Code Style
-- Python 3.11+, double quotes, 88 char lines
-- Type hints on all functions, Pydantic V2 for validation
-- `snake_case` functions, `PascalCase` classes
-- Import order: stdlib → third-party → local
-- Early returns, `match/case` for complex conditionals
-- No blocking I/O in async contexts
+- Rust (`rrq-rs`): idiomatic Rust patterns, run `cargo fmt` and `clippy`.
+- TypeScript (`rrq-ts`): keep strict typing and run `bun run lint`.
+- Python (`rrq-py`): Python 3.11+, double quotes, 88 char lines.
+- Python: type hints on all functions, Pydantic V2 for validation.
+- Python: `snake_case` functions, `PascalCase` classes.
+- Python: import order stdlib → third-party → local.
+- Python: early returns, `match/case` for complex conditionals.
+- Python: no blocking I/O in async contexts.
 
 ## Code References
-Use VS Code clickable format: `rrq-py/rrq/queue.py:45` or `rrq-py/rrq/worker.py:120-135`
+Use VS Code clickable format:
+- `rrq-rs/orchestrator/src/worker.rs:120`
+- `rrq-py/rrq/queue.py:45`
+- `rrq-ts/src/producer.ts:88`
 
 ## Rules
 - Never commit broken tests
-- Use `uv` for all Python operations
+- Use `uv` for Python operations in `rrq-py`
 - Follow existing patterns in codebase
 - No sensitive data in logs
 - Ask before large cross-domain changes

@@ -1,9 +1,9 @@
 use anyhow::Result;
 
 use crate::cli_utils;
-use rrq::constants::QUEUE_KEY_PREFIX;
 use rrq::load_toml_settings;
 use rrq::store::JobStore;
+use rrq_config::normalize_queue_name;
 
 use super::shared::queue_matches;
 
@@ -30,14 +30,14 @@ pub(crate) async fn queue_list(config: Option<String>, show_empty: bool) -> Resu
     );
     let mut total = 0i64;
     for key in keys {
-        let queue_name = key.trim_start_matches(QUEUE_KEY_PREFIX);
-        let size = store.queue_size(queue_name).await?;
+        let queue_name = normalize_queue_name(&key);
+        let size = store.queue_size(&queue_name).await?;
         if size == 0 && !show_empty {
             continue;
         }
         total += size;
-        let oldest = store.queue_range_with_scores(queue_name, 0, 0).await?;
-        let newest = store.queue_range_with_scores(queue_name, -1, -1).await?;
+        let oldest = store.queue_range_with_scores(&queue_name, 0, 0).await?;
+        let newest = store.queue_range_with_scores(&queue_name, -1, -1).await?;
         let oldest_score = oldest.first().map(|(_, score)| *score).unwrap_or(0.0);
         let newest_score = newest.first().map(|(_, score)| *score).unwrap_or(0.0);
         println!(
@@ -56,14 +56,16 @@ pub(crate) async fn queue_stats(
 ) -> Result<()> {
     let settings = load_toml_settings(config.as_deref())?;
     let mut store = JobStore::new(settings.clone()).await?;
-    let mut queue_names = queues;
+    let mut queue_names: Vec<String> = queues
+        .into_iter()
+        .map(|queue| normalize_queue_name(&queue))
+        .collect();
     if queue_names.is_empty() {
         let mut cursor = 0u64;
         loop {
             let (next, batch) = store.scan_queue_keys(cursor, 200).await?;
             for key in batch {
-                let name = key.trim_start_matches(QUEUE_KEY_PREFIX);
-                queue_names.push(name.to_string());
+                queue_names.push(normalize_queue_name(&key));
             }
             if next == 0 {
                 break;
@@ -71,6 +73,8 @@ pub(crate) async fn queue_stats(
             cursor = next;
         }
     }
+    queue_names.sort();
+    queue_names.dedup();
     if queue_names.is_empty() {
         println!("No queues found");
         return Ok(());
@@ -174,6 +178,7 @@ pub(crate) async fn queue_inspect(
 ) -> Result<()> {
     let settings = load_toml_settings(config.as_deref())?;
     let mut store = JobStore::new(settings).await?;
+    let queue_name = normalize_queue_name(&queue_name);
     let exists = store.queue_exists(&queue_name).await?;
     if !exists {
         println!("Queue '{queue_name}' not found");
