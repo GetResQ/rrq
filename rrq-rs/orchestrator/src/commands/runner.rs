@@ -7,6 +7,7 @@ pub(crate) async fn runner_python(settings: String, tcp_socket: String) -> Resul
     let mut cmd = Command::new("rrq-runner");
     cmd.arg("--settings").arg(settings);
     cmd.arg("--tcp-socket").arg(tcp_socket);
+    cmd.kill_on_drop(true);
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());

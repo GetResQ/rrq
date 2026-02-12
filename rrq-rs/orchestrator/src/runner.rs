@@ -323,6 +323,8 @@ impl SocketRunnerPool {
             if let Some(cwd) = &self.cwd {
                 command.current_dir(cwd);
             }
+            // Ensure child runner processes are not orphaned if their owning task is dropped.
+            command.kill_on_drop(true);
             let mut child = command.spawn().context("failed to spawn runner")?;
             let stdout_task = if self.capture_output {
                 let stdout_name = self.name.clone();
