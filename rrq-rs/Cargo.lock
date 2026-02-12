@@ -1505,7 +1505,7 @@ dependencies = [
 
 [[package]]
 name = "rrq"
-version = "0.9.18"
+version = "0.9.19"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "rrq-config"
-version = "0.9.18"
+version = "0.9.19"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1553,7 +1553,7 @@ dependencies = [
 
 [[package]]
 name = "rrq-producer"
-version = "0.9.18"
+version = "0.9.19"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1569,7 +1569,7 @@ dependencies = [
 
 [[package]]
 name = "rrq-protocol"
-version = "0.9.18"
+version = "0.9.19"
 dependencies = [
  "chrono",
  "serde",
@@ -1578,7 +1578,7 @@ dependencies = [
 
 [[package]]
 name = "rrq-runner"
-version = "0.9.18"
+version = "0.9.19"
 dependencies = [
  "async-trait",
  "chrono",

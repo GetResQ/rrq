@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rrq"
-version = "0.9.18"
+version = "0.9.19"
 authors = [{ name = "Mazdak Rezvani", email = "mazdak@me.com" }]
 description = "RRQ is a library for creating reliable job queues using Rust, Redis. with language-agnostic producers and workers."
 readme = "README.md"
