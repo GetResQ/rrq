@@ -3,6 +3,9 @@
 RRQ supports end-to-end tracing by carrying OpenTelemetry propagation headers
 through the job payload and emitting a runner span when the job executes.
 
+Orchestrator spans include `rrq.job` plus internal lifecycle spans such as
+`rrq.poll_cycle`, `rrq.fetch_queue`, and `rrq.dispatch`.
+
 ## Trace Flow
 
 1) **Producer** injects the active trace into `trace_context` on enqueue.
@@ -72,6 +75,7 @@ span attributes include:
 - `rrq.job_id`, `rrq.function`, `rrq.queue`, `rrq.attempt`, `rrq.worker_id`
 - `rrq.outcome`, `rrq.duration_ms`, `rrq.retry_delay_ms`
 - `rrq.error_message`, `rrq.error_type`
+- optional timing attributes: `rrq.queue_wait_ms`, `rrq.deadline_remaining_ms`
 - standard messaging attributes (`messaging.system`, `messaging.operation`, …)
 
 ### Python runner
@@ -101,6 +105,21 @@ Enable the `otel` feature and initialize tracing:
 ```rust
 rrq_runner::telemetry::otel::init_tracing("my-runner")?;
 ```
+
+## Metrics (OTel)
+
+When OTLP metrics export is enabled, RRQ emits counters/histograms for queue
+and runner health, including:
+- `rrq_jobs_processed_total{queue,runner,outcome}`
+- `rrq_job_duration_ms` histogram
+- `rrq_queue_wait_ms` histogram
+- `rrq_poll_cycles_total{result}`
+- `rrq_jobs_fetched_total{queue}`
+- `rrq_lock_acquire_total{queue,result}`
+- `rrq_runner_inflight{runner}`
+- `rrq_runner_channel_pressure` histogram
+- `rrq_deadline_expired_total{runner}`
+- `rrq_cancellations_total{runner,scope}`
 
 ## Datadog / Sentry
 

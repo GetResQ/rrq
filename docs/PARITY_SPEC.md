@@ -82,6 +82,7 @@ Runner spans must use:
   - `rrq.job_id`, `rrq.function`, `rrq.queue`, `rrq.attempt`, `rrq.worker_id`
   - `rrq.outcome`, `rrq.duration_ms`, `rrq.retry_delay_ms`
   - `rrq.error_message`, `rrq.error_type`
+  - optional timing attrs: `rrq.queue_wait_ms`, `rrq.deadline_remaining_ms`
 
 Trace propagation uses `trace_context` (string map) on the job payload. RRQ does
 not auto-inject producer trace context; callers must provide it explicitly.

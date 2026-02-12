@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from ..runner import ExecutionRequest
@@ -163,7 +164,22 @@ def _otel_set_common_attributes(
         if request.context.worker_id:
             span.set_attribute("rrq.worker_id", request.context.worker_id)
         if request.context.deadline:
-            span.set_attribute("rrq.deadline", request.context.deadline.isoformat())
+            deadline = request.context.deadline
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            span.set_attribute("rrq.deadline", deadline.isoformat())
+
+            remaining_ms = max(
+                (deadline - datetime.now(timezone.utc)).total_seconds() * 1000.0, 0.0
+            )
+            span.set_attribute("rrq.deadline_remaining_ms", remaining_ms)
+        enqueue_time = request.context.enqueue_time
+        if enqueue_time.tzinfo is None:
+            enqueue_time = enqueue_time.replace(tzinfo=timezone.utc)
+        queue_wait_ms = max(
+            (datetime.now(timezone.utc) - enqueue_time).total_seconds() * 1000.0, 0.0
+        )
+        span.set_attribute("rrq.queue_wait_ms", queue_wait_ms)
     except Exception:
         pass
 
