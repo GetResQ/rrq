@@ -12,11 +12,12 @@ All durations are in seconds unless noted otherwise.
 ```toml
 [rrq]
 redis_dsn = "redis://localhost:6379/1"
-default_runner_name = "python"
+default_runner_name = "worker"
 
-[rrq.runners.python]
+[rrq.runners.worker]
 type = "socket"
-cmd = ["rrq-runner", "--settings", "myapp.runner_config.python_runner_settings"]
+cmd = ["your-runner-binary", "--tcp-socket", "127.0.0.1:9000"]
+tcp_socket = "127.0.0.1:9000"
 ```
 
 ## [rrq]

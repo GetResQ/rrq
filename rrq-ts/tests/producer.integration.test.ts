@@ -11,7 +11,8 @@ const CONSTANTS = getProducerConstants() as {
   idempotency_key_prefix: string;
   queue_key_prefix: string;
 };
-const TEST_QUEUE_NAME = `${CONSTANTS.queue_key_prefix}ts_default`;
+const TEST_QUEUE_NAME = "ts_default";
+const TEST_QUEUE_KEY = `${CONSTANTS.queue_key_prefix}${TEST_QUEUE_NAME}`;
 
 let redis: RedisClientType;
 let client: RRQClient;
@@ -43,8 +44,10 @@ describe("RRQClient producer integration", () => {
     const jobKey = `${CONSTANTS.job_key_prefix}${jobId}`;
     const status = await redis.hGet(jobKey, "status");
     expect(status).toBe("PENDING");
+    const queueName = await redis.hGet(jobKey, "queue_name");
+    expect(queueName).toBe(TEST_QUEUE_KEY);
 
-    const score = await redis.zScore(TEST_QUEUE_NAME, jobId);
+    const score = await redis.zScore(TEST_QUEUE_KEY, jobId);
     expect(score).not.toBeNull();
   });
 
@@ -53,7 +56,7 @@ describe("RRQClient producer integration", () => {
     const startMs = Date.now();
     const jobId = await client.enqueueDeferred("handler", { deferBySeconds: delaySeconds });
 
-    const score = await redis.zScore(TEST_QUEUE_NAME, jobId);
+    const score = await redis.zScore(TEST_QUEUE_KEY, jobId);
     expect(score).not.toBeNull();
     const minScore = startMs + delaySeconds * 1000 - 1000;
     expect(score as number).toBeGreaterThanOrEqual(minScore);
@@ -82,6 +85,19 @@ describe("RRQClient producer integration", () => {
       rateLimitSeconds: 5,
     });
     expect(job2).toBeNull();
+  });
+
+  it("preserves prefixed queue names", async () => {
+    const prefixedQueue = `${CONSTANTS.queue_key_prefix}prefixed_queue`;
+    const jobId = await client.enqueue("handler", {
+      queueName: prefixedQueue,
+    });
+
+    const jobKey = `${CONSTANTS.job_key_prefix}${jobId}`;
+    const queueName = await redis.hGet(jobKey, "queue_name");
+    expect(queueName).toBe(prefixedQueue);
+    const score = await redis.zScore(prefixedQueue, jobId);
+    expect(score).not.toBeNull();
   });
 
   it("returns job status when present", async () => {

@@ -10,6 +10,7 @@ use tokio::time::Duration;
 use rrq::load_toml_settings;
 use rrq::store::JobStore;
 use rrq::{EnqueueOptions, Job, JobStatus, RRQClient};
+use rrq_config::normalize_queue_name;
 
 fn worker_tick_sleep() -> Duration {
     if cfg!(test) {
@@ -40,6 +41,10 @@ pub(crate) async fn debug_generate_jobs(
     } else {
         queue_names
     };
+    let queue_names: Vec<String> = queue_names
+        .into_iter()
+        .map(|queue_name| normalize_queue_name(&queue_name))
+        .collect();
     let statuses = if statuses.is_empty() {
         vec![
             "pending".to_string(),
@@ -232,8 +237,8 @@ pub(crate) async fn debug_generate_workers(
             data.insert(
                 "queues".to_string(),
                 Value::Array(vec![
-                    Value::String("test".to_string()),
-                    Value::String("default".to_string()),
+                    Value::String(normalize_queue_name("test")),
+                    Value::String(normalize_queue_name("default")),
                 ]),
             );
             data.insert(
@@ -352,6 +357,10 @@ pub(crate) async fn debug_stress_test(
     } else {
         queues
     };
+    let queues: Vec<String> = queues
+        .into_iter()
+        .map(|queue_name| normalize_queue_name(&queue_name))
+        .collect();
     println!("Starting stress test: {jobs_per_second} jobs/sec for {duration}s");
     let start = Instant::now();
     let mut total_jobs = 0u64;

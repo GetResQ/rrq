@@ -6,6 +6,7 @@ use crate::cli_utils;
 use rrq::JobStatus;
 use rrq::load_toml_settings;
 use rrq::store::JobStore;
+use rrq_config::normalize_queue_name;
 
 use super::shared::{queue_matches, top_counts};
 
@@ -258,6 +259,7 @@ pub(crate) async fn dlq_requeue(options: DlqRequeueOptions) -> Result<()> {
     let target_queue = options
         .target_queue
         .unwrap_or(settings.default_queue_name.clone());
+    let target_queue = normalize_queue_name(&target_queue);
 
     let has_filter =
         options.queue.is_some() || options.function.is_some() || options.job_id.is_some();
@@ -450,6 +452,26 @@ mod tests {
         assert!(remaining <= 1);
         let queue_size = ctx.store.queue_size(&queue_name).await?;
         assert!(queue_size >= 1);
+
+        let job3 = build_job(&queue_name, &dlq_name, "three");
+        ctx.store.save_job_definition(&job3).await?;
+        ctx.store
+            .move_job_to_dlq(&job3.id, &dlq_name, "boom3", Utc::now())
+            .await?;
+        dlq_requeue(DlqRequeueOptions {
+            config: config_path.clone(),
+            dlq_name: Some(dlq_name.clone()),
+            target_queue: Some("cli-target".to_string()),
+            queue: None,
+            function: None,
+            job_id: Some(job3.id.clone()),
+            limit: None,
+            all: false,
+            dry_run: false,
+        })
+        .await?;
+        let requeued = ctx.store.get_job_definition(&job3.id).await?.unwrap();
+        assert_eq!(requeued.queue_name.as_deref(), Some("rrq:queue:cli-target"));
         Ok(())
     }
 }

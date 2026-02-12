@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**A distributed job queue that actually works.** RRQ combines a battle-tested Rust orchestrator with language-flexible workers, giving you the reliability of proven infrastructure with the flexibility of writing job handlers in Python, TypeScript, or Rust.
+**A distributed job queue that actually works.** RRQ is Rust-first: the orchestrator, protocol, and core producer/runner crates are implemented in Rust, with Python and TypeScript bindings for application integration.
 
 ## Why RRQ?
 
@@ -56,13 +56,29 @@ Most job queues make you choose: either fight with complex distributed systems c
 
 | Package | Language | Purpose | Install |
 |---------|----------|---------|---------|
-| [rrq](https://pypi.org/project/rrq/) | Python | Producer + runner | `pip install rrq` |
-| [rrq-ts](https://www.npmjs.com/package/rrq-ts) | TypeScript | Producer + runner | `npm install rrq-ts` |
-| [rrq](https://crates.io/crates/rrq) | Rust | Orchestrator CLI | `cargo install rrq` |
-| [rrq-producer](https://crates.io/crates/rrq-producer) | Rust | Native producer | `rrq-producer = "0.9"` |
-| [rrq-runner](https://crates.io/crates/rrq-runner) | Rust | Native runner | `rrq-runner = "0.9"` |
+| [rrq (crates.io)](https://crates.io/crates/rrq) | Rust | Orchestrator CLI (core) | `cargo install rrq` |
+| [rrq-producer](https://crates.io/crates/rrq-producer) | Rust | Native producer library | `rrq-producer = "0.9"` |
+| [rrq-runner](https://crates.io/crates/rrq-runner) | Rust | Native runner runtime | `rrq-runner = "0.9"` |
+| [rrq (PyPI)](https://pypi.org/project/rrq/) | Python | Producer + runner binding | `pip install rrq` |
+| [rrq-ts](https://www.npmjs.com/package/rrq-ts) | TypeScript | Producer + runner binding | `npm install rrq-ts` |
 
-## Quick Start (Python)
+## Quick Start (Rust Core)
+
+### 1. Install the orchestrator CLI
+
+```bash
+cargo install rrq
+```
+
+### 2. Verify installation
+
+```bash
+rrq --help
+```
+
+## Quick Start (Python Binding)
+
+This binding runs on top of the Rust `rrq` orchestrator.
 
 ### 1. Install
 
@@ -121,7 +137,9 @@ client = RRQClient(config_path="rrq.toml")
 job_id = await client.enqueue("send_email", {"params": {"email": "user@example.com"}})
 ```
 
-## Quick Start (TypeScript)
+## Quick Start (TypeScript Binding)
+
+This binding runs on top of the Rust `rrq` orchestrator.
 
 ```typescript
 import { RRQClient, RunnerRuntime, Registry } from "rrq-ts";
@@ -160,14 +178,15 @@ await runtime.runFromArgs();
 rrq/
 ├── docs/           # Documentation
 ├── examples/       # Usage examples
-├── rrq-py/         # Python package
 ├── rrq-rs/         # Rust workspace (orchestrator, producer, runner, protocol)
+├── rrq-py/         # Python binding package
 └── rrq-ts/         # TypeScript package
 ```
 
 ## Requirements
 
 - Redis 5.0+
+- Rust toolchain (for RRQ core/orchestrator)
 - Python 3.11+ (for Python SDK)
 - Node.js 20+ or Bun (for TypeScript SDK)
 

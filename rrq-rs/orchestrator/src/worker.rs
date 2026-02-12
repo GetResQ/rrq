@@ -22,7 +22,7 @@ use crate::runner::Runner;
 use crate::store::JobStore;
 use crate::telemetry;
 use rrq_config::CronJob;
-use rrq_config::RRQSettings;
+use rrq_config::{QUEUE_KEY_PREFIX, RRQSettings, normalize_queue_name};
 
 #[derive(Debug, Clone)]
 struct RunningJobInfo {
@@ -60,6 +60,14 @@ impl RRQWorker {
         burst: bool,
         worker_concurrency: usize,
     ) -> Result<Self> {
+        let mut settings = settings;
+        settings.default_queue_name = normalize_queue_name(&settings.default_queue_name);
+        settings.runner_routes = settings
+            .runner_routes
+            .into_iter()
+            .map(|(queue_name, runner_name)| (normalize_queue_name(&queue_name), runner_name))
+            .collect();
+
         if runners.is_empty() {
             return Err(anyhow::anyhow!("RRQWorker requires at least one runner"));
         }
@@ -78,7 +86,13 @@ impl RRQWorker {
         let runner_routes = settings.runner_routes.clone();
         let job_store = JobStore::new(settings.clone()).await?;
         let client = RRQClient::new(settings.clone(), job_store.clone());
-        let queues = queues.unwrap_or_else(|| vec![settings.default_queue_name.clone()]);
+        let mut queues = queues.unwrap_or_else(|| vec![settings.default_queue_name.clone()]);
+        queues = queues
+            .into_iter()
+            .map(|queue_name| normalize_queue_name(&queue_name))
+            .collect();
+        queues.sort();
+        queues.dedup();
         if queues.is_empty() {
             return Err(anyhow::anyhow!(
                 "worker must be configured with at least one queue"
@@ -378,9 +392,7 @@ impl RRQWorker {
         let aborts = self.running_aborts.lock().await.clone();
         for (job_id, info) in &running {
             let resolved_runner = info.runner_name.clone().unwrap_or_else(|| {
-                self.runner_routes
-                    .get(&info.queue_name)
-                    .cloned()
+                resolve_routed_runner(&self.runner_routes, &info.queue_name)
                     .unwrap_or_else(|| self.default_runner_name.clone())
             });
             if let Some(runner) = self.runners.get(&resolved_runner) {
@@ -432,6 +444,22 @@ impl RRQWorker {
 
         Ok(())
     }
+}
+
+fn resolve_routed_runner(
+    runner_routes: &HashMap<String, String>,
+    queue_name: &str,
+) -> Option<String> {
+    let normalized = normalize_queue_name(queue_name);
+    runner_routes
+        .get(&normalized)
+        .or_else(|| runner_routes.get(queue_name))
+        .or_else(|| {
+            normalized
+                .strip_prefix(QUEUE_KEY_PREFIX)
+                .and_then(|bare| runner_routes.get(bare))
+        })
+        .cloned()
 }
 
 fn split_runner_name(function_name: &str) -> (Option<String>, String) {
@@ -540,9 +568,7 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
 
     let resolved_runner = match runner_name {
         Some(name) => name,
-        None => runner_routes
-            .get(&queue_name)
-            .cloned()
+        None => resolve_routed_runner(&runner_routes, &queue_name)
             .unwrap_or(default_runner_name.clone()),
     };
     {
@@ -869,10 +895,11 @@ async fn process_retry_job(
         .queue_name
         .as_deref()
         .unwrap_or(&settings.default_queue_name);
+    let target_queue = normalize_queue_name(target_queue);
     let new_retry = job_store
         .atomic_retry_job(
             &job.id,
-            target_queue,
+            &target_queue,
             retry_at_score,
             error_message,
             JobStatus::Retrying,
@@ -916,11 +943,12 @@ async fn process_failure_job(
         .queue_name
         .as_deref()
         .unwrap_or(&settings.default_queue_name);
+    let target_queue = normalize_queue_name(target_queue);
 
     let new_retry = job_store
         .atomic_retry_job(
             &job.id,
-            target_queue,
+            &target_queue,
             retry_at_score,
             error_message,
             JobStatus::Retrying,
@@ -1047,6 +1075,7 @@ async fn recover_orphaned_jobs(
                     .queue_name
                     .clone()
                     .unwrap_or_else(|| settings.default_queue_name.clone());
+                let queue_name = normalize_queue_name(&queue_name);
                 let lock_timeout_ms = job
                     .job_timeout_seconds
                     .unwrap_or(settings.default_job_timeout_seconds)
@@ -1726,8 +1755,8 @@ mod tests {
 
         let started_queues = wait_for_started(&started).await.unwrap();
         let mut unique = started_queues.iter().cloned().collect::<HashSet<_>>();
-        assert!(unique.remove(&queue_a));
-        assert!(unique.remove(&queue_b));
+        assert!(unique.remove(&normalize_queue_name(&queue_a)));
+        assert!(unique.remove(&normalize_queue_name(&queue_b)));
 
         gate.notify_waiters();
         timeout(Duration::from_secs(2), worker.drain_tasks())

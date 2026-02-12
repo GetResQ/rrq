@@ -3,6 +3,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
+use crate::queue::normalize_queue_name;
 use crate::settings::RRQSettings;
 use crate::tcp_socket::parse_tcp_socket;
 
@@ -72,10 +73,25 @@ fn normalize_toml_payload(mut payload: Value) -> Result<Value> {
             map.insert("runner_routes".to_string(), routing);
         }
         map.remove("worker_concurrency");
+        normalize_queue_fields(&mut map);
         return Ok(Value::Object(map));
     }
 
     Err(anyhow::anyhow!("RRQ config must be a TOML table"))
+}
+
+fn normalize_queue_fields(map: &mut Map<String, Value>) {
+    if let Some(Value::String(queue_name)) = map.get_mut("default_queue_name") {
+        *queue_name = normalize_queue_name(queue_name);
+    }
+
+    if let Some(Value::Object(routes)) = map.get_mut("runner_routes") {
+        let mut normalized = Map::new();
+        for (queue_name, runner_name) in std::mem::take(routes) {
+            normalized.insert(normalize_queue_name(&queue_name), runner_name);
+        }
+        *routes = normalized;
+    }
 }
 
 fn env_overrides() -> Result<Value> {
@@ -302,11 +318,12 @@ mod tests {
 
         let settings = load_toml_settings(Some(path.to_str().unwrap())).unwrap();
         assert_eq!(settings.redis_dsn, "redis://localhost:6379/10");
-        assert_eq!(settings.default_queue_name, "from_toml");
+        assert_eq!(settings.default_queue_name, "rrq:queue:from_toml");
         assert_eq!(
-            settings.runner_routes.get("alpha"),
+            settings.runner_routes.get("rrq:queue:alpha"),
             Some(&"python".to_string())
         );
+        assert!(!settings.runner_routes.contains_key("alpha"));
     }
 
     #[test]
