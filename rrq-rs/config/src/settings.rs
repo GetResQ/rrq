@@ -64,6 +64,10 @@ pub struct RRQSettings {
     pub default_result_ttl_seconds: i64,
     pub default_poll_delay_seconds: f64,
     pub runner_connect_timeout_ms: i64,
+    /// Grace period after SIGTERM before escalating to SIGKILL for runner processes.
+    pub runner_shutdown_term_grace_seconds: f64,
+    /// Whether to send in-flight cancel protocol messages as best-effort hints.
+    pub runner_enable_inflight_cancel_hints: bool,
     /// When true, capture runner stdout/stderr and re-emit through rrq's
     /// structured logging.  When false (default), runner output goes directly
     /// to the terminal.  Enable in production for unified log shipping.
@@ -94,6 +98,8 @@ impl Default for RRQSettings {
             default_result_ttl_seconds: DEFAULT_RESULT_TTL_SECONDS,
             default_poll_delay_seconds: DEFAULT_POLL_DELAY_SECONDS,
             runner_connect_timeout_ms: DEFAULT_RUNNER_CONNECT_TIMEOUT_MS,
+            runner_shutdown_term_grace_seconds: 5.0,
+            runner_enable_inflight_cancel_hints: false,
             capture_runner_output: false,
             default_unique_job_lock_ttl_seconds: DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
             default_runner_name: "python".to_string(),

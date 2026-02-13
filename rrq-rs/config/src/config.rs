@@ -207,6 +207,14 @@ fn diagnose_config_error(config: &Value, err: &serde_json::Error) -> String {
 }
 
 fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
+    if !settings.runner_shutdown_term_grace_seconds.is_finite()
+        || settings.runner_shutdown_term_grace_seconds < 0.0
+    {
+        return Err(anyhow::anyhow!(
+            "runner_shutdown_term_grace_seconds must be a finite number >= 0"
+        ));
+    }
+
     if settings.runners.is_empty() {
         return Ok(()); // No runners configured is valid (will error at worker startup)
     }
@@ -519,5 +527,25 @@ mod tests {
         } else {
             assert!(result.is_ok());
         }
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_negative_shutdown_term_grace() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        runner_shutdown_term_grace_seconds = -1
+        [rrq.runners.python]
+        cmd = ["rrq-runner"]
+        tcp_socket = "127.0.0.1:9000"
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("runner_shutdown_term_grace_seconds")
+        );
     }
 }

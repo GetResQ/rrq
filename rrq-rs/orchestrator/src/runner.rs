@@ -11,6 +11,12 @@ use crate::telemetry::{self, LogFormat};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+#[cfg(unix)]
+use nix::errno::Errno;
+#[cfg(unix)]
+use nix::sys::signal::{Signal, killpg};
+#[cfg(unix)]
+use nix::unistd::Pid;
 use rrq_config::{
     QUEUE_KEY_PREFIX, RRQSettings, TcpSocketSpec, normalize_queue_name, parse_tcp_socket,
 };
@@ -120,6 +126,110 @@ fn connect_timeout_from_settings(timeout_ms: i64) -> Duration {
     Duration::from_millis(ms as u64)
 }
 
+fn shutdown_term_grace_from_settings(timeout_seconds: f64) -> Duration {
+    if timeout_seconds.is_finite() && timeout_seconds > 0.0 {
+        Duration::from_secs_f64(timeout_seconds)
+    } else {
+        Duration::ZERO
+    }
+}
+
+fn is_response_timeout_error(err: &anyhow::Error) -> bool {
+    err.to_string().contains("runner response timeout")
+}
+
+#[cfg(unix)]
+fn configure_runner_process_group(command: &mut Command) {
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_runner_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn signal_process_group(pid: u32, signal: Signal) -> Result<bool> {
+    let pgid = Pid::from_raw(pid as i32);
+    match killpg(pgid, signal) {
+        Ok(()) => Ok(true),
+        Err(Errno::ESRCH) => Ok(false),
+        Err(err) => Err(anyhow::anyhow!(
+            "failed to send {signal:?} to process group {pid}: {err}"
+        )),
+    }
+}
+
+async fn terminate_child_process(
+    child: &mut Child,
+    shutdown_term_grace: Duration,
+    termination_reason: &str,
+) {
+    if let Ok(Some(_)) = child.try_wait() {
+        return;
+    }
+
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            let term_sent = signal_process_group(pid, Signal::SIGTERM).unwrap_or(false);
+            tracing::info!(
+                pid,
+                signal = "SIGTERM",
+                reason = termination_reason,
+                "sent runner process-group termination signal"
+            );
+            if !term_sent {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return;
+            }
+
+            if shutdown_term_grace.is_zero() {
+                let kill_sent = signal_process_group(pid, Signal::SIGKILL).unwrap_or(false);
+                if !kill_sent {
+                    let _ = child.kill().await;
+                }
+                tracing::warn!(
+                    pid,
+                    signal = "SIGKILL",
+                    reason = termination_reason,
+                    "runner termination grace is zero; forcing kill"
+                );
+                let _ = child.wait().await;
+                return;
+            }
+
+            match timeout(shutdown_term_grace, child.wait()).await {
+                Ok(_) => {
+                    tracing::info!(
+                        pid,
+                        reason = termination_reason,
+                        "runner process group exited during graceful shutdown"
+                    );
+                    return;
+                }
+                Err(_) => {
+                    let kill_sent = signal_process_group(pid, Signal::SIGKILL).unwrap_or(false);
+                    if !kill_sent {
+                        let _ = child.kill().await;
+                    }
+                    tracing::warn!(
+                        pid,
+                        signal = "SIGKILL",
+                        reason = termination_reason,
+                        grace_ms = shutdown_term_grace.as_millis() as u64,
+                        "runner process group did not exit after SIGTERM; forcing kill"
+                    );
+                    let _ = child.wait().await;
+                    return;
+                }
+            }
+        }
+    }
+
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
 #[async_trait]
 pub trait Runner: Send + Sync {
     async fn execute(&self, request: ExecutionRequest) -> Result<ExecutionOutcome>;
@@ -170,6 +280,7 @@ pub struct SocketRunnerPool {
     availability: Arc<Notify>,
     response_timeout: Option<Duration>,
     connect_timeout: Duration,
+    shutdown_term_grace: Duration,
     capture_output: bool,
     #[cfg(test)]
     spawn_override: Option<Arc<dyn Fn() -> SocketProcess + Send + Sync>>,
@@ -401,6 +512,7 @@ impl SocketRunnerPool {
         tcp_socket: Option<String>,
         response_timeout: Option<Duration>,
         connect_timeout: Duration,
+        shutdown_term_grace: Duration,
         capture_output: bool,
     ) -> Result<Self> {
         let name = name.into();
@@ -439,6 +551,7 @@ impl SocketRunnerPool {
             availability: Arc::new(Notify::new()),
             response_timeout,
             connect_timeout,
+            shutdown_term_grace,
             capture_output,
             #[cfg(test)]
             spawn_override: None,
@@ -462,7 +575,7 @@ impl SocketRunnerPool {
                     // Clean up any processes we already started before propagating error
                     for proc in processes.iter() {
                         let mut guard = proc.lock().await;
-                        let _ = self.terminate(&mut guard).await;
+                        let _ = self.terminate(&mut guard, "pool_start_failure").await;
                     }
                     processes.clear();
                     return Err(err);
@@ -535,6 +648,7 @@ impl SocketRunnerPool {
             if let Some(cwd) = &self.cwd {
                 command.current_dir(cwd);
             }
+            configure_runner_process_group(&mut command);
             // Ensure child runner processes are not orphaned if their owning task is dropped.
             command.kill_on_drop(true);
             let mut child = command.spawn().context("failed to spawn runner")?;
@@ -583,8 +697,12 @@ impl SocketRunnerPool {
                     if let Some(task) = stderr_task.as_ref() {
                         task.abort();
                     }
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
+                    terminate_child_process(
+                        &mut child,
+                        self.shutdown_term_grace,
+                        "spawn_connect_failure",
+                    )
+                    .await;
                     attempts += 1;
                     if reuse_socket.is_some() || attempts >= max_attempts {
                         return Err(err);
@@ -750,7 +868,7 @@ impl SocketRunnerPool {
         let mut guard = proc.lock().await;
         // Capture the old socket target to reuse (prevents port exhaustion on TCP)
         let old_socket = guard.socket;
-        let _ = self.terminate(&mut guard).await;
+        let _ = self.terminate(&mut guard, "respawn").await;
         let replacement = match self.spawn_process(Some(old_socket)).await {
             Ok(proc) => proc,
             Err(err) => {
@@ -765,7 +883,7 @@ impl SocketRunnerPool {
         Ok(())
     }
 
-    async fn terminate(&self, proc: &mut SocketProcess) -> Result<()> {
+    async fn terminate(&self, proc: &mut SocketProcess, termination_reason: &str) -> Result<()> {
         if let Some(task) = proc.stdout_task.take() {
             task.abort();
         }
@@ -773,8 +891,23 @@ impl SocketRunnerPool {
             task.abort();
         }
         proc.connection = None;
-        let _ = proc.child.kill().await;
-        let _ = proc.child.wait().await;
+        terminate_child_process(
+            &mut proc.child,
+            self.shutdown_term_grace,
+            termination_reason,
+        )
+        .await;
+        Ok(())
+    }
+
+    async fn terminate_process(
+        &self,
+        proc: &Arc<Mutex<SocketProcess>>,
+        reason: &str,
+    ) -> Result<()> {
+        let mut guard = proc.lock().await;
+        self.terminate(&mut guard, reason).await?;
+        self.availability.notify_waiters();
         Ok(())
     }
 
@@ -782,7 +915,7 @@ impl SocketRunnerPool {
         let mut processes = self.processes.lock().await;
         for proc in processes.iter() {
             let mut guard = proc.lock().await;
-            let _ = self.terminate(&mut guard).await;
+            let _ = self.terminate(&mut guard, "pool_close").await;
         }
         processes.clear();
         Ok(())
@@ -792,6 +925,7 @@ impl SocketRunnerPool {
 pub struct SocketRunner {
     pool: Arc<SocketRunnerPool>,
     in_flight: Arc<Mutex<HashMap<String, InFlightRequest>>>,
+    send_cancel_hints: bool,
 }
 
 impl SocketRunner {
@@ -806,6 +940,8 @@ impl SocketRunner {
         tcp_socket: Option<String>,
         response_timeout_seconds: Option<f64>,
         connect_timeout: Duration,
+        shutdown_term_grace: Duration,
+        send_cancel_hints: bool,
         capture_output: bool,
     ) -> Result<Self> {
         let response_timeout = response_timeout_seconds.map(Duration::from_secs_f64);
@@ -819,12 +955,14 @@ impl SocketRunner {
             tcp_socket,
             response_timeout,
             connect_timeout,
+            shutdown_term_grace,
             capture_output,
         )
         .await?;
         Ok(Self {
             pool: Arc::new(pool),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
+            send_cancel_hints,
         })
     }
 
@@ -917,12 +1055,14 @@ impl Runner for SocketRunner {
     async fn execute(&self, request: ExecutionRequest) -> Result<ExecutionOutcome> {
         let (proc, _permit) = self.pool.acquire_process().await?;
         let result = self.execute_with_process(&proc, &request).await;
-        if let Err(err) = &result
-            && err.to_string().contains("runner response timeout")
-        {
-            let _ = self
-                .cancel(&request.job_id, Some(request.request_id.as_str()))
-                .await;
+        let timed_out = result.as_ref().err().is_some_and(is_response_timeout_error);
+        if timed_out {
+            if self.send_cancel_hints {
+                let _ = self
+                    .cancel(&request.job_id, Some(request.request_id.as_str()))
+                    .await;
+            }
+            let _ = self.pool.terminate_process(&proc, "response_timeout").await;
         }
         {
             let mut in_flight = self.in_flight.lock().await;
@@ -939,7 +1079,7 @@ impl Runner for SocketRunner {
                         Err(_) => true,
                     }
                 };
-                if exited {
+                if exited && !timed_out {
                     let _ = self.pool.respawn(&proc).await;
                 }
                 Err(err)
@@ -1116,6 +1256,8 @@ pub async fn build_runners_from_settings_filtered(
         None => resolve_runner_max_in_flight(settings, false)?,
     };
     let connect_timeout = connect_timeout_from_settings(settings.runner_connect_timeout_ms);
+    let shutdown_term_grace =
+        shutdown_term_grace_from_settings(settings.runner_shutdown_term_grace_seconds);
     let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
     for (name, config) in &settings.runners {
         // Skip runners that are not needed (if filter is provided)
@@ -1146,6 +1288,8 @@ pub async fn build_runners_from_settings_filtered(
             config.tcp_socket.clone(),
             config.response_timeout_seconds,
             connect_timeout,
+            shutdown_term_grace,
+            settings.runner_enable_inflight_cancel_hints,
             settings.capture_runner_output,
         )
         .await?;
@@ -1196,8 +1340,14 @@ where
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    #[cfg(unix)]
+    use nix::sys::signal::kill;
+    #[cfg(unix)]
+    use nix::unistd::Pid;
     use rrq_config::{RRQSettings, RunnerConfig, RunnerType};
     use std::net::{IpAddr, Ipv4Addr, TcpListener as StdTcpListener};
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
     use tokio::net::TcpListener as TokioTcpListener;
     use tokio::process::Command;
     use tokio::time::sleep;
@@ -1234,6 +1384,56 @@ mod tests {
             }
             _ => panic!("unexpected message variant"),
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_child_process_escalates_to_sigkill_when_term_ignored() {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("trap '' TERM; while true; do sleep 1; done");
+        configure_runner_process_group(&mut command);
+        let mut child = command.spawn().unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        terminate_child_process(&mut child, Duration::from_millis(50), "test_escalation").await;
+
+        let status = child.try_wait().unwrap().expect("child should be exited");
+        assert!(matches!(status.signal(), Some(9) | Some(15)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_child_process_kills_process_group_descendants() {
+        let marker =
+            std::env::temp_dir().join(format!("rrq-runner-child-{}.pid", uuid::Uuid::new_v4()));
+        let script = format!(
+            "sleep 60 & echo $! > '{}'; trap '' TERM; while true; do sleep 1; done",
+            marker.display()
+        );
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(script);
+        configure_runner_process_group(&mut command);
+        let mut child = command.spawn().unwrap();
+
+        let mut child_pid: Option<i32> = None;
+        for _ in 0..100 {
+            if let Ok(payload) = std::fs::read_to_string(&marker)
+                && let Ok(pid) = payload.trim().parse::<i32>()
+            {
+                child_pid = Some(pid);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let child_pid = child_pid.expect("child pid marker should be written");
+
+        terminate_child_process(&mut child, Duration::from_millis(50), "test_descendants").await;
+
+        let still_alive = kill(Pid::from_raw(child_pid), None).is_ok();
+        assert!(!still_alive, "descendant process should be terminated");
+        let _ = std::fs::remove_file(marker);
     }
 
     #[test]
@@ -1313,6 +1513,7 @@ mod tests {
             availability: Arc::new(Notify::new()),
             response_timeout: None,
             connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            shutdown_term_grace: Duration::from_millis(50),
             capture_output: true,
             spawn_override: None,
         }
@@ -1402,6 +1603,7 @@ mod tests {
             availability: Arc::new(Notify::new()),
             response_timeout: None,
             connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            shutdown_term_grace: Duration::from_millis(50),
             capture_output: true,
             spawn_override: Some(spawn_override),
         };
@@ -1440,6 +1642,7 @@ mod tests {
             availability: Arc::new(Notify::new()),
             response_timeout: None,
             connect_timeout: Duration::from_millis(50),
+            shutdown_term_grace: Duration::from_millis(50),
             capture_output: true,
             spawn_override: None,
         };
@@ -1529,6 +1732,7 @@ mod tests {
             Some("127.0.0.1:65535".to_string()),
             None,
             Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            Duration::from_millis(50),
             true,
         )
         .await;
@@ -1557,6 +1761,7 @@ mod tests {
             availability: Arc::new(Notify::new()),
             response_timeout: None,
             connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            shutdown_term_grace: Duration::from_millis(50),
             capture_output: true,
             spawn_override: None,
         };
@@ -1600,6 +1805,7 @@ mod tests {
             availability: Arc::new(Notify::new()),
             response_timeout: None,
             connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            shutdown_term_grace: Duration::from_millis(50),
             capture_output: true,
             spawn_override: None,
         };
@@ -1646,6 +1852,7 @@ mod tests {
         let runner = SocketRunner {
             pool: Arc::new(pool),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
+            send_cancel_hints: false,
         };
         {
             let mut in_flight = runner.in_flight.lock().await;
@@ -1671,6 +1878,7 @@ mod tests {
         let runner = SocketRunner {
             pool: Arc::new(pool),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
+            send_cancel_hints: false,
         };
         {
             let mut in_flight = runner.in_flight.lock().await;
@@ -1689,7 +1897,95 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_timeout_triggers_cancel() {
+    async fn execute_timeout_recycles_process_without_cancel_hints() {
+        let (listener, socket_addr) = bind_tcp_listener().await;
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_message(&mut stream).await.unwrap().unwrap();
+            assert!(
+                timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "unexpected cancel hint when disabled"
+            );
+        });
+
+        let child = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
+        let process = SocketProcess {
+            child,
+            socket: socket_addr,
+            stdout_task: None,
+            stderr_task: None,
+            permits: Arc::new(Semaphore::new(1)),
+            connection: None,
+        };
+        let (spec, _addr) = allocate_tcp_spec();
+        let pool = SocketRunnerPool {
+            name: "test".to_string(),
+            cmd: vec!["sleep".to_string(), "60".to_string()],
+            pool_size: 1,
+            max_in_flight: 1,
+            env: None,
+            cwd: None,
+            tcp_socket: spec,
+            tcp_port_cursor: AtomicUsize::new(0),
+            processes: Mutex::new(vec![Arc::new(Mutex::new(process))]),
+            cursor: AtomicUsize::new(0),
+            availability: Arc::new(Notify::new()),
+            response_timeout: Some(Duration::from_millis(50)),
+            connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            shutdown_term_grace: Duration::from_millis(50),
+            capture_output: true,
+            spawn_override: None,
+        };
+        let runner = SocketRunner {
+            pool: Arc::new(pool),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
+            send_cancel_hints: false,
+        };
+        let request = ExecutionRequest {
+            protocol_version: rrq_protocol::PROTOCOL_VERSION.to_string(),
+            request_id: "req-1".to_string(),
+            job_id: "job-1".to_string(),
+            function_name: "echo".to_string(),
+            params: HashMap::new(),
+            context: rrq_protocol::ExecutionContext {
+                job_id: "job-1".to_string(),
+                attempt: 1,
+                enqueue_time: "2024-01-01T00:00:00Z".parse().unwrap(),
+                queue_name: "default".to_string(),
+                deadline: None,
+                trace_context: None,
+                worker_id: None,
+            },
+        };
+        let err = runner.execute(request).await.unwrap_err();
+        assert!(err.to_string().contains("runner response timeout"));
+        let proc = {
+            let processes = runner.pool.processes.lock().await;
+            processes.first().cloned().unwrap()
+        };
+        let mut exited = false;
+        for _ in 0..20 {
+            let status = {
+                let mut guard = proc.lock().await;
+                guard.child.try_wait().unwrap()
+            };
+            if status.is_some() {
+                exited = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(exited, "timed-out process should be terminated");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn execute_timeout_sends_cancel_hint_when_enabled() {
         let (listener, socket_addr) = bind_tcp_listener().await;
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -1732,29 +2028,16 @@ mod tests {
             availability: Arc::new(Notify::new()),
             response_timeout: Some(Duration::from_millis(50)),
             connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            shutdown_term_grace: Duration::from_millis(50),
             capture_output: true,
             spawn_override: None,
         };
         let runner = SocketRunner {
             pool: Arc::new(pool),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
+            send_cancel_hints: true,
         };
-        let request = ExecutionRequest {
-            protocol_version: rrq_protocol::PROTOCOL_VERSION.to_string(),
-            request_id: "req-1".to_string(),
-            job_id: "job-1".to_string(),
-            function_name: "echo".to_string(),
-            params: HashMap::new(),
-            context: rrq_protocol::ExecutionContext {
-                job_id: "job-1".to_string(),
-                attempt: 1,
-                enqueue_time: "2024-01-01T00:00:00Z".parse().unwrap(),
-                queue_name: "default".to_string(),
-                deadline: None,
-                trace_context: None,
-                worker_id: None,
-            },
-        };
+        let request = build_execution_request("req-1", "job-1");
         let err = runner.execute(request).await.unwrap_err();
         assert!(err.to_string().contains("runner response timeout"));
         server.await.unwrap();
@@ -1794,6 +2077,7 @@ mod tests {
         let runner = SocketRunner {
             pool: Arc::new(build_test_pool(1)),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
+            send_cancel_hints: false,
         };
 
         let request = ExecutionRequest {
@@ -1865,6 +2149,7 @@ mod tests {
         let runner = SocketRunner {
             pool: Arc::new(build_test_pool(1)),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
+            send_cancel_hints: false,
         };
 
         let first = runner
@@ -1920,6 +2205,7 @@ mod tests {
         let runner = SocketRunner {
             pool: Arc::new(build_test_pool(1)),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
+            send_cancel_hints: false,
         };
 
         let first = runner
@@ -2023,6 +2309,7 @@ mod tests {
             availability: Arc::new(Notify::new()),
             response_timeout: None,
             connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            shutdown_term_grace: Duration::from_millis(50),
             capture_output: true,
             spawn_override: None,
         };
@@ -2074,6 +2361,7 @@ mod tests {
             availability: Arc::new(Notify::new()),
             response_timeout: None,
             connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            shutdown_term_grace: Duration::from_millis(50),
             capture_output: true,
             spawn_override: Some(spawn_override),
         };

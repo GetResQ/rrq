@@ -449,13 +449,15 @@ impl RRQWorker {
 
         let running = self.running_jobs.lock().await.clone();
         let aborts = self.running_aborts.lock().await.clone();
-        for (job_id, info) in &running {
-            let resolved_runner = info.runner_name.clone().unwrap_or_else(|| {
-                resolve_routed_runner(&self.runner_routes, &info.queue_name)
-                    .unwrap_or_else(|| self.default_runner_name.clone())
-            });
-            if let Some(runner) = self.runners.get(&resolved_runner) {
-                let _ = runner.cancel(job_id, info.request_id.as_deref()).await;
+        if self.settings.runner_enable_inflight_cancel_hints {
+            for (job_id, info) in &running {
+                let resolved_runner = info.runner_name.clone().unwrap_or_else(|| {
+                    resolve_routed_runner(&self.runner_routes, &info.queue_name)
+                        .unwrap_or_else(|| self.default_runner_name.clone())
+                });
+                if let Some(runner) = self.runners.get(&resolved_runner) {
+                    let _ = runner.cancel(job_id, info.request_id.as_deref()).await;
+                }
             }
         }
         for (_job_id, abort) in aborts {
@@ -753,7 +755,9 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
             (outcome_result, "transport_error")
         }
         Err(_) => {
-            let _ = runner.cancel(&job.id, Some(request_id.as_str())).await;
+            if settings.runner_enable_inflight_cancel_hints {
+                let _ = runner.cancel(&job.id, Some(request_id.as_str())).await;
+            }
             let message = format!("Job timed out after {}s.", job_timeout);
             span.record("rrq.outcome", "timeout");
             span.record("rrq.error_message", message.as_str());
@@ -2008,9 +2012,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn worker_timeout_triggers_cancel() {
+    async fn worker_timeout_skips_cancel_hint_by_default() {
         let mut ctx = RedisTestContext::new().await.unwrap();
         ctx.settings.default_runner_name = "test".to_string();
+        let runner = Arc::new(StaticRunner::new(
+            TestOutcome::Success(json!({"ok": true})),
+            Duration::from_millis(1500),
+        ));
+        let last_request_id = runner.last_request_id.clone();
+        let cancelled = runner.cancelled.clone();
+        let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+        runners.insert("test".to_string(), runner);
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let options = EnqueueOptions {
+            job_timeout_seconds: Some(1),
+            ..Default::default()
+        };
+        let job = client
+            .enqueue("timeout", serde_json::Map::new(), options)
+            .await
+            .unwrap();
+        let mut worker = RRQWorker::new(
+            ctx.settings.clone(),
+            None,
+            Some("worker-1".to_string()),
+            runners,
+            true,
+            1,
+        )
+        .await
+        .unwrap();
+        timeout(Duration::from_secs(5), worker.run())
+            .await
+            .unwrap()
+            .unwrap();
+        let request_id = last_request_id.lock().await.clone().unwrap();
+        let cancelled = cancelled.lock().await;
+        assert!(!cancelled.contains(&request_id));
+        let loaded = ctx
+            .store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.status, JobStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn worker_timeout_sends_cancel_hint_when_enabled() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        ctx.settings.default_runner_name = "test".to_string();
+        ctx.settings.runner_enable_inflight_cancel_hints = true;
         let runner = Arc::new(StaticRunner::new(
             TestOutcome::Success(json!({"ok": true})),
             Duration::from_millis(1500),
