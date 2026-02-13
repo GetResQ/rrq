@@ -472,32 +472,41 @@ fn resolve_otlp_headers(signal_specific_header_env: &str) -> HashMap<String, Str
 }
 
 fn resolve_otlp_trace_endpoint() -> String {
-    if let Ok(endpoint) = env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-        && !endpoint.is_empty()
-    {
-        return ensure_signal_path(endpoint, "traces");
-    }
-
-    "http://127.0.0.1:4318/v1/traces".to_string()
+    let explicit_endpoint = env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").ok();
+    select_signal_endpoint(
+        explicit_endpoint.as_deref(),
+        "http://127.0.0.1:4318",
+        "traces",
+    )
 }
 
 fn resolve_otlp_metrics_endpoint() -> String {
-    if let Ok(endpoint) = env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
-        && !endpoint.is_empty()
-    {
-        return ensure_signal_path(endpoint, "metrics");
-    }
-
-    "http://127.0.0.1:4318/v1/metrics".to_string()
+    let explicit_endpoint = env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").ok();
+    select_signal_endpoint(
+        explicit_endpoint.as_deref(),
+        "http://127.0.0.1:4318",
+        "metrics",
+    )
 }
 
 fn resolve_otlp_logs_endpoint() -> String {
-    if let Ok(endpoint) = env::var("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
-        && !endpoint.is_empty()
-    {
-        return ensure_signal_path(endpoint, "logs");
+    let explicit_endpoint = env::var("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT").ok();
+    select_signal_endpoint(
+        explicit_endpoint.as_deref(),
+        "http://127.0.0.1:4318",
+        "logs",
+    )
+}
+
+fn select_signal_endpoint(
+    explicit_endpoint: Option<&str>,
+    default_base_endpoint: &str,
+    signal: &str,
+) -> String {
+    if let Some(endpoint) = explicit_endpoint.filter(|value| !value.is_empty()) {
+        return endpoint.to_string();
     }
-    "http://127.0.0.1:4318/v1/logs".to_string()
+    ensure_signal_path(default_base_endpoint.to_string(), signal)
 }
 
 fn ensure_signal_path(endpoint: String, signal: &str) -> String {
@@ -908,6 +917,30 @@ mod tests {
                 "traces"
             ),
             "http://collector:4318/v1/traces?token=abc"
+        );
+    }
+
+    #[test]
+    fn select_signal_endpoint_preserves_explicit_path() {
+        assert_eq!(
+            select_signal_endpoint(
+                Some("http://collector:4318/custom/traces"),
+                "http://127.0.0.1:4318",
+                "traces"
+            ),
+            "http://collector:4318/custom/traces"
+        );
+    }
+
+    #[test]
+    fn select_signal_endpoint_uses_default_when_missing_or_blank() {
+        assert_eq!(
+            select_signal_endpoint(None, "http://collector:4318", "metrics"),
+            "http://collector:4318/v1/metrics"
+        );
+        assert_eq!(
+            select_signal_endpoint(Some(""), "http://collector:4318", "logs"),
+            "http://collector:4318/v1/logs"
         );
     }
 }

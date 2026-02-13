@@ -128,7 +128,7 @@ fn connect_timeout_from_settings(timeout_ms: i64) -> Duration {
 
 fn shutdown_term_grace_from_settings(timeout_seconds: f64) -> Duration {
     if timeout_seconds.is_finite() && timeout_seconds > 0.0 {
-        Duration::from_secs_f64(timeout_seconds)
+        Duration::try_from_secs_f64(timeout_seconds).unwrap_or(Duration::MAX)
     } else {
         Duration::ZERO
     }
@@ -2017,6 +2017,24 @@ mod tests {
             connect_timeout_from_settings(5000),
             Duration::from_millis(5000)
         );
+    }
+
+    #[test]
+    fn shutdown_term_grace_from_settings_handles_invalid_values() {
+        assert_eq!(shutdown_term_grace_from_settings(0.0), Duration::ZERO);
+        assert_eq!(shutdown_term_grace_from_settings(-1.0), Duration::ZERO);
+        assert_eq!(shutdown_term_grace_from_settings(f64::NAN), Duration::ZERO);
+        assert_eq!(
+            shutdown_term_grace_from_settings(f64::INFINITY),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn shutdown_term_grace_from_settings_saturates_huge_values() {
+        let duration = std::panic::catch_unwind(|| shutdown_term_grace_from_settings(1e100))
+            .expect("shutdown grace conversion should not panic");
+        assert_eq!(duration, Duration::MAX);
     }
 
     #[tokio::test]

@@ -26,6 +26,18 @@ class ProducerConfigModel(BaseModel):
     job_timeout_seconds: int | None = None
     result_ttl_seconds: int | None = None
     idempotency_ttl_seconds: int | None = None
+    correlation_mappings: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("queue_name")
+    @classmethod
+    def _normalize_queue_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if not value.strip():
+            raise ValueError("queue_name cannot be blank")
+        if value.startswith(get_producer_constants().queue_key_prefix):
+            return value
+        return f"{get_producer_constants().queue_key_prefix}{value}"
 
 
 class ProducerSettingsModel(BaseModel):

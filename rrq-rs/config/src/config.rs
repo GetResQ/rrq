@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
@@ -212,6 +213,12 @@ fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
     {
         return Err(anyhow::anyhow!(
             "runner_shutdown_term_grace_seconds must be a finite number >= 0"
+        ));
+    }
+    if settings.runner_shutdown_term_grace_seconds > Duration::MAX.as_secs_f64() {
+        return Err(anyhow::anyhow!(
+            "runner_shutdown_term_grace_seconds is too large (max {})",
+            Duration::MAX.as_secs_f64()
         ));
     }
 
@@ -547,5 +554,22 @@ mod tests {
             err.to_string()
                 .contains("runner_shutdown_term_grace_seconds")
         );
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_oversized_shutdown_term_grace() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        runner_shutdown_term_grace_seconds = 1e100
+        [rrq.runners.python]
+        cmd = ["rrq-runner"]
+        tcp_socket = "127.0.0.1:9000"
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(err.to_string().contains("too large"));
     }
 }
