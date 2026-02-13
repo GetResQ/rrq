@@ -288,27 +288,46 @@ impl RRQWorker {
                         "rrq.fetch_ms" = Empty
                     );
                     let fetch_started = Instant::now();
-                    let ready = self
+                    let provisional_lock_timeout_ms = self
+                        .settings
+                        .default_job_timeout_seconds
+                        .checked_add(self.settings.default_lock_timeout_extension_seconds)
+                        .and_then(|sum| sum.checked_mul(1000))
+                        .ok_or_else(|| anyhow::anyhow!("lock_timeout_ms overflow"))?;
+                    if provisional_lock_timeout_ms <= 0 {
+                        return Err(anyhow::anyhow!("lock_timeout_ms must be positive"));
+                    }
+                    let claim_start_time = Utc::now();
+                    let claimed = self
                         .job_store
-                        .get_ready_job_ids(queue_name, request_count)
+                        .atomic_claim_ready_jobs(
+                            queue_name,
+                            &self.worker_id,
+                            provisional_lock_timeout_ms,
+                            request_count,
+                            claim_start_time,
+                        )
                         .instrument(fetch_span.clone())
                         .await?;
                     fetch_span.record(
                         "rrq.fetch_ms",
                         fetch_started.elapsed().as_secs_f64() * 1000.0,
                     );
-                    fetch_span.record("rrq.ready", ready.len() as i64);
-                    if ready.is_empty() {
+                    fetch_span.record("rrq.ready", claimed.len() as i64);
+                    if claimed.is_empty() {
                         continue;
                     }
-                    telemetry::record_jobs_fetched(queue_name, ready.len() as u64);
+                    telemetry::record_jobs_fetched(queue_name, claimed.len() as u64);
+                    for _ in 0..claimed.len() {
+                        telemetry::record_lock_acquire(queue_name, "acquired");
+                    }
                     let job_defs = self
                         .job_store
-                        .get_job_definitions(&ready)
+                        .get_job_definitions(&claimed)
                         .instrument(fetch_span.clone())
                         .await?;
 
-                    for (job_id, job_opt) in ready.into_iter().zip(job_defs.into_iter()) {
+                    for (job_id, job_opt) in claimed.into_iter().zip(job_defs.into_iter()) {
                         if fetched >= count || self.shutdown.load(Ordering::SeqCst) {
                             poll_span.record("rrq.fetched", fetched as i64);
                             return Ok(fetched);
@@ -318,8 +337,9 @@ impl RRQWorker {
                             None => {
                                 let _ = self
                                     .job_store
-                                    .remove_job_from_queue(queue_name, &job_id)
+                                    .remove_active_job(&self.worker_id, &job_id)
                                     .await;
+                                let _ = self.job_store.release_job_lock(&job_id).await;
                                 continue;
                             }
                         };
@@ -332,29 +352,26 @@ impl RRQWorker {
                             .and_then(|sum| sum.checked_mul(1000))
                             .ok_or_else(|| anyhow::anyhow!("lock_timeout_ms overflow"))?;
                         if lock_timeout_ms <= 0 {
+                            let _ = self
+                                .job_store
+                                .remove_active_job(&self.worker_id, &job.id)
+                                .await;
+                            let _ = self.job_store.release_job_lock(&job.id).await;
                             return Err(anyhow::anyhow!("lock_timeout_ms must be positive"));
                         }
-
-                        let start_time = Utc::now();
-                        let (locked, removed) = self
+                        let lock_refreshed = self
                             .job_store
-                            .atomic_lock_and_start_job(
-                                &job.id,
-                                queue_name,
-                                &self.worker_id,
-                                lock_timeout_ms,
-                                start_time,
-                            )
+                            .refresh_job_lock_timeout(&job.id, &self.worker_id, lock_timeout_ms)
                             .await?;
-                        let lock_result = if locked && removed > 0 {
-                            "acquired"
-                        } else {
-                            "contended"
-                        };
-                        telemetry::record_lock_acquire(queue_name, lock_result);
-                        if !locked || removed == 0 {
+                        if !lock_refreshed {
+                            let _ = self
+                                .job_store
+                                .remove_active_job(&self.worker_id, &job.id)
+                                .await;
+                            let _ = self.job_store.release_job_lock(&job.id).await;
                             continue;
                         }
+                        let start_time = job.start_time.unwrap_or(claim_start_time);
 
                         let permit = self.semaphore.clone().acquire_owned().await?;
                         let job_store = self.job_store.clone();

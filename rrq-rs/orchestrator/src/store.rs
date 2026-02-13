@@ -63,6 +63,8 @@ pub struct JobStore {
     settings: RRQSettings,
     conn: redis::aio::MultiplexedConnection,
     lock_and_start_script: Script,
+    claim_ready_script: Script,
+    refresh_lock_script: Script,
     retry_script: Script,
     enqueue_script: Script,
 }
@@ -99,6 +101,45 @@ impl JobStore {
                  return {0, 0}\n\
              end",
         );
+        let claim_ready_script = Script::new(
+            "-- KEYS: [1] = queue_key, [2] = active_key\n\
+             -- ARGV: [1] = worker_id, [2] = now_ms, [3] = max_claims, [4] = lock_timeout_ms,\n\
+             --       [5] = start_time, [6] = active_score\n\
+             local max_claims = tonumber(ARGV[3]) or 0\n\
+             if max_claims <= 0 then\n\
+                 return {}\n\
+             end\n\
+             local scan_count = math.max(max_claims * 4, max_claims)\n\
+             local candidates = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[2], 'LIMIT', 0, scan_count)\n\
+             local claimed = {}\n\
+             for _, job_id in ipairs(candidates) do\n\
+                 if #claimed >= max_claims then\n\
+                     break\n\
+                 end\n\
+                 local lock_key = 'rrq:lock:job:' .. job_id\n\
+                 local lock_ok = redis.call('SET', lock_key, ARGV[1], 'NX', 'PX', ARGV[4])\n\
+                 if lock_ok then\n\
+                     local removed = redis.call('ZREM', KEYS[1], job_id)\n\
+                     if removed == 1 then\n\
+                         local job_key = 'rrq:job:' .. job_id\n\
+                         redis.call('HSET', job_key, 'status', 'ACTIVE', 'start_time', ARGV[5], 'worker_id', ARGV[1])\n\
+                         redis.call('ZADD', KEYS[2], ARGV[6], job_id)\n\
+                         table.insert(claimed, job_id)\n\
+                     else\n\
+                         redis.call('DEL', lock_key)\n\
+                     end\n\
+                 end\n\
+             end\n\
+             return claimed",
+        );
+        let refresh_lock_script = Script::new(
+            "-- KEYS: [1] = lock_key\n\
+             -- ARGV: [1] = worker_id, [2] = lock_timeout_ms\n\
+             if redis.call('GET', KEYS[1]) ~= ARGV[1] then\n\
+                 return 0\n\
+             end\n\
+             return redis.call('PEXPIRE', KEYS[1], ARGV[2])",
+        );
         let retry_script = Script::new(
             "-- KEYS: [1] = job_key, [2] = queue_key\n\
              -- ARGV: [1] = job_id, [2] = retry_at_score, [3] = error_message, [4] = status\n\
@@ -122,6 +163,8 @@ impl JobStore {
             settings,
             conn,
             lock_and_start_script,
+            claim_ready_script,
+            refresh_lock_script,
             retry_script,
             enqueue_script,
         }
@@ -587,6 +630,60 @@ impl JobStore {
         Ok((result.0 != 0, result.1))
     }
 
+    pub async fn atomic_claim_ready_jobs(
+        &mut self,
+        queue_name: &str,
+        worker_id: &str,
+        lock_timeout_ms: i64,
+        max_claims: usize,
+        start_time: DateTime<Utc>,
+    ) -> Result<Vec<String>> {
+        if max_claims == 0 {
+            return Ok(Vec::new());
+        }
+        if lock_timeout_ms <= 0 {
+            return Err(anyhow::anyhow!("lock_timeout_ms must be positive"));
+        }
+        let queue_key = self.format_queue_key(queue_name);
+        let active_key = Self::active_jobs_key(worker_id);
+        let now_ms = Utc::now().timestamp_millis();
+        let start_time_str = start_time.to_rfc3339();
+        let active_score = start_time.timestamp() as f64;
+        let claimed: Vec<String> = self
+            .claim_ready_script
+            .key(queue_key)
+            .key(active_key)
+            .arg(worker_id)
+            .arg(now_ms)
+            .arg(max_claims)
+            .arg(lock_timeout_ms)
+            .arg(start_time_str)
+            .arg(active_score)
+            .invoke_async(&mut self.conn)
+            .await?;
+        Ok(claimed)
+    }
+
+    pub async fn refresh_job_lock_timeout(
+        &mut self,
+        job_id: &str,
+        worker_id: &str,
+        lock_timeout_ms: i64,
+    ) -> Result<bool> {
+        if lock_timeout_ms <= 0 {
+            return Err(anyhow::anyhow!("lock_timeout_ms must be positive"));
+        }
+        let lock_key = format!("{LOCK_KEY_PREFIX}{job_id}");
+        let refreshed: i64 = self
+            .refresh_lock_script
+            .key(lock_key)
+            .arg(worker_id)
+            .arg(lock_timeout_ms)
+            .invoke_async(&mut self.conn)
+            .await?;
+        Ok(refreshed != 0)
+    }
+
     pub async fn release_job_lock(&mut self, job_id: &str) -> Result<()> {
         let lock_key = format!("{LOCK_KEY_PREFIX}{job_id}");
         let _: i64 = self.conn.del(lock_key).await?;
@@ -1033,6 +1130,61 @@ mod tests {
             .unwrap();
         assert_eq!(updated.status, JobStatus::Active);
         assert_eq!(updated.last_error.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn job_store_atomic_claim_ready_jobs_claims_batch() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+        let worker_id = "worker-batch";
+
+        let mut job_ids = Vec::new();
+        for index in 0..3 {
+            let mut job = build_job(&queue_name, &dlq_name);
+            job.id = format!("batch-job-{index}");
+            ctx.store.save_job_definition(&job).await.unwrap();
+            ctx.store
+                .add_job_to_queue(
+                    &queue_name,
+                    &job.id,
+                    (Utc::now().timestamp_millis() + index) as f64,
+                )
+                .await
+                .unwrap();
+            job_ids.push(job.id);
+        }
+
+        let start_time = Utc::now();
+        let claimed = ctx
+            .store
+            .atomic_claim_ready_jobs(&queue_name, worker_id, 10_000, 2, start_time)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 2);
+        assert_eq!(ctx.store.queue_size(&queue_name).await.unwrap(), 1);
+
+        let active = ctx.store.get_active_job_ids(worker_id).await.unwrap();
+        for claimed_id in &claimed {
+            assert!(active.contains(claimed_id));
+            assert_eq!(
+                ctx.store.get_job_lock_owner(claimed_id).await.unwrap(),
+                Some(worker_id.to_string())
+            );
+            let job = ctx
+                .store
+                .get_job_definition(claimed_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(job.status, JobStatus::Active);
+            assert_eq!(job.worker_id.as_deref(), Some(worker_id));
+        }
+
+        for job_id in job_ids {
+            let _ = ctx.store.release_job_lock(&job_id).await;
+            let _ = ctx.store.remove_active_job(worker_id, &job_id).await;
+        }
     }
 
     #[tokio::test]

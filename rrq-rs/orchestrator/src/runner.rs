@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::process::Stdio;
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use crate::constants::DEFAULT_RUNNER_CONNECT_TIMEOUT_MS;
@@ -22,7 +22,7 @@ use serde_json::{Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, timeout};
 use tracing::{debug, info, warn};
@@ -138,6 +138,14 @@ impl<T: AsyncRead + AsyncWrite + ?Sized> RunnerIo for T {}
 type RunnerStream = Box<dyn RunnerIo + Unpin + Send>;
 
 type RunnerSocketTarget = SocketAddr;
+type PendingOutcomeSender = oneshot::Sender<Result<ExecutionOutcome>>;
+
+#[derive(Clone)]
+struct PersistentProcessConnection {
+    sender: mpsc::Sender<RunnerMessage>,
+    pending: Arc<Mutex<HashMap<String, PendingOutcomeSender>>>,
+    closed: Arc<AtomicBool>,
+}
 
 struct SocketProcess {
     child: Child,
@@ -145,6 +153,7 @@ struct SocketProcess {
     stdout_task: Option<JoinHandle<()>>,
     stderr_task: Option<JoinHandle<()>>,
     permits: Arc<Semaphore>,
+    connection: Option<Arc<PersistentProcessConnection>>,
 }
 
 pub struct SocketRunnerPool {
@@ -175,6 +184,209 @@ impl Drop for ProcessPermit {
     fn drop(&mut self) {
         self.notify.notify_one();
     }
+}
+
+impl PersistentProcessConnection {
+    async fn connect(socket: RunnerSocketTarget, channel_capacity: usize) -> Result<Self> {
+        let stream = connect_stream(&socket).await?;
+        let (mut reader, mut writer) = tokio::io::split(stream);
+        let (sender, mut receiver) = mpsc::channel::<RunnerMessage>(channel_capacity.max(32));
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let closed = Arc::new(AtomicBool::new(false));
+
+        {
+            let pending = pending.clone();
+            let closed = closed.clone();
+            tokio::spawn(async move {
+                while let Some(message) = receiver.recv().await {
+                    if let Err(err) = write_message(&mut writer, &message).await {
+                        close_pending_with_error(
+                            &pending,
+                            &closed,
+                            format!("runner connection write failed: {err}"),
+                        )
+                        .await;
+                        return;
+                    }
+                }
+                close_pending_with_error(&pending, &closed, "runner connection closed".to_string())
+                    .await;
+            });
+        }
+
+        {
+            let pending = pending.clone();
+            let closed = closed.clone();
+            tokio::spawn(async move {
+                loop {
+                    match read_message(&mut reader).await {
+                        Ok(Some(RunnerMessage::Response { payload })) => {
+                            let Some(request_id) = payload.request_id.clone() else {
+                                tracing::warn!(
+                                    "runner outcome missing request_id; dropping response"
+                                );
+                                continue;
+                            };
+                            let (sender, expected_request_id) = {
+                                let mut pending = pending.lock().await;
+                                if let Some(sender) = pending.remove(&request_id) {
+                                    (Some(sender), None)
+                                } else if pending.len() == 1 {
+                                    if let Some((expected_id, sender)) = pending.drain().next() {
+                                        (Some(sender), Some(expected_id))
+                                    } else {
+                                        (None, None)
+                                    }
+                                } else {
+                                    (None, None)
+                                }
+                            };
+                            if let Some(sender) = sender {
+                                if let Some(expected_request_id) = expected_request_id {
+                                    let _ = sender.send(Err(anyhow::anyhow!(
+                                        "runner outcome request_id mismatch (expected {}, got {:?})",
+                                        expected_request_id,
+                                        payload.request_id
+                                    )));
+                                } else {
+                                    let _ = sender.send(Ok(payload));
+                                }
+                            } else {
+                                tracing::warn!(
+                                    request_id = %request_id,
+                                    "runner outcome request_id not found in pending map"
+                                );
+                            }
+                        }
+                        Ok(Some(_)) => {
+                            tracing::warn!("unexpected runner message on persistent channel");
+                        }
+                        Ok(None) => {
+                            close_pending_with_error(
+                                &pending,
+                                &closed,
+                                "runner connection closed".to_string(),
+                            )
+                            .await;
+                            return;
+                        }
+                        Err(err) => {
+                            close_pending_with_error(
+                                &pending,
+                                &closed,
+                                format!("runner connection read failed: {err}"),
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+
+        Ok(Self {
+            sender,
+            pending,
+            closed,
+        })
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    async fn execute(
+        &self,
+        request: &ExecutionRequest,
+        response_timeout: Option<Duration>,
+    ) -> Result<ExecutionOutcome> {
+        if self.is_closed() {
+            return Err(anyhow::anyhow!("runner connection closed"));
+        }
+
+        let request_id = request.request_id.clone();
+        let expected_job_id = request.job_id.clone();
+        let expected_request_id = request.request_id.clone();
+        let (sender, receiver) = oneshot::channel::<Result<ExecutionOutcome>>();
+        {
+            let mut pending = self.pending.lock().await;
+            pending.insert(request_id.clone(), sender);
+        }
+
+        let send_result = self
+            .sender
+            .send(RunnerMessage::Request {
+                payload: request.clone(),
+            })
+            .await;
+        if send_result.is_err() {
+            let mut pending = self.pending.lock().await;
+            pending.remove(&request_id);
+            return Err(anyhow::anyhow!("runner connection closed"));
+        }
+
+        let outcome = if let Some(limit) = response_timeout {
+            match timeout(limit, receiver).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(anyhow::anyhow!("runner connection closed")),
+                Err(_) => {
+                    let mut pending = self.pending.lock().await;
+                    pending.remove(&request_id);
+                    return Err(anyhow::anyhow!("runner response timeout"));
+                }
+            }
+        } else {
+            match receiver.await {
+                Ok(result) => result,
+                Err(_) => Err(anyhow::anyhow!("runner connection closed")),
+            }
+        }?;
+
+        if outcome.job_id.as_deref() != Some(expected_job_id.as_str()) {
+            return Err(anyhow::anyhow!(
+                "runner outcome job_id mismatch (expected {}, got {:?})",
+                expected_job_id,
+                outcome.job_id
+            ));
+        }
+        if outcome.request_id.as_deref() != Some(expected_request_id.as_str()) {
+            return Err(anyhow::anyhow!(
+                "runner outcome request_id mismatch (expected {}, got {:?})",
+                expected_request_id,
+                outcome.request_id
+            ));
+        }
+
+        Ok(outcome)
+    }
+}
+
+async fn close_pending_with_error(
+    pending: &Arc<Mutex<HashMap<String, PendingOutcomeSender>>>,
+    closed: &Arc<AtomicBool>,
+    message: String,
+) {
+    if closed.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let senders = {
+        let mut pending = pending.lock().await;
+        pending
+            .drain()
+            .map(|(_, sender)| sender)
+            .collect::<Vec<_>>()
+    };
+    for sender in senders {
+        let _ = sender.send(Err(anyhow::anyhow!(message.clone())));
+    }
+}
+
+fn is_connection_retryable_error(err: &anyhow::Error) -> bool {
+    let message = err.to_string();
+    message.contains("runner connection")
+        && !message.contains("runner response timeout")
+        && !message.contains("request_id mismatch")
+        && !message.contains("job_id mismatch")
 }
 
 impl SocketRunnerPool {
@@ -361,6 +573,7 @@ impl SocketRunnerPool {
                         stdout_task,
                         stderr_task,
                         permits: Arc::new(Semaphore::new(self.max_in_flight)),
+                        connection: None,
                     });
                 }
                 Err(err) => {
@@ -559,6 +772,7 @@ impl SocketRunnerPool {
         if let Some(task) = proc.stderr_task.take() {
             task.abort();
         }
+        proc.connection = None;
         let _ = proc.child.kill().await;
         let _ = proc.child.wait().await;
         Ok(())
@@ -614,78 +828,85 @@ impl SocketRunner {
         })
     }
 
+    async fn get_or_create_connection(
+        &self,
+        proc: &Arc<Mutex<SocketProcess>>,
+    ) -> Result<(RunnerSocketTarget, Arc<PersistentProcessConnection>)> {
+        loop {
+            let (socket, existing) = {
+                let guard = proc.lock().await;
+                (guard.socket, guard.connection.clone())
+            };
+
+            if let Some(connection) = existing
+                && !connection.is_closed()
+            {
+                return Ok((socket, connection));
+            }
+
+            let channel_capacity = self.pool.max_in_flight.saturating_mul(2).max(64);
+            let connection =
+                Arc::new(PersistentProcessConnection::connect(socket, channel_capacity).await?);
+
+            let mut guard = proc.lock().await;
+            if guard.socket != socket {
+                continue;
+            }
+            if let Some(existing) = guard.connection.as_ref()
+                && !existing.is_closed()
+            {
+                return Ok((socket, existing.clone()));
+            }
+            guard.connection = Some(connection.clone());
+            return Ok((socket, connection));
+        }
+    }
+
+    async fn invalidate_connection(
+        &self,
+        proc: &Arc<Mutex<SocketProcess>>,
+        connection: &Arc<PersistentProcessConnection>,
+    ) {
+        let mut guard = proc.lock().await;
+        if let Some(existing) = guard.connection.as_ref()
+            && Arc::ptr_eq(existing, connection)
+        {
+            guard.connection = None;
+        }
+    }
+
     async fn execute_with_process(
         &self,
         proc: &Arc<Mutex<SocketProcess>>,
         request: &ExecutionRequest,
     ) -> Result<ExecutionOutcome> {
-        let mut socket = {
-            let guard = proc.lock().await;
-            guard.socket
-        };
-        let mut stream = match connect_stream(&socket).await {
-            Ok(stream) => stream,
-            Err(err) => {
-                let refreshed = {
-                    let guard = proc.lock().await;
-                    guard.socket
-                };
-                if refreshed != socket {
-                    socket = refreshed;
-                    connect_stream(&socket).await?
-                } else {
-                    return Err(err.into());
-                }
+        let mut first_attempt = true;
+        loop {
+            let (socket, connection) = self.get_or_create_connection(proc).await?;
+            if first_attempt {
+                let mut in_flight = self.in_flight.lock().await;
+                in_flight.insert(
+                    request.request_id.clone(),
+                    InFlightRequest {
+                        job_id: request.job_id.clone(),
+                        socket,
+                    },
+                );
             }
-        };
-        {
-            let mut in_flight = self.in_flight.lock().await;
-            in_flight.insert(
-                request.request_id.clone(),
-                InFlightRequest {
-                    job_id: request.job_id.clone(),
-                    socket,
-                },
-            );
-        }
-        let request_message = RunnerMessage::Request {
-            payload: request.clone(),
-        };
-        write_message(&mut stream, &request_message).await?;
-        let deadline = self.pool.response_timeout.map(|d| Instant::now() + d);
-        let read = read_message(&mut stream);
-        let message = if let Some(deadline) = deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(anyhow::anyhow!("runner response timeout"));
-            }
-            timeout(remaining, read)
-                .await
-                .context("runner response timeout")??
-        } else {
-            read.await?
-        };
-        let message = message.context("runner process exited")?;
-        match message {
-            RunnerMessage::Response { payload } => {
-                if payload.job_id.as_deref() != Some(request.job_id.as_str()) {
-                    return Err(anyhow::anyhow!(
-                        "runner outcome job_id mismatch (expected {}, got {:?})",
-                        request.job_id,
-                        payload.job_id
-                    ));
+
+            let result = connection
+                .execute(request, self.pool.response_timeout)
+                .await;
+            match result {
+                Ok(outcome) => return Ok(outcome),
+                Err(err) => {
+                    self.invalidate_connection(proc, &connection).await;
+                    if first_attempt && is_connection_retryable_error(&err) {
+                        first_attempt = false;
+                        continue;
+                    }
+                    return Err(err);
                 }
-                if payload.request_id.as_deref() != Some(request.request_id.as_str()) {
-                    return Err(anyhow::anyhow!(
-                        "runner outcome request_id mismatch (expected {}, got {:?})",
-                        request.request_id,
-                        payload.request_id
-                    ));
-                }
-                Ok(payload)
-            }
-            RunnerMessage::Request { .. } | RunnerMessage::Cancel { .. } => {
-                Err(anyhow::anyhow!("unexpected runner message"))
             }
         }
     }
@@ -1076,6 +1297,7 @@ mod tests {
             stdout_task: None,
             stderr_task: None,
             permits: Arc::new(Semaphore::new(max_in_flight)),
+            connection: None,
         };
         SocketRunnerPool {
             name: "test".to_string(),
@@ -1143,6 +1365,7 @@ mod tests {
                 stdout_task: None,
                 stderr_task: None,
                 permits: Arc::new(Semaphore::new(1)),
+                connection: None,
             }
         });
         let (spec, _socket_addr) = allocate_tcp_spec();
@@ -1473,6 +1696,7 @@ mod tests {
             stdout_task: None,
             stderr_task: None,
             permits: Arc::new(Semaphore::new(1)),
+            connection: None,
         };
         let (spec, _addr) = allocate_tcp_spec();
         let pool = SocketRunnerPool {
@@ -1545,6 +1769,7 @@ mod tests {
             stdout_task: None,
             stderr_task: None,
             permits: Arc::new(Semaphore::new(1)),
+            connection: None,
         };
         let proc = Arc::new(Mutex::new(process));
         let runner = SocketRunner {
@@ -1632,6 +1857,7 @@ mod tests {
                 stdout_task: None,
                 stderr_task: None,
                 permits: Arc::new(Semaphore::new(1)),
+                connection: None,
             }
         });
 
