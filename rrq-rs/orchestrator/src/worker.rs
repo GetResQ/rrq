@@ -321,11 +321,22 @@ impl RRQWorker {
                     for _ in 0..claimed.len() {
                         telemetry::record_lock_acquire(&queue_name, "acquired");
                     }
-                    let job_defs = self
+                    let job_defs = match self
                         .job_store
                         .get_job_definitions(&claimed)
                         .instrument(fetch_span.clone())
-                        .await?;
+                        .await
+                    {
+                        Ok(job_defs) => job_defs,
+                        Err(err) => {
+                            self.release_remaining_claimed_jobs_without_definitions(
+                                &queue_name,
+                                &claimed,
+                            )
+                            .await;
+                            return Err(err);
+                        }
+                    };
 
                     for index in 0..claimed.len() {
                         let job_id = claimed[index].as_str();
@@ -494,6 +505,36 @@ impl RRQWorker {
         for (index, job_id) in claimed.iter().enumerate() {
             let job = job_defs.get(index).and_then(Option::as_ref);
             self.release_claimed_job(queue_name, job_id, job, pending_error)
+                .await;
+        }
+    }
+
+    async fn release_claimed_job_without_definition(&mut self, queue_name: &str, job_id: &str) {
+        let already_queued = self
+            .job_store
+            .is_job_queued(queue_name, job_id)
+            .await
+            .unwrap_or(false);
+        if !already_queued {
+            let _ = self
+                .job_store
+                .add_job_to_queue(queue_name, job_id, Utc::now().timestamp_millis() as f64)
+                .await;
+        }
+        let _ = self
+            .job_store
+            .remove_active_job(&self.worker_id, job_id)
+            .await;
+        let _ = self.job_store.release_job_lock(job_id).await;
+    }
+
+    async fn release_remaining_claimed_jobs_without_definitions(
+        &mut self,
+        queue_name: &str,
+        claimed: &[String],
+    ) {
+        for job_id in claimed {
+            self.release_claimed_job_without_definition(queue_name, job_id)
                 .await;
         }
     }
@@ -2025,6 +2066,70 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(reloaded.status, JobStatus::Pending);
+        assert!(
+            worker
+                .job_store
+                .is_job_queued(&queue_name, &job.id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            worker.job_store.get_job_lock_owner(&job.id).await.unwrap(),
+            None
+        );
+        let active = worker
+            .job_store
+            .get_active_job_ids(&worker.worker_id)
+            .await
+            .unwrap();
+        assert!(!active.contains(&job.id));
+    }
+
+    #[tokio::test]
+    async fn release_claimed_job_without_definition_requeues_and_releases_lock() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        ctx.settings.default_runner_name = "test".to_string();
+        let runner = Arc::new(StaticRunner::new(
+            TestOutcome::Success(json!({"ok": true})),
+            Duration::from_millis(0),
+        ));
+        let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+        runners.insert("test".to_string(), runner);
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let job = client
+            .enqueue("task", serde_json::Map::new(), EnqueueOptions::default())
+            .await
+            .unwrap();
+
+        let mut worker = RRQWorker::new(
+            ctx.settings.clone(),
+            None,
+            Some("worker-1".to_string()),
+            runners,
+            true,
+            1,
+        )
+        .await
+        .unwrap();
+        let queue_name = normalize_queue_name(&ctx.settings.default_queue_name);
+        let claimed = worker
+            .job_store
+            .atomic_claim_ready_jobs(&queue_name, &worker.worker_id, 10_000, 1, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(claimed, vec![job.id.clone()]);
+        assert!(
+            !worker
+                .job_store
+                .is_job_queued(&queue_name, &job.id)
+                .await
+                .unwrap()
+        );
+
+        worker
+            .release_claimed_job_without_definition(&queue_name, &job.id)
+            .await;
+
         assert!(
             worker
                 .job_store

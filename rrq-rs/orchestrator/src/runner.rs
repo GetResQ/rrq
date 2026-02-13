@@ -382,30 +382,12 @@ impl PersistentProcessConnection {
                                 );
                                 continue;
                             };
-                            let (sender, expected_request_id) = {
+                            let sender = {
                                 let mut pending = pending.lock().await;
-                                if let Some(sender) = pending.remove(&request_id) {
-                                    (Some(sender), None)
-                                } else if pending.len() == 1 {
-                                    if let Some((expected_id, sender)) = pending.drain().next() {
-                                        (Some(sender), Some(expected_id))
-                                    } else {
-                                        (None, None)
-                                    }
-                                } else {
-                                    (None, None)
-                                }
+                                pending.remove(&request_id)
                             };
                             if let Some(sender) = sender {
-                                if let Some(expected_request_id) = expected_request_id {
-                                    let _ = sender.send(Err(anyhow::anyhow!(
-                                        "runner outcome request_id mismatch (expected {}, got {:?})",
-                                        expected_request_id,
-                                        payload.request_id
-                                    )));
-                                } else {
-                                    let _ = sender.send(Ok(payload));
-                                }
+                                let _ = sender.send(Ok(payload));
                             } else {
                                 tracing::warn!(
                                     request_id = %request_id,
@@ -2239,7 +2221,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_with_process_rejects_mismatched_request_id() {
+    async fn execute_with_process_times_out_on_unknown_request_id() {
         let (listener, socket_addr) = bind_tcp_listener().await;
 
         let server = tokio::spawn(async move {
@@ -2257,6 +2239,7 @@ mod tests {
             write_message(&mut stream, &RunnerMessage::Response { payload: response })
                 .await
                 .unwrap();
+            tokio::time::sleep(Duration::from_millis(150)).await;
         });
 
         let child = Command::new("sleep").arg("60").spawn().unwrap();
@@ -2268,11 +2251,33 @@ mod tests {
             permits: Arc::new(Semaphore::new(1)),
             connection: None,
         };
-        let proc = Arc::new(Mutex::new(process));
+        let (spec, _addr) = allocate_tcp_spec();
+        let pool = SocketRunnerPool {
+            name: "test".to_string(),
+            cmd: vec!["sleep".to_string(), "60".to_string()],
+            pool_size: 1,
+            max_in_flight: 1,
+            env: None,
+            cwd: None,
+            tcp_socket: spec,
+            tcp_port_cursor: AtomicUsize::new(0),
+            processes: Mutex::new(vec![Arc::new(Mutex::new(process))]),
+            cursor: AtomicUsize::new(0),
+            availability: Arc::new(Notify::new()),
+            response_timeout: Some(Duration::from_millis(80)),
+            connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            shutdown_term_grace: Duration::from_millis(50),
+            capture_output: true,
+            spawn_override: None,
+        };
         let runner = SocketRunner {
-            pool: Arc::new(build_test_pool(1)),
+            pool: Arc::new(pool),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
             send_cancel_hints: false,
+        };
+        let proc = {
+            let processes = runner.pool.processes.lock().await;
+            processes.first().cloned().unwrap()
         };
 
         let request = ExecutionRequest {
@@ -2295,7 +2300,7 @@ mod tests {
             .execute_with_process(&proc, &request)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("request_id mismatch"));
+        assert!(err.to_string().contains("runner response timeout"));
 
         server.await.unwrap();
         let mut guard = proc.lock().await;
@@ -2480,6 +2485,76 @@ mod tests {
 
         assert_eq!(outcome_one.request_id.as_deref(), Some("req-1"));
         assert_eq!(outcome_two.request_id.as_deref(), Some("req-2"));
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn persistent_connection_ignores_late_unknown_response_id() {
+        let (listener, socket_addr) = bind_tcp_listener().await;
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let first = match read_message(&mut stream).await.unwrap().unwrap() {
+                RunnerMessage::Request { payload } => payload,
+                _ => panic!("expected first request"),
+            };
+            let second = match read_message(&mut stream).await.unwrap().unwrap() {
+                RunnerMessage::Request { payload } => payload,
+                _ => panic!("expected second request"),
+            };
+            let (timed_out_request, pending_request) = if first.request_id == "req-timeout" {
+                (first, second)
+            } else {
+                (second, first)
+            };
+
+            tokio::time::sleep(Duration::from_millis(120)).await;
+
+            let late_response = ExecutionOutcome::success(
+                timed_out_request.job_id.clone(),
+                timed_out_request.request_id.clone(),
+                serde_json::json!({"late": true}),
+            );
+            write_message(
+                &mut stream,
+                &RunnerMessage::Response {
+                    payload: late_response,
+                },
+            )
+            .await
+            .unwrap();
+
+            let pending_response = ExecutionOutcome::success(
+                pending_request.job_id.clone(),
+                pending_request.request_id.clone(),
+                serde_json::json!({"ok": true}),
+            );
+            write_message(
+                &mut stream,
+                &RunnerMessage::Response {
+                    payload: pending_response,
+                },
+            )
+            .await
+            .unwrap();
+        });
+
+        let connection = PersistentProcessConnection::connect(socket_addr, 64)
+            .await
+            .unwrap();
+        let timeout_request = build_execution_request("req-timeout", "job-timeout");
+        let pending_request = build_execution_request("req-pending", "job-pending");
+
+        let (timeout_result, pending_result) = tokio::join!(
+            connection.execute(&timeout_request, Some(Duration::from_millis(60))),
+            connection.execute(&pending_request, Some(Duration::from_millis(500)))
+        );
+
+        let timeout_err = timeout_result.unwrap_err();
+        assert!(timeout_err.to_string().contains("runner response timeout"));
+        let pending_outcome = pending_result.unwrap();
+        assert_eq!(pending_outcome.request_id.as_deref(), Some("req-pending"));
 
         server.await.unwrap();
     }
