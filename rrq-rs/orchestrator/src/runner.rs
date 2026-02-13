@@ -236,6 +236,17 @@ pub trait Runner: Send + Sync {
     async fn cancel(&self, _job_id: &str, _request_id: Option<&str>) -> Result<()> {
         Ok(())
     }
+    async fn handle_timeout(
+        &self,
+        job_id: &str,
+        request_id: Option<&str>,
+        send_cancel_hint: bool,
+    ) -> Result<()> {
+        if send_cancel_hint {
+            self.cancel(job_id, request_id).await?;
+        }
+        Ok(())
+    }
     async fn close(&self) -> Result<()> {
         Ok(())
     }
@@ -333,8 +344,41 @@ impl PersistentProcessConnection {
                     match read_message(&mut reader).await {
                         Ok(Some(RunnerMessage::Response { payload })) => {
                             let Some(request_id) = payload.request_id.clone() else {
+                                let mut single_pending: Option<(String, PendingOutcomeSender)> =
+                                    None;
+                                let mut pending_count: Option<usize> = None;
+                                {
+                                    let mut pending = pending.lock().await;
+                                    match pending.len() {
+                                        0 => {}
+                                        1 => {
+                                            single_pending = pending.drain().next();
+                                        }
+                                        count => {
+                                            pending_count = Some(count);
+                                        }
+                                    }
+                                }
+                                if let Some((expected_request_id, sender)) = single_pending {
+                                    let _ = sender.send(Err(anyhow::anyhow!(
+                                        "runner outcome missing request_id (expected {})",
+                                        expected_request_id
+                                    )));
+                                    continue;
+                                }
+                                if let Some(count) = pending_count {
+                                    close_pending_with_error(
+                                        &pending,
+                                        &closed,
+                                        format!(
+                                            "runner outcome missing request_id with {count} pending requests"
+                                        ),
+                                    )
+                                    .await;
+                                    return;
+                                }
                                 tracing::warn!(
-                                    "runner outcome missing request_id; dropping response"
+                                    "runner outcome missing request_id with no pending requests; dropping response"
                                 );
                                 continue;
                             };
@@ -911,6 +955,33 @@ impl SocketRunnerPool {
         Ok(())
     }
 
+    async fn terminate_process_for_socket(
+        &self,
+        socket: RunnerSocketTarget,
+        reason: &str,
+    ) -> Result<()> {
+        let processes = {
+            let processes = self.processes.lock().await;
+            processes.clone()
+        };
+        for proc in processes {
+            let matches_socket = {
+                let guard = proc.lock().await;
+                guard.socket == socket
+            };
+            if matches_socket {
+                self.terminate_process(&proc, reason).await?;
+                return Ok(());
+            }
+        }
+        debug!(
+            socket = %socket,
+            reason,
+            "runner timeout cleanup target socket not found in pool"
+        );
+        Ok(())
+    }
+
     pub async fn close(&self) -> Result<()> {
         let mut processes = self.processes.lock().await;
         for proc in processes.iter() {
@@ -1048,6 +1119,41 @@ impl SocketRunner {
             }
         }
     }
+
+    async fn resolve_in_flight_target(
+        &self,
+        job_id: &str,
+        request_id: Option<&str>,
+    ) -> Option<(String, InFlightRequest)> {
+        let in_flight = self.in_flight.lock().await;
+        let resolved_request_id = if let Some(request_id) = request_id {
+            Some(request_id.to_string())
+        } else {
+            in_flight.iter().find_map(|(request_id, info)| {
+                if info.job_id == job_id {
+                    Some(request_id.clone())
+                } else {
+                    None
+                }
+            })
+        };
+        let request_id = resolved_request_id?;
+        let info = in_flight.get(&request_id).cloned()?;
+        Some((request_id, info))
+    }
+
+    async fn send_cancel_hint(&self, request_id: &str, info: &InFlightRequest) -> Result<()> {
+        let message = RunnerMessage::Cancel {
+            payload: CancelRequest {
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                job_id: info.job_id.clone(),
+                request_id: Some(request_id.to_string()),
+                hard_kill: false,
+            },
+        };
+        let mut stream = connect_stream(&info.socket).await?;
+        write_message(&mut stream, &message).await
+    }
 }
 
 #[async_trait]
@@ -1088,48 +1194,49 @@ impl Runner for SocketRunner {
     }
 
     async fn cancel(&self, job_id: &str, request_id: Option<&str>) -> Result<()> {
-        let target = {
-            let in_flight = self.in_flight.lock().await;
-            let resolved_request_id = if let Some(request_id) = request_id {
-                Some(request_id.to_string())
-            } else {
-                in_flight.iter().find_map(|(request_id, info)| {
-                    if info.job_id == job_id {
-                        Some(request_id.clone())
-                    } else {
-                        None
-                    }
-                })
-            };
-            let Some(request_id) = resolved_request_id else {
-                return Ok(());
-            };
-            let info = in_flight.get(&request_id).cloned();
-            info.map(|info| (request_id, info))
-        };
-        let Some((request_id, info)) = target else {
+        let Some((request_id, info)) = self.resolve_in_flight_target(job_id, request_id).await
+        else {
             return Ok(());
         };
-        let request_id_for_message = request_id.clone();
-        let message = RunnerMessage::Cancel {
-            payload: CancelRequest {
-                protocol_version: PROTOCOL_VERSION.to_string(),
-                job_id: info.job_id,
-                request_id: Some(request_id_for_message),
-                hard_kill: false,
-            },
-        };
-        let result = async {
-            let mut stream = connect_stream(&info.socket).await?;
-            write_message(&mut stream, &message).await?;
-            Ok(())
-        }
-        .await;
+        let result = self.send_cancel_hint(&request_id, &info).await;
         if result.is_ok() {
             let mut in_flight = self.in_flight.lock().await;
             in_flight.remove(&request_id);
         }
         result
+    }
+
+    async fn handle_timeout(
+        &self,
+        job_id: &str,
+        request_id: Option<&str>,
+        send_cancel_hint: bool,
+    ) -> Result<()> {
+        let Some((request_id, info)) = self.resolve_in_flight_target(job_id, request_id).await
+        else {
+            return Ok(());
+        };
+
+        if send_cancel_hint
+            && self.send_cancel_hints
+            && let Err(err) = self.send_cancel_hint(&request_id, &info).await
+        {
+            warn!(
+                %job_id,
+                request_id = %request_id,
+                error = %err,
+                "failed to send runner cancel hint during timeout cleanup"
+            );
+        }
+
+        {
+            let mut in_flight = self.in_flight.lock().await;
+            in_flight.remove(&request_id);
+        }
+
+        self.pool
+            .terminate_process_for_socket(info.socket, "worker_timeout")
+            .await
     }
 
     async fn close(&self) -> Result<()> {
@@ -2044,6 +2151,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_timeout_terminates_socket_process_without_cancel_hint() {
+        let (listener, socket_addr) = bind_tcp_listener().await;
+        let server = tokio::spawn(async move {
+            assert!(
+                timeout(Duration::from_millis(150), listener.accept())
+                    .await
+                    .is_err(),
+                "unexpected cancel hint when disabled"
+            );
+        });
+
+        let child = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
+        let process = SocketProcess {
+            child,
+            socket: socket_addr,
+            stdout_task: None,
+            stderr_task: None,
+            permits: Arc::new(Semaphore::new(1)),
+            connection: None,
+        };
+        let (spec, _addr) = allocate_tcp_spec();
+        let pool = SocketRunnerPool {
+            name: "test".to_string(),
+            cmd: vec!["sleep".to_string(), "60".to_string()],
+            pool_size: 1,
+            max_in_flight: 1,
+            env: None,
+            cwd: None,
+            tcp_socket: spec,
+            tcp_port_cursor: AtomicUsize::new(0),
+            processes: Mutex::new(vec![Arc::new(Mutex::new(process))]),
+            cursor: AtomicUsize::new(0),
+            availability: Arc::new(Notify::new()),
+            response_timeout: None,
+            connect_timeout: Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            shutdown_term_grace: Duration::from_millis(50),
+            capture_output: true,
+            spawn_override: None,
+        };
+        let runner = SocketRunner {
+            pool: Arc::new(pool),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
+            send_cancel_hints: false,
+        };
+        {
+            let mut in_flight = runner.in_flight.lock().await;
+            in_flight.insert(
+                "req-1".to_string(),
+                InFlightRequest {
+                    job_id: "job-1".to_string(),
+                    socket: socket_addr,
+                },
+            );
+        }
+
+        runner
+            .handle_timeout("job-1", Some("req-1"), false)
+            .await
+            .unwrap();
+
+        let in_flight = runner.in_flight.lock().await;
+        assert!(in_flight.is_empty());
+        drop(in_flight);
+
+        let proc = {
+            let processes = runner.pool.processes.lock().await;
+            processes.first().cloned().unwrap()
+        };
+        let mut exited = false;
+        for _ in 0..20 {
+            let status = {
+                let mut guard = proc.lock().await;
+                guard.child.try_wait().unwrap()
+            };
+            if status.is_some() {
+                exited = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(exited, "timed-out process should be terminated");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn execute_with_process_rejects_mismatched_request_id() {
         let (listener, socket_addr) = bind_tcp_listener().await;
 
@@ -2285,6 +2480,42 @@ mod tests {
 
         assert_eq!(outcome_one.request_id.as_deref(), Some("req-1"));
         assert_eq!(outcome_two.request_id.as_deref(), Some("req-2"));
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn persistent_connection_missing_request_id_fails_pending_request() {
+        let (listener, socket_addr) = bind_tcp_listener().await;
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = match read_message(&mut stream).await.unwrap().unwrap() {
+                RunnerMessage::Request { payload } => payload,
+                _ => panic!("expected request"),
+            };
+
+            let mut response = ExecutionOutcome::success(
+                request.job_id.clone(),
+                request.request_id.clone(),
+                serde_json::json!({"ok": true}),
+            );
+            response.request_id = None;
+            write_message(&mut stream, &RunnerMessage::Response { payload: response })
+                .await
+                .unwrap();
+        });
+
+        let connection = PersistentProcessConnection::connect(socket_addr, 64)
+            .await
+            .unwrap();
+        let request = build_execution_request("req-1", "job-1");
+        let result = timeout(Duration::from_secs(1), connection.execute(&request, None)).await;
+        let err = result
+            .expect("request should fail promptly for missing request_id")
+            .unwrap_err();
+        assert!(err.to_string().contains("missing request_id"));
+        assert!(err.to_string().contains("req-1"));
 
         server.await.unwrap();
     }

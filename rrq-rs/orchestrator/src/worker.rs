@@ -824,9 +824,13 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
             (outcome_result, "transport_error")
         }
         Err(_) => {
-            if settings.runner_enable_inflight_cancel_hints {
-                let _ = runner.cancel(&job.id, Some(request_id.as_str())).await;
-            }
+            let _ = runner
+                .handle_timeout(
+                    &job.id,
+                    Some(request_id.as_str()),
+                    settings.runner_enable_inflight_cancel_hints,
+                )
+                .await;
             let message = format!("Job timed out after {}s.", job_timeout);
             span.record("rrq.outcome", "timeout");
             span.record("rrq.error_message", message.as_str());
