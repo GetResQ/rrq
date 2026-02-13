@@ -1281,11 +1281,23 @@ impl Runner for SocketRunner {
         timeout_duration: Duration,
         send_cancel_hint: bool,
     ) -> RunnerExecutionResult {
-        let (proc, _permit) = match self.pool.acquire_process().await {
-            Ok(pair) => pair,
-            Err(err) => return RunnerExecutionResult::Completed(Box::new(Err(err))),
+        let acquire_started = Instant::now();
+        let (proc, _permit) = match timeout(timeout_duration, self.pool.acquire_process()).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(err)) => return RunnerExecutionResult::Completed(Box::new(Err(err))),
+            Err(_) => return RunnerExecutionResult::TimedOut,
         };
-        match timeout(timeout_duration, self.execute_with_process(&proc, &request)).await {
+        let Some(remaining_timeout) = timeout_duration.checked_sub(acquire_started.elapsed())
+        else {
+            return RunnerExecutionResult::TimedOut;
+        };
+
+        match timeout(
+            remaining_timeout,
+            self.execute_with_process(&proc, &request),
+        )
+        .await
+        {
             Ok(result) => RunnerExecutionResult::Completed(Box::new(
                 self.finalize_execute_result(&proc, &request, result).await,
             )),
@@ -1827,6 +1839,37 @@ mod tests {
             .expect("acquire should complete after release");
         let (_proc2, permit2) = result.expect("join failed").expect("acquire failed");
         drop(permit2);
+        pool.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn execute_with_timeout_includes_process_acquire_wait() {
+        let pool = Arc::new(build_test_pool(1));
+        let runner = Arc::new(SocketRunner {
+            pool: pool.clone(),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
+            send_cancel_hints: false,
+        });
+
+        let (_proc, permit) = pool.acquire_process().await.unwrap();
+        let timed_out_runner = runner.clone();
+        let timed_out_task = tokio::spawn(async move {
+            timed_out_runner
+                .execute_with_timeout(
+                    build_execution_request("req-wait-timeout", "job-wait-timeout"),
+                    Duration::from_millis(60),
+                    false,
+                )
+                .await
+        });
+
+        let timed_out_result = timeout(Duration::from_millis(150), timed_out_task)
+            .await
+            .expect("execute_with_timeout should complete while acquire is blocked")
+            .unwrap();
+        assert!(matches!(timed_out_result, RunnerExecutionResult::TimedOut));
+
+        drop(permit);
         pool.close().await.unwrap();
     }
 

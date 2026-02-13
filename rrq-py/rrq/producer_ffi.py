@@ -37,6 +37,7 @@ class ProducerSettingsModel(BaseModel):
     job_timeout_seconds: int
     result_ttl_seconds: int
     idempotency_ttl_seconds: int
+    correlation_mappings: dict[str, str] = Field(default_factory=dict)
 
 
 class EnqueueOptionsModel(BaseModel):
