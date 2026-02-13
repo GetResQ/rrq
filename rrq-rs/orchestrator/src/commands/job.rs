@@ -105,7 +105,7 @@ pub(crate) async fn job_list(
     let jobs = jobs.into_iter().take(limit).collect::<Vec<_>>();
 
     println!(
-        "{:<12} {:<30} {:<24} {:<10} {:<18} {:>10}",
+        "{:<36} {:<30} {:<24} {:<10} {:<18} {:>10}",
         "Job ID", "Function", "Queue", "Status", "Enqueued", "Duration"
     );
     for (job_id, job_map) in jobs {
@@ -138,8 +138,8 @@ pub(crate) async fn job_list(
             _ => "N/A".to_string(),
         };
         println!(
-            "{:<12} {:<30} {:<24} {:<10} {:<18} {:>10}",
-            format!("{}...", &job_id[..std::cmp::min(8, job_id.len())]),
+            "{:<36} {:<30} {:<24} {:<10} {:<18} {:>10}",
+            job_id,
             cli_utils::truncate(&function_name, 28),
             cli_utils::truncate(&queue_name, 22),
             status,

@@ -79,7 +79,7 @@ pub(crate) async fn dlq_list(options: DlqListOptions) -> Result<()> {
     }
 
     println!(
-        "{:<20} {:<18} {:<16} {:<25} {:<18} {:>7}",
+        "{:<36} {:<18} {:<16} {:<25} {:<18} {:>7}",
         "Job ID", "Function", "Queue", "Error", "Failed At", "Retries"
     );
     for job in &jobs {
@@ -104,8 +104,8 @@ pub(crate) async fn dlq_list(options: DlqListOptions) -> Result<()> {
             .cloned()
             .unwrap_or_else(|| "0".to_string());
         println!(
-            "{:<20} {:<18} {:<16} {:<25} {:<18} {:>7}",
-            cli_utils::truncate(&job_id, 18),
+            "{:<36} {:<18} {:<16} {:<25} {:<18} {:>7}",
+            job_id,
             cli_utils::truncate(&function_name, 16),
             cli_utils::truncate(&queue_name, 14),
             cli_utils::truncate(&error, 23),

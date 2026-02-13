@@ -199,7 +199,7 @@ pub(crate) async fn queue_inspect(
         return Ok(());
     }
     println!(
-        "{:<4} {:<20} {:<20} {:<10} {:<20} {:>7}",
+        "{:<4} {:<36} {:<20} {:<10} {:<20} {:>7}",
         "#", "Job ID", "Function", "Status", "Scheduled", "Retries"
     );
     for (idx, (job_id, score)) in entries.iter().enumerate() {
@@ -224,9 +224,9 @@ pub(crate) async fn queue_inspect(
         };
         let scheduled = format!("{}", score / 1000.0);
         println!(
-            "{:<4} {:<20} {:<20} {:<10} {:<20} {:>7}",
+            "{:<4} {:<36} {:<20} {:<10} {:<20} {:>7}",
             offset + idx + 1,
-            format!("{}...", &job_id[..std::cmp::min(8, job_id.len())]),
+            job_id,
             cli_utils::truncate(&function, 18),
             status,
             cli_utils::format_timestamp(Some(&scheduled)),
