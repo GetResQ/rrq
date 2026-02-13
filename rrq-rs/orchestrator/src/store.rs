@@ -65,6 +65,7 @@ pub struct JobStore {
     lock_and_start_script: Script,
     claim_ready_script: Script,
     refresh_lock_script: Script,
+    release_lock_if_owner_script: Script,
     retry_script: Script,
     enqueue_script: Script,
 }
@@ -145,6 +146,15 @@ impl JobStore {
              end\n\
              return redis.call('PEXPIRE', KEYS[1], ARGV[2])",
         );
+        let release_lock_if_owner_script = Script::new(
+            "-- KEYS: [1] = lock_key\n\
+             -- ARGV: [1] = worker_id\n\
+             if redis.call('GET', KEYS[1]) ~= ARGV[1] then\n\
+                 return 0\n\
+             end\n\
+             redis.call('DEL', KEYS[1])\n\
+             return 1",
+        );
         let retry_script = Script::new(
             "-- KEYS: [1] = job_key, [2] = queue_key\n\
              -- ARGV: [1] = job_id, [2] = retry_at_score, [3] = error_message, [4] = status\n\
@@ -170,6 +180,7 @@ impl JobStore {
             lock_and_start_script,
             claim_ready_script,
             refresh_lock_script,
+            release_lock_if_owner_script,
             retry_script,
             enqueue_script,
         }
@@ -689,6 +700,21 @@ impl JobStore {
         let lock_key = format!("{LOCK_KEY_PREFIX}{job_id}");
         let _: i64 = self.conn.del(lock_key).await?;
         Ok(())
+    }
+
+    pub async fn release_job_lock_if_owner(
+        &mut self,
+        job_id: &str,
+        worker_id: &str,
+    ) -> Result<bool> {
+        let lock_key = format!("{LOCK_KEY_PREFIX}{job_id}");
+        let released: i64 = self
+            .release_lock_if_owner_script
+            .key(lock_key)
+            .arg(worker_id)
+            .invoke_async(&mut self.conn)
+            .await?;
+        Ok(released != 0)
     }
 
     pub async fn try_lock_job(
@@ -1279,6 +1305,42 @@ mod tests {
         assert!(!missing_lock_refreshed);
 
         let _ = ctx.store.release_job_lock(&job.id).await;
+    }
+
+    #[tokio::test]
+    async fn job_store_release_job_lock_if_owner_requires_owner() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+        let mut job = build_job(&queue_name, &dlq_name);
+        job.id = "release-lock-owner-job".to_string();
+        ctx.store.save_job_definition(&job).await.unwrap();
+
+        let locked = ctx
+            .store
+            .try_lock_job(&job.id, "worker-owner", 1_000)
+            .await
+            .unwrap();
+        assert!(locked);
+
+        let released = ctx
+            .store
+            .release_job_lock_if_owner(&job.id, "other-worker")
+            .await
+            .unwrap();
+        assert!(!released);
+        assert_eq!(
+            ctx.store.get_job_lock_owner(&job.id).await.unwrap(),
+            Some("worker-owner".to_string())
+        );
+
+        let released = ctx
+            .store
+            .release_job_lock_if_owner(&job.id, "worker-owner")
+            .await
+            .unwrap();
+        assert!(released);
+        assert_eq!(ctx.store.get_job_lock_owner(&job.id).await.unwrap(), None);
     }
 
     #[tokio::test]
