@@ -269,7 +269,7 @@ impl RRQWorker {
                         return Ok(fetched);
                     }
                     let queue_index = (start_index + offset) % total_queues;
-                    let queue_name = &self.queues[queue_index];
+                    let queue_name = self.queues[queue_index].clone();
                     let remaining = count - fetched;
                     let request_count = if pass == 0 {
                         remaining.min(fair_share)
@@ -301,7 +301,7 @@ impl RRQWorker {
                     let claimed = self
                         .job_store
                         .atomic_claim_ready_jobs(
-                            queue_name,
+                            &queue_name,
                             &self.worker_id,
                             provisional_lock_timeout_ms,
                             request_count,
@@ -317,9 +317,9 @@ impl RRQWorker {
                     if claimed.is_empty() {
                         continue;
                     }
-                    telemetry::record_jobs_fetched(queue_name, claimed.len() as u64);
+                    telemetry::record_jobs_fetched(&queue_name, claimed.len() as u64);
                     for _ in 0..claimed.len() {
-                        telemetry::record_lock_acquire(queue_name, "acquired");
+                        telemetry::record_lock_acquire(&queue_name, "acquired");
                     }
                     let job_defs = self
                         .job_store
@@ -327,19 +327,25 @@ impl RRQWorker {
                         .instrument(fetch_span.clone())
                         .await?;
 
-                    for (job_id, job_opt) in claimed.into_iter().zip(job_defs.into_iter()) {
+                    for index in 0..claimed.len() {
+                        let job_id = claimed[index].as_str();
+                        let job_opt = job_defs.get(index).and_then(Option::as_ref);
                         if fetched >= count || self.shutdown.load(Ordering::SeqCst) {
+                            self.release_remaining_claimed_jobs(
+                                &queue_name,
+                                &claimed[index..],
+                                &job_defs[index..],
+                                Some("Job execution interrupted by worker shutdown. Re-queued."),
+                            )
+                            .await;
                             poll_span.record("rrq.fetched", fetched as i64);
                             return Ok(fetched);
                         }
                         let job = match job_opt {
                             Some(job) => job,
                             None => {
-                                let _ = self
-                                    .job_store
-                                    .remove_active_job(&self.worker_id, &job_id)
+                                self.release_claimed_job(&queue_name, job_id, None, None)
                                     .await;
-                                let _ = self.job_store.release_job_lock(&job_id).await;
                                 continue;
                             }
                         };
@@ -352,11 +358,22 @@ impl RRQWorker {
                             .and_then(|sum| sum.checked_mul(1000))
                             .ok_or_else(|| anyhow::anyhow!("lock_timeout_ms overflow"))?;
                         if lock_timeout_ms <= 0 {
-                            let _ = self
-                                .job_store
-                                .remove_active_job(&self.worker_id, &job.id)
-                                .await;
-                            let _ = self.job_store.release_job_lock(&job.id).await;
+                            self.release_claimed_job(
+                                &queue_name,
+                                &job.id,
+                                Some(job),
+                                Some("Invalid lock timeout while preparing execution. Re-queued."),
+                            )
+                            .await;
+                            self.release_remaining_claimed_jobs(
+                                &queue_name,
+                                &claimed[index + 1..],
+                                &job_defs[index + 1..],
+                                Some(
+                                    "Job execution interrupted by worker shutdown. Re-queued.",
+                                ),
+                            )
+                            .await;
                             return Err(anyhow::anyhow!("lock_timeout_ms must be positive"));
                         }
                         let lock_refreshed = self
@@ -364,11 +381,13 @@ impl RRQWorker {
                             .refresh_job_lock_timeout(&job.id, &self.worker_id, lock_timeout_ms)
                             .await?;
                         if !lock_refreshed {
-                            let _ = self
-                                .job_store
-                                .remove_active_job(&self.worker_id, &job.id)
-                                .await;
-                            let _ = self.job_store.release_job_lock(&job.id).await;
+                            self.release_claimed_job(
+                                &queue_name,
+                                &job.id,
+                                Some(job),
+                                Some("Failed to refresh claimed job lock before dispatch. Re-queued."),
+                            )
+                            .await;
                             continue;
                         }
                         let start_time = job.start_time.unwrap_or(claim_start_time);
@@ -427,6 +446,56 @@ impl RRQWorker {
         }
         .instrument(poll_span.clone())
         .await
+    }
+
+    async fn release_claimed_job(
+        &mut self,
+        queue_name: &str,
+        job_id: &str,
+        job: Option<&Job>,
+        pending_error: Option<&str>,
+    ) {
+        if let Some(job) = job {
+            let should_requeue = matches!(
+                job.status,
+                JobStatus::Active | JobStatus::Pending | JobStatus::Retrying
+            );
+            if should_requeue {
+                if job.status == JobStatus::Active {
+                    let _ = self.job_store.mark_job_pending(job_id, pending_error).await;
+                }
+                let already_queued = self
+                    .job_store
+                    .is_job_queued(queue_name, job_id)
+                    .await
+                    .unwrap_or(false);
+                if !already_queued {
+                    let _ = self
+                        .job_store
+                        .add_job_to_queue(queue_name, job_id, Utc::now().timestamp_millis() as f64)
+                        .await;
+                }
+            }
+        }
+        let _ = self
+            .job_store
+            .remove_active_job(&self.worker_id, job_id)
+            .await;
+        let _ = self.job_store.release_job_lock(job_id).await;
+    }
+
+    async fn release_remaining_claimed_jobs(
+        &mut self,
+        queue_name: &str,
+        claimed: &[String],
+        job_defs: &[Option<Job>],
+        pending_error: Option<&str>,
+    ) {
+        for (index, job_id) in claimed.iter().enumerate() {
+            let job = job_defs.get(index).and_then(Option::as_ref);
+            self.release_claimed_job(queue_name, job_id, job, pending_error)
+                .await;
+        }
     }
 
     async fn drain_tasks(&self) -> Result<()> {
@@ -1893,6 +1962,82 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn release_claimed_job_requeues_and_marks_pending() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        ctx.settings.default_runner_name = "test".to_string();
+        let runner = Arc::new(StaticRunner::new(
+            TestOutcome::Success(json!({"ok": true})),
+            Duration::from_millis(0),
+        ));
+        let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+        runners.insert("test".to_string(), runner);
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let job = client
+            .enqueue("task", serde_json::Map::new(), EnqueueOptions::default())
+            .await
+            .unwrap();
+
+        let mut worker = RRQWorker::new(
+            ctx.settings.clone(),
+            None,
+            Some("worker-1".to_string()),
+            runners,
+            true,
+            1,
+        )
+        .await
+        .unwrap();
+        let queue_name = normalize_queue_name(&ctx.settings.default_queue_name);
+        let claimed = worker
+            .job_store
+            .atomic_claim_ready_jobs(&queue_name, &worker.worker_id, 10_000, 1, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(claimed, vec![job.id.clone()]);
+        let claimed_job = worker
+            .job_store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed_job.status, JobStatus::Active);
+
+        worker
+            .release_claimed_job(
+                &queue_name,
+                &job.id,
+                Some(&claimed_job),
+                Some("Failed to refresh claimed job lock before dispatch. Re-queued."),
+            )
+            .await;
+
+        let reloaded = worker
+            .job_store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.status, JobStatus::Pending);
+        assert!(
+            worker
+                .job_store
+                .is_job_queued(&queue_name, &job.id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            worker.job_store.get_job_lock_owner(&job.id).await.unwrap(),
+            None
+        );
+        let active = worker
+            .job_store
+            .get_active_job_ids(&worker.worker_id)
+            .await
+            .unwrap();
+        assert!(!active.contains(&job.id));
     }
 
     #[tokio::test]

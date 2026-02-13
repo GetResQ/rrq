@@ -119,14 +119,19 @@ impl JobStore {
                  local lock_key = 'rrq:lock:job:' .. job_id\n\
                  local lock_ok = redis.call('SET', lock_key, ARGV[1], 'NX', 'PX', ARGV[4])\n\
                  if lock_ok then\n\
-                     local removed = redis.call('ZREM', KEYS[1], job_id)\n\
-                     if removed == 1 then\n\
-                         local job_key = 'rrq:job:' .. job_id\n\
-                         redis.call('HSET', job_key, 'status', 'ACTIVE', 'start_time', ARGV[5], 'worker_id', ARGV[1])\n\
-                         redis.call('ZADD', KEYS[2], ARGV[6], job_id)\n\
-                         table.insert(claimed, job_id)\n\
-                     else\n\
+                     local job_key = 'rrq:job:' .. job_id\n\
+                     if redis.call('HEXISTS', job_key, 'enqueue_time') ~= 1 then\n\
+                         redis.call('ZREM', KEYS[1], job_id)\n\
                          redis.call('DEL', lock_key)\n\
+                     else\n\
+                         local removed = redis.call('ZREM', KEYS[1], job_id)\n\
+                         if removed == 1 then\n\
+                             redis.call('HSET', job_key, 'status', 'ACTIVE', 'start_time', ARGV[5], 'worker_id', ARGV[1])\n\
+                             redis.call('ZADD', KEYS[2], ARGV[6], job_id)\n\
+                             table.insert(claimed, job_id)\n\
+                         else\n\
+                             redis.call('DEL', lock_key)\n\
+                         end\n\
                      end\n\
                  end\n\
              end\n\
@@ -332,11 +337,7 @@ impl JobStore {
                         .get(index)
                         .cloned()
                         .unwrap_or_else(|| "unknown".to_string());
-                    Some(Self::parse_job_map(
-                        map,
-                        &fallback_id,
-                        self.settings.default_max_retries,
-                    )?)
+                    Self::parse_job_map(map, &fallback_id, self.settings.default_max_retries).ok()
                 }
                 None => None,
             };
@@ -1278,6 +1279,64 @@ mod tests {
         assert!(!missing_lock_refreshed);
 
         let _ = ctx.store.release_job_lock(&job.id).await;
+    }
+
+    #[tokio::test]
+    async fn job_store_atomic_claim_ready_jobs_skips_stale_queue_entries_without_creating_hash() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let worker_id = "worker-stale";
+        let stale_job_id = "stale-queue-job";
+        let score = (Utc::now().timestamp_millis() - 1_000) as f64;
+
+        ctx.store
+            .add_job_to_queue(&queue_name, stale_job_id, score)
+            .await
+            .unwrap();
+
+        let claimed = ctx
+            .store
+            .atomic_claim_ready_jobs(&queue_name, worker_id, 10_000, 1, Utc::now())
+            .await
+            .unwrap();
+        assert!(claimed.is_empty());
+        assert!(
+            !ctx.store
+                .is_job_queued(&queue_name, stale_job_id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            ctx.store
+                .get_job_definition(stale_job_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            ctx.store.get_job_lock_owner(stale_job_id).await.unwrap(),
+            None
+        );
+        let active = ctx.store.get_active_job_ids(worker_id).await.unwrap();
+        assert!(!active.contains(&stale_job_id.to_string()));
+    }
+
+    #[tokio::test]
+    async fn job_store_get_job_definitions_skips_malformed_hash_entries() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let malformed_job_id = "malformed-job";
+
+        ctx.store
+            .update_job_status(malformed_job_id, JobStatus::Active)
+            .await
+            .unwrap();
+        let jobs = ctx
+            .store
+            .get_job_definitions(&[malformed_job_id.to_string()])
+            .await
+            .unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0].is_none());
     }
 
     #[tokio::test]
