@@ -84,6 +84,7 @@ pub struct RRQSettings {
     pub cron_jobs: Vec<CronJob>,
     pub expected_job_ttl: i64,
     pub watch: WatchSettings,
+    pub correlation_mappings: HashMap<String, String>,
 }
 
 impl Default for RRQSettings {
@@ -113,6 +114,7 @@ impl Default for RRQSettings {
             cron_jobs: Vec::new(),
             expected_job_ttl: DEFAULT_EXPECTED_JOB_TTL,
             watch: WatchSettings::default(),
+            correlation_mappings: HashMap::new(),
         }
     }
 }

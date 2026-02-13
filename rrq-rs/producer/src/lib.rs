@@ -18,7 +18,10 @@
 //! ```
 
 use anyhow::{Context, Result};
+use opentelemetry::global;
+use opentelemetry::propagation::Injector;
 use std::sync::Once;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 static CRYPTO_PROVIDER_INIT: Once = Once::new();
 
@@ -129,6 +132,7 @@ pub struct Producer {
     default_job_timeout_seconds: i64,
     default_result_ttl_seconds: i64,
     default_idempotency_ttl_seconds: i64,
+    correlation_mappings: HashMap<String, String>,
     enqueue_script: Script,
     rate_limit_script: Script,
     debounce_script: Script,
@@ -142,6 +146,7 @@ pub struct ProducerConfig {
     pub job_timeout_seconds: i64,
     pub result_ttl_seconds: i64,
     pub idempotency_ttl_seconds: i64,
+    pub correlation_mappings: HashMap<String, String>,
 }
 
 impl Default for ProducerConfig {
@@ -152,6 +157,7 @@ impl Default for ProducerConfig {
             job_timeout_seconds: DEFAULT_JOB_TIMEOUT_SECONDS,
             result_ttl_seconds: DEFAULT_RESULT_TTL_SECONDS,
             idempotency_ttl_seconds: DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
+            correlation_mappings: HashMap::new(),
         }
     }
 }
@@ -176,6 +182,7 @@ impl Producer {
             default_job_timeout_seconds: config.job_timeout_seconds,
             default_result_ttl_seconds: config.result_ttl_seconds,
             default_idempotency_ttl_seconds: config.idempotency_ttl_seconds,
+            correlation_mappings: config.correlation_mappings,
             enqueue_script: build_enqueue_script(),
             rate_limit_script: build_rate_limit_script(),
             debounce_script: build_debounce_script(),
@@ -191,6 +198,7 @@ impl Producer {
             default_job_timeout_seconds: config.job_timeout_seconds,
             default_result_ttl_seconds: config.result_ttl_seconds,
             default_idempotency_ttl_seconds: config.idempotency_ttl_seconds,
+            correlation_mappings: config.correlation_mappings,
             enqueue_script: build_enqueue_script(),
             rate_limit_script: build_rate_limit_script(),
             debounce_script: build_debounce_script(),
@@ -251,9 +259,21 @@ impl Producer {
             }
         }
 
+        let trace_context = merge_trace_context(options.trace_context);
+        let correlation_context = extract_correlation_context(
+            &params,
+            &self.correlation_mappings,
+            trace_context.as_ref(),
+        );
+
         let job_params_json = serde_json::to_string(&params)?;
-        let trace_context_json = if let Some(trace_context) = options.trace_context {
+        let trace_context_json = if let Some(trace_context) = trace_context {
             serde_json::to_string(&trace_context)?
+        } else {
+            String::new()
+        };
+        let correlation_context_json = if let Some(correlation_context) = correlation_context {
+            serde_json::to_string(&correlation_context)?
         } else {
             String::new()
         };
@@ -278,6 +298,7 @@ impl Producer {
             .arg(&queue_name)
             .arg("null")
             .arg(trace_context_json)
+            .arg(correlation_context_json)
             .arg(score_ms)
             .arg(idempotency_ttl_seconds)
             .invoke_async(&mut conn)
@@ -333,9 +354,21 @@ impl Producer {
         let rate_limit_key = format_rate_limit_key(rate_limit_key);
         let score_ms = scheduled_time.timestamp_millis() as f64;
 
+        let trace_context = merge_trace_context(options.trace_context);
+        let correlation_context = extract_correlation_context(
+            &params,
+            &self.correlation_mappings,
+            trace_context.as_ref(),
+        );
+
         let job_params_json = serde_json::to_string(&params)?;
-        let trace_context_json = if let Some(trace_context) = options.trace_context {
+        let trace_context_json = if let Some(trace_context) = trace_context {
             serde_json::to_string(&trace_context)?
+        } else {
+            String::new()
+        };
+        let correlation_context_json = if let Some(correlation_context) = correlation_context {
+            serde_json::to_string(&correlation_context)?
         } else {
             String::new()
         };
@@ -359,6 +392,7 @@ impl Producer {
             .arg(&queue_name)
             .arg("null")
             .arg(trace_context_json)
+            .arg(correlation_context_json)
             .arg(score_ms)
             .arg(ttl_seconds)
             .invoke_async(&mut conn)
@@ -416,9 +450,21 @@ impl Producer {
         let debounce_key = format_debounce_key(debounce_key);
         let score_ms = scheduled_time.timestamp_millis() as f64;
 
+        let trace_context = merge_trace_context(options.trace_context);
+        let correlation_context = extract_correlation_context(
+            &params,
+            &self.correlation_mappings,
+            trace_context.as_ref(),
+        );
+
         let job_params_json = serde_json::to_string(&params)?;
-        let trace_context_json = if let Some(trace_context) = options.trace_context {
+        let trace_context_json = if let Some(trace_context) = trace_context {
             serde_json::to_string(&trace_context)?
+        } else {
+            String::new()
+        };
+        let correlation_context_json = if let Some(correlation_context) = correlation_context {
+            serde_json::to_string(&correlation_context)?
         } else {
             String::new()
         };
@@ -442,6 +488,7 @@ impl Producer {
             .arg(&queue_name)
             .arg("null")
             .arg(trace_context_json)
+            .arg(correlation_context_json)
             .arg(score_ms)
             .arg(ttl_seconds)
             .invoke_async(&mut conn)
@@ -478,6 +525,119 @@ impl Producer {
             last_error,
         }))
     }
+}
+
+struct HashMapInjector<'a>(&'a mut HashMap<String, String>);
+
+impl<'a> Injector for HashMapInjector<'a> {
+    fn set(&mut self, key: &str, value: String) {
+        self.0.insert(key.to_string(), value);
+    }
+}
+
+fn merge_trace_context(
+    trace_context: Option<HashMap<String, String>>,
+) -> Option<HashMap<String, String>> {
+    let mut merged = trace_context.unwrap_or_default();
+    let current = tracing::Span::current().context();
+    global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&current, &mut HashMapInjector(&mut merged));
+    });
+    if merged.is_empty() {
+        return None;
+    }
+    Some(merged)
+}
+
+fn extract_correlation_context(
+    params: &Map<String, Value>,
+    mappings: &HashMap<String, String>,
+    trace_context: Option<&HashMap<String, String>>,
+) -> Option<HashMap<String, String>> {
+    if mappings.is_empty() {
+        return None;
+    }
+
+    const MAX_CORRELATION_KEYS: usize = 16;
+    const MAX_CORRELATION_KEY_LEN: usize = 64;
+    const MAX_CORRELATION_VALUE_LEN: usize = 256;
+
+    let mut correlation = HashMap::new();
+
+    for (attr_name, path) in mappings {
+        if correlation.len() >= MAX_CORRELATION_KEYS {
+            break;
+        }
+        let key = attr_name.trim();
+        if key.is_empty() || key.len() > MAX_CORRELATION_KEY_LEN {
+            continue;
+        }
+        if let Some(existing) = trace_context.and_then(|ctx| ctx.get(key))
+            && !existing.is_empty()
+        {
+            correlation.insert(
+                key.to_string(),
+                truncate_utf8(existing, MAX_CORRELATION_VALUE_LEN),
+            );
+            continue;
+        }
+
+        let Some(raw) = lookup_value_in_params(params, path) else {
+            continue;
+        };
+        let Some(value) = scalar_value_to_string(raw) else {
+            continue;
+        };
+        correlation.insert(
+            key.to_string(),
+            truncate_utf8(&value, MAX_CORRELATION_VALUE_LEN),
+        );
+    }
+
+    if correlation.is_empty() {
+        return None;
+    }
+    Some(correlation)
+}
+
+fn lookup_value_in_params<'a>(params: &'a Map<String, Value>, path: &str) -> Option<&'a Value> {
+    let cleaned = path.trim().trim_start_matches("params.");
+    if cleaned.is_empty() {
+        return None;
+    }
+    let mut parts = cleaned.split('.');
+    let first = parts.next()?;
+    let mut current = params.get(first)?;
+    for part in parts {
+        if part.is_empty() {
+            return None;
+        }
+        current = current.as_object()?.get(part)?;
+    }
+    Some(current)
+}
+
+fn scalar_value_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(v) if !v.is_empty() => Some(v.clone()),
+        Value::Bool(v) => Some(v.to_string()),
+        Value::Number(v) => Some(v.to_string()),
+        _ => None,
+    }
+}
+
+fn truncate_utf8(value: &str, max_len: usize) -> String {
+    if value.len() <= max_len {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(max_len);
+    for ch in value.chars() {
+        if out.len() + ch.len_utf8() > max_len {
+            break;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 #[async_trait]
@@ -535,7 +695,7 @@ fn build_enqueue_script() -> Script {
          --       [7] = next_scheduled_run_time, [8] = max_retries\n\
          --       [9] = job_timeout_seconds, [10] = result_ttl_seconds\n\
          --       [11] = queue_name, [12] = result, [13] = trace_context_json\n\
-         --       [14] = score_ms, [15] = idempotency_ttl_seconds\n\
+         --       [14] = correlation_context_json, [15] = score_ms, [16] = idempotency_ttl_seconds\n\
          local idem_key = KEYS[3]\n\
          if idem_key ~= '' then\n\
              local existing = redis.call('GET', idem_key)\n\
@@ -551,7 +711,7 @@ fn build_enqueue_script() -> Script {
              return {{-1, ARGV[1]}}\n\
          end\n\
          if idem_key ~= '' then\n\
-             local ttl = tonumber(ARGV[15])\n\
+             local ttl = tonumber(ARGV[16])\n\
              local set_ok = nil\n\
              if ttl and ttl > 0 then\n\
                  set_ok = redis.call('SET', idem_key, ARGV[1], 'NX', 'EX', ttl)\n\
@@ -577,11 +737,14 @@ fn build_enqueue_script() -> Script {
              'job_timeout_seconds', ARGV[9],\n\
              'result_ttl_seconds', ARGV[10],\n\
              'queue_name', ARGV[11],\n\
-             'result', ARGV[12])\n\
+         'result', ARGV[12])\n\
          if ARGV[13] ~= '' then\n\
              redis.call('HSET', KEYS[1], 'trace_context', ARGV[13])\n\
          end\n\
-         redis.call('ZADD', KEYS[2], ARGV[14], ARGV[1])\n\
+         if ARGV[14] ~= '' then\n\
+             redis.call('HSET', KEYS[1], 'correlation_context', ARGV[14])\n\
+         end\n\
+         redis.call('ZADD', KEYS[2], ARGV[15], ARGV[1])\n\
          return {{1, ARGV[1]}}",
         job_prefix = JOB_KEY_PREFIX
     );
@@ -596,11 +759,11 @@ fn build_rate_limit_script() -> Script {
         --       [7] = next_scheduled_run_time, [8] = max_retries\n\
         --       [9] = job_timeout_seconds, [10] = result_ttl_seconds\n\
         --       [11] = queue_name, [12] = result, [13] = trace_context_json\n\
-        --       [14] = score_ms, [15] = rate_limit_ttl_seconds\n\
+        --       [14] = correlation_context_json, [15] = score_ms, [16] = rate_limit_ttl_seconds\n\
         local rate_key = KEYS[3]\n\
         local rate_set = false\n\
         if rate_key ~= '' then\n\
-            local ttl = tonumber(ARGV[15])\n\
+            local ttl = tonumber(ARGV[16])\n\
             if not ttl or ttl <= 0 then\n\
                 return {-2, ARGV[1]}\n\
             end\n\
@@ -628,11 +791,14 @@ fn build_rate_limit_script() -> Script {
             'job_timeout_seconds', ARGV[9],\n\
             'result_ttl_seconds', ARGV[10],\n\
             'queue_name', ARGV[11],\n\
-            'result', ARGV[12])\n\
+        'result', ARGV[12])\n\
         if ARGV[13] ~= '' then\n\
             redis.call('HSET', KEYS[1], 'trace_context', ARGV[13])\n\
         end\n\
-        redis.call('ZADD', KEYS[2], ARGV[14], ARGV[1])\n\
+        if ARGV[14] ~= '' then\n\
+            redis.call('HSET', KEYS[1], 'correlation_context', ARGV[14])\n\
+        end\n\
+        redis.call('ZADD', KEYS[2], ARGV[15], ARGV[1])\n\
         return {1, ARGV[1]}";
     Script::new(script)
 }
@@ -645,7 +811,7 @@ fn build_debounce_script() -> Script {
         --       [8] = next_scheduled_run_time, [9] = max_retries\n\
         --       [10] = job_timeout_seconds, [11] = result_ttl_seconds\n\
         --       [12] = queue_name, [13] = result, [14] = trace_context_json\n\
-        --       [15] = score_ms, [16] = debounce_ttl_seconds\n\
+        --       [15] = correlation_context_json, [16] = score_ms, [17] = debounce_ttl_seconds\n\
         local existing_id = redis.call('GET', KEYS[2])\n\
         if existing_id then\n\
             local existing_job_key = ARGV[1] .. existing_id\n\
@@ -663,8 +829,11 @@ fn build_debounce_script() -> Script {
                     if ARGV[14] ~= '' then\n\
                         redis.call('HSET', existing_job_key, 'trace_context', ARGV[14])\n\
                     end\n\
-                    redis.call('ZADD', KEYS[1], ARGV[15], existing_id)\n\
-                    local ttl = tonumber(ARGV[16])\n\
+                    if ARGV[15] ~= '' then\n\
+                        redis.call('HSET', existing_job_key, 'correlation_context', ARGV[15])\n\
+                    end\n\
+                    redis.call('ZADD', KEYS[1], ARGV[16], existing_id)\n\
+                    local ttl = tonumber(ARGV[17])\n\
                     if ttl and ttl > 0 then\n\
                         redis.call('EXPIRE', KEYS[2], ttl)\n\
                     end\n\
@@ -677,7 +846,7 @@ fn build_debounce_script() -> Script {
         if redis.call('EXISTS', job_key) == 1 then\n\
             return {-1, ARGV[2]}\n\
         end\n\
-        local ttl = tonumber(ARGV[16])\n\
+        local ttl = tonumber(ARGV[17])\n\
         if ttl and ttl > 0 then\n\
             local ok = redis.call('SET', KEYS[2], ARGV[2], 'NX', 'EX', ttl)\n\
             if not ok then\n\
@@ -702,11 +871,14 @@ fn build_debounce_script() -> Script {
             'job_timeout_seconds', ARGV[10],\n\
             'result_ttl_seconds', ARGV[11],\n\
             'queue_name', ARGV[12],\n\
-            'result', ARGV[13])\n\
+        'result', ARGV[13])\n\
         if ARGV[14] ~= '' then\n\
             redis.call('HSET', job_key, 'trace_context', ARGV[14])\n\
         end\n\
-        redis.call('ZADD', KEYS[1], ARGV[15], ARGV[2])\n\
+        if ARGV[15] ~= '' then\n\
+            redis.call('HSET', job_key, 'correlation_context', ARGV[15])\n\
+        end\n\
+        redis.call('ZADD', KEYS[1], ARGV[16], ARGV[2])\n\
         return {1, ARGV[2]}";
     Script::new(script)
 }
@@ -721,6 +893,7 @@ fn parse_result(result: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::OnceLock;
     use tokio::sync::Mutex;
 
@@ -749,6 +922,64 @@ mod tests {
         assert_eq!(JobStatus::from_str("RETRYING"), JobStatus::Retrying);
         assert_eq!(JobStatus::from_str("UNKNOWN"), JobStatus::Unknown);
         assert_eq!(JobStatus::from_str("garbage"), JobStatus::Unknown);
+    }
+
+    #[test]
+    fn merge_trace_context_preserves_existing_entries() {
+        let mut existing = HashMap::new();
+        existing.insert("message_id".to_string(), "m-1".to_string());
+
+        let merged = merge_trace_context(Some(existing)).expect("expected trace context");
+
+        assert_eq!(merged.get("message_id").map(String::as_str), Some("m-1"));
+    }
+
+    #[test]
+    fn extract_correlation_context_maps_paths_and_scalars() {
+        let params = json!({
+            "session": { "id": "sess-abc" },
+            "message_id": 88,
+            "retry": false
+        })
+        .as_object()
+        .expect("object params")
+        .clone();
+        let mappings = HashMap::from([
+            ("session_id".to_string(), "session.id".to_string()),
+            ("message_id".to_string(), "params.message_id".to_string()),
+            ("retry".to_string(), "retry".to_string()),
+        ]);
+
+        let extracted =
+            extract_correlation_context(&params, &mappings, None).expect("expected correlation");
+
+        assert_eq!(
+            extracted.get("session_id").map(String::as_str),
+            Some("sess-abc")
+        );
+        assert_eq!(extracted.get("message_id").map(String::as_str), Some("88"));
+        assert_eq!(extracted.get("retry").map(String::as_str), Some("false"));
+    }
+
+    #[test]
+    fn extract_correlation_context_prefers_trace_context_value() {
+        let params = json!({
+            "session": { "id": "sess-from-params" }
+        })
+        .as_object()
+        .expect("object params")
+        .clone();
+        let mappings = HashMap::from([("session_id".to_string(), "session.id".to_string())]);
+        let trace_context =
+            HashMap::from([("session_id".to_string(), "sess-from-trace".to_string())]);
+
+        let extracted = extract_correlation_context(&params, &mappings, Some(&trace_context))
+            .expect("expected correlation");
+
+        assert_eq!(
+            extracted.get("session_id").map(String::as_str),
+            Some("sess-from-trace")
+        );
     }
 
     #[tokio::test]
@@ -792,6 +1023,7 @@ mod tests {
             job_timeout_seconds: 600,
             result_ttl_seconds: 7200,
             idempotency_ttl_seconds: 1200,
+            correlation_mappings: HashMap::new(),
         };
         let producer = Producer::with_config(&dsn, config).await.unwrap();
         let job_id = producer
@@ -905,6 +1137,7 @@ mod tests {
             job_timeout_seconds: 300,
             result_ttl_seconds: 3600 * 24,
             idempotency_ttl_seconds: 2,
+            correlation_mappings: HashMap::new(),
         };
         let producer = Producer::with_config(&dsn, config).await.unwrap();
         let enqueue_time = Utc::now();

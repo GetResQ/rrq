@@ -82,13 +82,19 @@ impl Registry {
         if outcome.request_id.is_none() {
             outcome.request_id = Some(request_id.clone());
         }
-        record_outcome(&span, &outcome, start.elapsed());
+        record_outcome(&span, function_name.as_str(), &outcome, start.elapsed());
         outcome
     }
 }
 
-fn record_outcome(span: &tracing::Span, outcome: &ExecutionOutcome, duration: std::time::Duration) {
+fn record_outcome(
+    span: &tracing::Span,
+    function_name: &str,
+    outcome: &ExecutionOutcome,
+    duration: std::time::Duration,
+) {
     let duration_ms = duration.as_secs_f64() * 1000.0;
+    crate::telemetry::record_job_outcome(function_name, outcome.status.clone(), duration);
     span.record("rrq.duration_ms", duration_ms);
     match outcome.status {
         OutcomeStatus::Success => {

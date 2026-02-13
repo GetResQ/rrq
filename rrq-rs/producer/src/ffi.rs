@@ -242,6 +242,7 @@ fn producer_config_from_settings(settings: &ProducerSettings) -> ProducerConfig 
         job_timeout_seconds: settings.job_timeout_seconds,
         result_ttl_seconds: settings.result_ttl_seconds,
         idempotency_ttl_seconds: settings.idempotency_ttl_seconds,
+        correlation_mappings: settings.correlation_mappings.clone(),
     }
 }
 
@@ -278,6 +279,7 @@ pub extern "C" fn rrq_producer_new(
             idempotency_ttl_seconds: config_payload
                 .idempotency_ttl_seconds
                 .unwrap_or(default_config.idempotency_ttl_seconds),
+            correlation_mappings: default_config.correlation_mappings,
         };
 
         let producer = block_on_runtime(

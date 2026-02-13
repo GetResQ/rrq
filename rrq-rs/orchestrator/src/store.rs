@@ -279,6 +279,10 @@ impl JobStore {
             let trace_json = serde_json::to_string(value)?;
             mapping.push(("trace_context".to_string(), trace_json));
         }
+        if let Some(value) = job.correlation_context.as_ref() {
+            let correlation_json = serde_json::to_string(value)?;
+            mapping.push(("correlation_context".to_string(), correlation_json));
+        }
 
         Ok(mapping)
     }
@@ -373,6 +377,12 @@ impl JobStore {
             }
             serde_json::from_str(value).ok()
         });
+        let correlation_context = raw.get("correlation_context").and_then(|value| {
+            if value.eq_ignore_ascii_case("null") {
+                return None;
+            }
+            serde_json::from_str(value).ok()
+        });
 
         let status = raw
             .get("status")
@@ -424,6 +434,7 @@ impl JobStore {
             dlq_name: raw.get("dlq_name").cloned(),
             worker_id: raw.get("worker_id").cloned(),
             trace_context,
+            correlation_context,
         })
     }
 
@@ -1073,6 +1084,7 @@ mod tests {
             dlq_name: Some(dlq_name.to_string()),
             worker_id: None,
             trace_context: None,
+            correlation_context: None,
         }
     }
 

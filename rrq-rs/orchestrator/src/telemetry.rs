@@ -4,18 +4,24 @@ use std::sync::OnceLock;
 
 use opentelemetry::global;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
-use opentelemetry::propagation::{Extractor, TextMapCompositePropagator};
+use opentelemetry::propagation::{Extractor, Injector, TextMapCompositePropagator};
+use opentelemetry::trace::TraceContextExt;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::{KeyValue, Value};
-use opentelemetry_otlp::{MetricExporter, SpanExporter, WithExportConfig, WithHttpConfig};
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry_otlp::{
+    LogExporter, MetricExporter, SpanExporter, WithExportConfig, WithHttpConfig,
+};
+use opentelemetry_sdk::logs as sdklogs;
 use opentelemetry_sdk::metrics as sdkmetrics;
 use opentelemetry_sdk::metrics::periodic_reader_with_async_runtime::PeriodicReader as AsyncPeriodicReader;
 use opentelemetry_sdk::propagation::{BaggagePropagator, TraceContextPropagator};
 use opentelemetry_sdk::trace::span_processor_with_async_runtime::BatchSpanProcessor;
 use opentelemetry_sdk::{Resource, runtime, trace as sdktrace};
+use serde_json::{Map, Value as JsonValue};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::EnvFilter;
-use tracing_subscriber::layer::{Layer, SubscriberExt};
+use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +33,7 @@ pub enum LogFormat {
 static LOG_FORMAT: OnceLock<LogFormat> = OnceLock::new();
 static OTEL_TRACE_PROVIDER: OnceLock<sdktrace::SdkTracerProvider> = OnceLock::new();
 static OTEL_METRIC_PROVIDER: OnceLock<sdkmetrics::SdkMeterProvider> = OnceLock::new();
+static OTEL_LOG_PROVIDER: OnceLock<sdklogs::SdkLoggerProvider> = OnceLock::new();
 static RRQ_METRICS: OnceLock<RrqMetrics> = OnceLock::new();
 
 #[derive(Clone)]
@@ -37,6 +44,10 @@ struct ResourceMetadata {
 }
 
 struct RrqMetrics {
+    enqueue_total: Counter<u64>,
+    enqueue_duration_ms: Histogram<f64>,
+    claim_attempt_total: Counter<u64>,
+    claim_miss_total: Counter<u64>,
     poll_cycles_total: Counter<u64>,
     jobs_fetched_total: Counter<u64>,
     lock_acquire_total: Counter<u64>,
@@ -49,6 +60,10 @@ struct RrqMetrics {
 impl RrqMetrics {
     fn new(meter: &Meter) -> Self {
         Self {
+            enqueue_total: meter.u64_counter("rrq_enqueue_total").build(),
+            enqueue_duration_ms: meter.f64_histogram("rrq_enqueue_duration_ms").build(),
+            claim_attempt_total: meter.u64_counter("rrq_claim_attempt_total").build(),
+            claim_miss_total: meter.u64_counter("rrq_claim_miss_total").build(),
             poll_cycles_total: meter.u64_counter("rrq_poll_cycles_total").build(),
             jobs_fetched_total: meter.u64_counter("rrq_jobs_fetched_total").build(),
             lock_acquire_total: meter.u64_counter("rrq_lock_acquire_total").build(),
@@ -75,50 +90,114 @@ fn parse_log_format(value: &str) -> LogFormat {
 }
 
 pub fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let metadata = resolve_resource_metadata();
     let (otel_layer, trace_error) = init_otel_layer(&metadata);
     let metrics_error = init_metrics_provider(&metadata);
+    let (otel_log_layer, logs_error) = init_otel_log_layer(&metadata);
     match log_format() {
         LogFormat::Json => {
-            if let Some(otel_layer) = otel_layer {
-                let fmt_layer = tracing_subscriber::fmt::layer()
-                    .json()
-                    .with_ansi(false)
-                    .with_current_span(true)
-                    .with_filter(filter.clone());
-                tracing_subscriber::registry()
+            match (otel_layer, otel_log_layer) {
+                (Some(otel_layer), Some(otel_log_layer)) => tracing_subscriber::registry()
                     .with(otel_layer)
-                    .with(fmt_layer)
-                    .init();
-            } else {
-                let fmt_layer = tracing_subscriber::fmt::layer()
-                    .json()
-                    .with_ansi(false)
-                    .with_current_span(true)
-                    .with_filter(filter);
-                tracing_subscriber::registry().with(fmt_layer).init();
-            }
+                    .with(otel_log_layer)
+                    .with(default_env_filter())
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .json()
+                            .with_ansi(false)
+                            .with_current_span(true),
+                    )
+                    .init(),
+                (Some(otel_layer), None) => tracing_subscriber::registry()
+                    .with(otel_layer)
+                    .with(default_env_filter())
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .json()
+                            .with_ansi(false)
+                            .with_current_span(true),
+                    )
+                    .init(),
+                (None, Some(otel_log_layer)) => tracing_subscriber::registry()
+                    .with(otel_log_layer)
+                    .with(default_env_filter())
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .json()
+                            .with_ansi(false)
+                            .with_current_span(true),
+                    )
+                    .init(),
+                (None, None) => tracing_subscriber::registry()
+                    .with(default_env_filter())
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .json()
+                            .with_ansi(false)
+                            .with_current_span(true),
+                    )
+                    .init(),
+            };
         }
         LogFormat::Pretty => {
-            if let Some(otel_layer) = otel_layer {
-                let fmt_layer = tracing_subscriber::fmt::layer().with_filter(filter.clone());
-                tracing_subscriber::registry()
+            match (otel_layer, otel_log_layer) {
+                (Some(otel_layer), Some(otel_log_layer)) => tracing_subscriber::registry()
                     .with(otel_layer)
-                    .with(fmt_layer)
-                    .init();
-            } else {
-                let fmt_layer = tracing_subscriber::fmt::layer().with_filter(filter);
-                tracing_subscriber::registry().with(fmt_layer).init();
-            }
+                    .with(otel_log_layer)
+                    .with(default_env_filter())
+                    .with(tracing_subscriber::fmt::layer())
+                    .init(),
+                (Some(otel_layer), None) => tracing_subscriber::registry()
+                    .with(otel_layer)
+                    .with(default_env_filter())
+                    .with(tracing_subscriber::fmt::layer())
+                    .init(),
+                (None, Some(otel_log_layer)) => tracing_subscriber::registry()
+                    .with(otel_log_layer)
+                    .with(default_env_filter())
+                    .with(tracing_subscriber::fmt::layer())
+                    .init(),
+                (None, None) => tracing_subscriber::registry()
+                    .with(default_env_filter())
+                    .with(tracing_subscriber::fmt::layer())
+                    .init(),
+            };
         }
     }
+    warn_if_global_otlp_endpoint_only();
 
     if let Some(error) = trace_error {
         tracing::warn!(error = %error, "OpenTelemetry tracing exporter failed to initialize");
     }
     if let Some(error) = metrics_error {
         tracing::warn!(error = %error, "OpenTelemetry metrics exporter failed to initialize");
+    }
+    if let Some(error) = logs_error {
+        tracing::warn!(error = %error, "OpenTelemetry logs exporter failed to initialize");
+    }
+}
+
+fn default_env_filter() -> EnvFilter {
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+}
+
+fn warn_if_global_otlp_endpoint_only() {
+    let has_global = env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .ok()
+        .is_some_and(|value| !value.is_empty());
+    if !has_global {
+        return;
+    }
+    let missing_traces = !otel_trace_enabled();
+    let missing_metrics = !otel_metrics_enabled();
+    let missing_logs = !otel_logs_enabled();
+    if missing_traces || missing_metrics || missing_logs {
+        tracing::warn!(
+            missing_traces,
+            missing_metrics,
+            missing_logs,
+            "OTEL_EXPORTER_OTLP_ENDPOINT is set but RRQ requires per-signal OTLP endpoint variables: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, OTEL_EXPORTER_OTLP_METRICS_ENDPOINT, OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
+        );
     }
 }
 
@@ -134,6 +213,86 @@ pub fn set_parent_from_trace_context(
         propagator.extract(&HashMapExtractor(trace_context))
     });
     let _ = span.set_parent(parent);
+}
+
+pub fn inject_current_trace_context(
+    trace_context: Option<HashMap<String, String>>,
+) -> Option<HashMap<String, String>> {
+    let mut merged = trace_context.unwrap_or_default();
+    let current = tracing::Span::current().context();
+    global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&current, &mut HashMapInjector(&mut merged));
+    });
+    if merged.is_empty() {
+        return None;
+    }
+    Some(merged)
+}
+
+pub fn extract_correlation_context(
+    params: &Map<String, JsonValue>,
+    mappings: &HashMap<String, String>,
+    trace_context: Option<&HashMap<String, String>>,
+) -> Option<HashMap<String, String>> {
+    if mappings.is_empty() {
+        return None;
+    }
+
+    const MAX_CORRELATION_KEYS: usize = 16;
+    const MAX_CORRELATION_KEY_LEN: usize = 64;
+    const MAX_CORRELATION_VALUE_LEN: usize = 256;
+    let mut correlation = HashMap::new();
+
+    for (attribute_name, path) in mappings {
+        if correlation.len() >= MAX_CORRELATION_KEYS {
+            break;
+        }
+        let key = attribute_name.trim();
+        if key.is_empty() || key.len() > MAX_CORRELATION_KEY_LEN {
+            continue;
+        }
+        if let Some(existing) = trace_context.and_then(|ctx| ctx.get(key))
+            && !existing.is_empty()
+        {
+            correlation.insert(
+                key.to_string(),
+                truncate_utf8(existing, MAX_CORRELATION_VALUE_LEN),
+            );
+            continue;
+        }
+        let Some(raw) = lookup_value_in_params(params, path) else {
+            continue;
+        };
+        let Some(value) = scalar_value_to_string(raw) else {
+            continue;
+        };
+        correlation.insert(
+            key.to_string(),
+            truncate_utf8(&value, MAX_CORRELATION_VALUE_LEN),
+        );
+    }
+
+    if correlation.is_empty() {
+        return None;
+    }
+    Some(correlation)
+}
+
+pub fn apply_correlation_context_to_span(
+    span: &tracing::Span,
+    correlation_context: &HashMap<String, String>,
+) {
+    if correlation_context.is_empty() {
+        return;
+    }
+    let span_context = span.context();
+    let otel_span = span_context.span();
+    for (key, value) in correlation_context {
+        if key.is_empty() || value.is_empty() {
+            continue;
+        }
+        otel_span.set_attribute(KeyValue::new(key.clone(), value.clone()));
+    }
 }
 
 fn resolve_resource_metadata() -> ResourceMetadata {
@@ -221,32 +380,52 @@ fn init_metrics_provider(metadata: &ResourceMetadata) -> Option<String> {
     None
 }
 
+fn init_otel_log_layer(
+    metadata: &ResourceMetadata,
+) -> (
+    Option<OpenTelemetryTracingBridge<sdklogs::SdkLoggerProvider, sdklogs::SdkLogger>>,
+    Option<String>,
+) {
+    if !otel_logs_enabled() {
+        return (None, None);
+    }
+
+    let exporter = match build_otlp_log_exporter() {
+        Ok(exporter) => exporter,
+        Err(err) => return (None, Some(err)),
+    };
+
+    let provider = sdklogs::SdkLoggerProvider::builder()
+        .with_resource(build_resource(metadata))
+        .with_batch_exporter(exporter)
+        .build();
+    let _ = OTEL_LOG_PROVIDER.set(provider);
+    let Some(provider_ref) = OTEL_LOG_PROVIDER.get() else {
+        return (
+            None,
+            Some("failed to initialize OpenTelemetry logger provider".to_string()),
+        );
+    };
+    let layer = OpenTelemetryTracingBridge::new(provider_ref);
+    (Some(layer), None)
+}
+
 fn otel_trace_enabled() -> bool {
-    if let Ok(endpoint) = env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-        && !endpoint.is_empty()
-    {
-        return true;
-    }
-    if let Ok(endpoint) = env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-        && !endpoint.is_empty()
-    {
-        return true;
-    }
-    false
+    env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        .ok()
+        .is_some_and(|endpoint| !endpoint.is_empty())
 }
 
 fn otel_metrics_enabled() -> bool {
-    if let Ok(endpoint) = env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
-        && !endpoint.is_empty()
-    {
-        return true;
-    }
-    if let Ok(endpoint) = env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-        && !endpoint.is_empty()
-    {
-        return true;
-    }
-    false
+    env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+        .ok()
+        .is_some_and(|endpoint| !endpoint.is_empty())
+}
+
+fn otel_logs_enabled() -> bool {
+    env::var("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
+        .ok()
+        .is_some_and(|endpoint| !endpoint.is_empty())
 }
 
 fn build_otlp_span_exporter() -> Result<SpanExporter, String> {
@@ -273,6 +452,17 @@ fn build_otlp_metric_exporter() -> Result<MetricExporter, String> {
     exporter_builder.build().map_err(|err| err.to_string())
 }
 
+fn build_otlp_log_exporter() -> Result<LogExporter, String> {
+    let endpoint = resolve_otlp_logs_endpoint();
+    let headers = resolve_otlp_headers("OTEL_EXPORTER_OTLP_LOGS_HEADERS");
+
+    let mut exporter_builder = LogExporter::builder().with_http().with_endpoint(endpoint);
+    if !headers.is_empty() {
+        exporter_builder = exporter_builder.with_headers(headers);
+    }
+    exporter_builder.build().map_err(|err| err.to_string())
+}
+
 fn resolve_otlp_headers(signal_specific_header_env: &str) -> HashMap<String, String> {
     let mut headers = parse_otlp_headers(env::var("OTEL_EXPORTER_OTLP_HEADERS").ok());
     for (key, value) in parse_otlp_headers(env::var(signal_specific_header_env).ok()) {
@@ -285,12 +475,6 @@ fn resolve_otlp_trace_endpoint() -> String {
     if let Ok(endpoint) = env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
         && !endpoint.is_empty()
     {
-        return endpoint;
-    }
-
-    if let Ok(endpoint) = env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-        && !endpoint.is_empty()
-    {
         return ensure_signal_path(endpoint, "traces");
     }
 
@@ -301,16 +485,19 @@ fn resolve_otlp_metrics_endpoint() -> String {
     if let Ok(endpoint) = env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
         && !endpoint.is_empty()
     {
-        return endpoint;
-    }
-
-    if let Ok(endpoint) = env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-        && !endpoint.is_empty()
-    {
         return ensure_signal_path(endpoint, "metrics");
     }
 
     "http://127.0.0.1:4318/v1/metrics".to_string()
+}
+
+fn resolve_otlp_logs_endpoint() -> String {
+    if let Ok(endpoint) = env::var("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
+        && !endpoint.is_empty()
+    {
+        return ensure_signal_path(endpoint, "logs");
+    }
+    "http://127.0.0.1:4318/v1/logs".to_string()
 }
 
 fn ensure_signal_path(endpoint: String, signal: &str) -> String {
@@ -421,6 +608,43 @@ pub fn record_poll_cycle(result: &str) {
     );
 }
 
+pub fn record_enqueue(queue: &str, result: &str, duration_ms: f64) {
+    let Some(metrics) = RRQ_METRICS.get() else {
+        return;
+    };
+    let attrs = [
+        ("queue", Value::from(queue.to_string())),
+        ("result", Value::from(result.to_string())),
+    ];
+    add_counter(&metrics.enqueue_total, 1, &attrs);
+    record_histogram(&metrics.enqueue_duration_ms, duration_ms, &attrs);
+}
+
+pub fn record_claim_attempt(queue: &str) {
+    let Some(metrics) = RRQ_METRICS.get() else {
+        return;
+    };
+    add_counter(
+        &metrics.claim_attempt_total,
+        1,
+        &[("queue", Value::from(queue.to_string()))],
+    );
+}
+
+pub fn record_claim_miss(queue: &str, reason: &str) {
+    let Some(metrics) = RRQ_METRICS.get() else {
+        return;
+    };
+    add_counter(
+        &metrics.claim_miss_total,
+        1,
+        &[
+            ("queue", Value::from(queue.to_string())),
+            ("reason", Value::from(reason.to_string())),
+        ],
+    );
+}
+
 pub fn record_jobs_fetched(queue: &str, fetched: u64) {
     if fetched == 0 {
         return;
@@ -495,9 +719,61 @@ impl<'a> Extractor for HashMapExtractor<'a> {
     }
 }
 
+struct HashMapInjector<'a>(&'a mut HashMap<String, String>);
+
+impl<'a> Injector for HashMapInjector<'a> {
+    fn set(&mut self, key: &str, value: String) {
+        self.0.insert(key.to_string(), value);
+    }
+}
+
+fn lookup_value_in_params<'a>(
+    params: &'a Map<String, JsonValue>,
+    path: &str,
+) -> Option<&'a JsonValue> {
+    let cleaned = path.trim().trim_start_matches("params.");
+    if cleaned.is_empty() {
+        return None;
+    }
+    let mut parts = cleaned.split('.');
+    let first = parts.next()?;
+    let mut current = params.get(first)?;
+    for part in parts {
+        if part.is_empty() {
+            return None;
+        }
+        current = current.as_object()?.get(part)?;
+    }
+    Some(current)
+}
+
+fn scalar_value_to_string(value: &JsonValue) -> Option<String> {
+    match value {
+        JsonValue::String(v) if !v.is_empty() => Some(v.clone()),
+        JsonValue::Bool(v) => Some(v.to_string()),
+        JsonValue::Number(v) => Some(v.to_string()),
+        _ => None,
+    }
+}
+
+fn truncate_utf8(value: &str, max_len: usize) -> String {
+    if value.len() <= max_len {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(max_len);
+    for ch in value.chars() {
+        if out.len() + ch.len_utf8() > max_len {
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn parse_log_format_handles_pretty_values() {
@@ -512,6 +788,86 @@ mod tests {
         assert_eq!(parse_log_format("json"), LogFormat::Json);
         assert_eq!(parse_log_format(""), LogFormat::Json);
         assert_eq!(parse_log_format("nope"), LogFormat::Json);
+    }
+
+    #[test]
+    fn inject_current_trace_context_preserves_existing_entries() {
+        let mut existing = HashMap::new();
+        existing.insert("session_id".to_string(), "sess-1".to_string());
+
+        let merged =
+            inject_current_trace_context(Some(existing)).expect("expected merged trace context");
+
+        assert_eq!(merged.get("session_id").map(String::as_str), Some("sess-1"));
+    }
+
+    #[test]
+    fn extract_correlation_context_maps_nested_and_scalar_values() {
+        let params = json!({
+            "session": { "id": "sess-42" },
+            "message_id": 123,
+            "retry": true
+        })
+        .as_object()
+        .expect("object params")
+        .clone();
+
+        let mappings = HashMap::from([
+            ("session_id".to_string(), "session.id".to_string()),
+            ("message_id".to_string(), "params.message_id".to_string()),
+            ("retry_flag".to_string(), "retry".to_string()),
+        ]);
+
+        let extracted =
+            extract_correlation_context(&params, &mappings, None).expect("expected correlation");
+
+        assert_eq!(
+            extracted.get("session_id").map(String::as_str),
+            Some("sess-42")
+        );
+        assert_eq!(extracted.get("message_id").map(String::as_str), Some("123"));
+        assert_eq!(
+            extracted.get("retry_flag").map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn extract_correlation_context_prefers_trace_context_value() {
+        let params = json!({
+            "session": { "id": "sess-from-params" }
+        })
+        .as_object()
+        .expect("object params")
+        .clone();
+        let mappings = HashMap::from([("session_id".to_string(), "session.id".to_string())]);
+        let trace_context =
+            HashMap::from([("session_id".to_string(), "sess-from-trace".to_string())]);
+
+        let extracted = extract_correlation_context(&params, &mappings, Some(&trace_context))
+            .expect("expected correlation");
+
+        assert_eq!(
+            extracted.get("session_id").map(String::as_str),
+            Some("sess-from-trace")
+        );
+    }
+
+    #[test]
+    fn extract_correlation_context_skips_non_scalar_values() {
+        let params = json!({
+            "object": { "nested": "value" },
+            "list": [1, 2, 3]
+        })
+        .as_object()
+        .expect("object params")
+        .clone();
+        let mappings = HashMap::from([
+            ("obj".to_string(), "object".to_string()),
+            ("list".to_string(), "list".to_string()),
+        ]);
+
+        assert_eq!(extract_correlation_context(&params, &mappings, None), None);
     }
 
     #[test]

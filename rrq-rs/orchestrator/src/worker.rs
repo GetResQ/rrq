@@ -280,12 +280,12 @@ impl RRQWorker {
                         continue;
                     }
                     let fetch_span = tracing::debug_span!(
-                        "rrq.fetch_queue",
+                        "rrq.claim",
                         "rrq.queue" = %queue_name,
                         "rrq.pass" = pass,
                         "rrq.requested" = request_count,
-                        "rrq.ready" = Empty,
-                        "rrq.fetch_ms" = Empty
+                        "rrq.claimed" = Empty,
+                        "rrq.claim_ms" = Empty
                     );
                     let fetch_started = Instant::now();
                     let provisional_lock_timeout_ms = self
@@ -298,6 +298,7 @@ impl RRQWorker {
                         return Err(anyhow::anyhow!("lock_timeout_ms must be positive"));
                     }
                     let claim_start_time = Utc::now();
+                    telemetry::record_claim_attempt(&queue_name);
                     let claimed = self
                         .job_store
                         .atomic_claim_ready_jobs(
@@ -310,11 +311,12 @@ impl RRQWorker {
                         .instrument(fetch_span.clone())
                         .await?;
                     fetch_span.record(
-                        "rrq.fetch_ms",
+                        "rrq.claim_ms",
                         fetch_started.elapsed().as_secs_f64() * 1000.0,
                     );
-                    fetch_span.record("rrq.ready", claimed.len() as i64);
+                    fetch_span.record("rrq.claimed", claimed.len() as i64);
                     if claimed.is_empty() {
+                        telemetry::record_claim_miss(&queue_name, "none_ready");
                         continue;
                     }
                     telemetry::record_jobs_fetched(&queue_name, claimed.len() as u64);
@@ -329,6 +331,11 @@ impl RRQWorker {
                     {
                         Ok(job_defs) => job_defs,
                         Err(err) => {
+                            tracing::warn!(
+                                "rrq.queue" = %queue_name,
+                                error = %err,
+                                "failed to load claimed job definitions; releasing claims"
+                            );
                             self.release_remaining_claimed_jobs_without_definitions(
                                 &queue_name,
                                 &claimed,
@@ -342,6 +349,11 @@ impl RRQWorker {
                         let job_id = claimed[index].as_str();
                         let job_opt = job_defs.get(index).and_then(Option::as_ref);
                         if fetched >= count || self.shutdown.load(Ordering::SeqCst) {
+                            tracing::warn!(
+                                "rrq.queue" = %queue_name,
+                                "rrq.job_id" = %job_id,
+                                "worker shutdown or fetch cap reached during claimed batch; releasing job"
+                            );
                             self.release_remaining_claimed_jobs(
                                 &queue_name,
                                 &claimed[index..],
@@ -355,6 +367,11 @@ impl RRQWorker {
                         let job = match job_opt {
                             Some(job) => job,
                             None => {
+                                tracing::warn!(
+                                    "rrq.queue" = %queue_name,
+                                    "rrq.job_id" = %job_id,
+                                    "claimed job definition missing/malformed; re-queueing"
+                                );
                                 self.release_claimed_job_without_definition(
                                     &queue_name,
                                     job_id,
@@ -374,6 +391,11 @@ impl RRQWorker {
                         {
                             Some(lock_timeout_ms) => lock_timeout_ms,
                             None => {
+                                tracing::warn!(
+                                    "rrq.queue" = %queue_name,
+                                    "rrq.job_id" = %job.id,
+                                    "lock timeout overflow while preparing claimed job; releasing claimed remainder"
+                                );
                                 self.release_claimed_jobs_from_index(
                                     &queue_name,
                                     &claimed,
@@ -386,6 +408,11 @@ impl RRQWorker {
                             }
                         };
                         if lock_timeout_ms <= 0 {
+                            tracing::warn!(
+                                "rrq.queue" = %queue_name,
+                                "rrq.job_id" = %job.id,
+                                "invalid non-positive lock timeout while preparing claimed job; releasing claimed remainder"
+                            );
                             self.release_claimed_jobs_from_index(
                                 &queue_name,
                                 &claimed,
@@ -403,6 +430,12 @@ impl RRQWorker {
                         {
                             Ok(lock_refreshed) => lock_refreshed,
                             Err(err) => {
+                                tracing::warn!(
+                                    "rrq.queue" = %queue_name,
+                                    "rrq.job_id" = %job.id,
+                                    error = %err,
+                                    "failed to refresh claimed job lock; releasing claimed remainder"
+                                );
                                 self.release_claimed_jobs_from_index(
                                     &queue_name,
                                     &claimed,
@@ -417,6 +450,12 @@ impl RRQWorker {
                             }
                         };
                         if !lock_refreshed {
+                            telemetry::record_claim_miss(&queue_name, "lock_refresh_lost");
+                            tracing::warn!(
+                                "rrq.queue" = %queue_name,
+                                "rrq.job_id" = %job.id,
+                                "lost claimed job lock ownership before dispatch; re-queueing"
+                            );
                             self.release_claimed_job(
                                 &queue_name,
                                 &job.id,
@@ -431,6 +470,12 @@ impl RRQWorker {
                         let permit = match self.semaphore.clone().acquire_owned().await {
                             Ok(permit) => permit,
                             Err(err) => {
+                                tracing::error!(
+                                    "rrq.queue" = %queue_name,
+                                    "rrq.job_id" = %job.id,
+                                    error = %err,
+                                    "failed to acquire worker permit for claimed job; releasing claimed remainder"
+                                );
                                 self.release_claimed_jobs_from_index(
                                     &queue_name,
                                     &claimed,
@@ -836,6 +881,9 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
     if let Some(trace_context) = job.trace_context.as_ref() {
         telemetry::set_parent_from_trace_context(&span, trace_context);
     }
+    if let Some(correlation_context) = job.correlation_context.as_ref() {
+        telemetry::apply_correlation_context_to_span(&span, correlation_context);
+    }
     let _enter = span.enter();
     let job_timeout = job
         .job_timeout_seconds
@@ -934,6 +982,7 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
             queue_name: queue_name.clone(),
             deadline: Some(deadline),
             trace_context: job.trace_context.clone(),
+            correlation_context: job.correlation_context.clone(),
             worker_id: Some(worker_id.clone()),
         },
     };
@@ -953,6 +1002,9 @@ async fn execute_job(job: Job, queue_name: String, context: ExecuteJobContext) -
         "rrq.queue" = %queue_name,
         "rrq.timeout_seconds" = job_timeout
     );
+    if let Some(correlation_context) = job.correlation_context.as_ref() {
+        telemetry::apply_correlation_context_to_span(&dispatch_span, correlation_context);
+    }
     let exec_result = runner
         .execute_with_timeout(
             request,
@@ -1120,6 +1172,7 @@ async fn handle_execution_outcome(
                 span.record("rrq.retry_delay_ms", delay * 1000.0);
             }
             tracing::warn!(
+                "rrq.job_id" = %job.id,
                 outcome = "retry",
                 duration_ms,
                 retry_after_seconds = outcome.retry_after_seconds,
@@ -1142,6 +1195,7 @@ async fn handle_execution_outcome(
             handle_job_timeout(job, queue_name, job_store, &message).await?;
             span.record("rrq.outcome", "timeout");
             tracing::warn!(
+                "rrq.job_id" = %job.id,
                 outcome = "timeout",
                 duration_ms,
                 error_message = %message,
@@ -1162,6 +1216,7 @@ async fn handle_execution_outcome(
                 handle_fatal_job_error(job, queue_name, &message, job_store).await?;
                 span.record("rrq.outcome", "fatal");
                 tracing::error!(
+                    "rrq.job_id" = %job.id,
                     outcome = "fatal",
                     duration_ms,
                     error_type = "handler_not_found",
@@ -1177,6 +1232,7 @@ async fn handle_execution_outcome(
                 process_failure_job(job, queue_name, settings, job_store, &message).await?;
                 span.record("rrq.outcome", "error");
                 tracing::error!(
+                    "rrq.job_id" = %job.id,
                     outcome = "error",
                     duration_ms,
                     error_type = error_type.unwrap_or("unknown"),
@@ -1225,6 +1281,12 @@ async fn move_to_dlq(
     job_store
         .move_job_to_dlq(&job.id, &dlq_name, error_message, Utc::now())
         .await?;
+    tracing::warn!(
+        "rrq.job_id" = %job.id,
+        "rrq.dlq" = %dlq_name,
+        error_message = %error_message,
+        "job moved to dlq"
+    );
     if let Some(unique_key) = job.job_unique_key.as_ref() {
         job_store.release_unique_job_lock(unique_key).await?;
     }
@@ -1241,6 +1303,12 @@ async fn process_retry_job(
 ) -> Result<()> {
     let anticipated_retry = job.current_retries + 1;
     if anticipated_retry >= job.max_retries {
+        tracing::warn!(
+            "rrq.job_id" = %job.id,
+            retries = anticipated_retry,
+            max_retries = job.max_retries,
+            "retry budget exhausted; moving job to dlq"
+        );
         job_store.increment_job_retries(&job.id).await?;
         move_to_dlq(job, queue_name, job_store, error_message).await?;
         return Ok(());
@@ -1276,10 +1344,12 @@ async fn process_retry_job(
         .await;
 
     tracing::info!(
-        "retrying job {} attempt {}/{}",
-        job.id,
-        new_retry,
-        job.max_retries
+        "rrq.job_id" = %job.id,
+        retries = new_retry,
+        max_retries = job.max_retries,
+        retry_after_seconds = delay_seconds,
+        retry_at = %next_run_time.to_rfc3339(),
+        "retrying job"
     );
     Ok(())
 }
@@ -1293,6 +1363,12 @@ async fn process_failure_job(
 ) -> Result<()> {
     let anticipated_retry = job.current_retries + 1;
     if anticipated_retry >= job.max_retries {
+        tracing::warn!(
+            "rrq.job_id" = %job.id,
+            retries = anticipated_retry,
+            max_retries = job.max_retries,
+            "failure exhausted retry budget; moving job to dlq"
+        );
         job_store.increment_job_retries(&job.id).await?;
         move_to_dlq(job, queue_name, job_store, error_message).await?;
         return Ok(());
@@ -1325,10 +1401,12 @@ async fn process_failure_job(
         .await;
 
     tracing::info!(
-        "retrying job {} attempt {}/{}",
-        job.id,
-        new_retry,
-        job.max_retries
+        "rrq.job_id" = %job.id,
+        retries = new_retry,
+        max_retries = job.max_retries,
+        retry_after_seconds = delay_seconds,
+        retry_at = %next_run_time.to_rfc3339(),
+        "retrying failed job"
     );
     Ok(())
 }
@@ -1754,6 +1832,7 @@ mod tests {
             dlq_name: Some(dlq_name.to_string()),
             worker_id: None,
             trace_context: None,
+            correlation_context: None,
         }
     }
 

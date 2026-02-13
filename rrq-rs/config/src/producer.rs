@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::settings::RRQSettings;
 
@@ -12,6 +13,8 @@ pub struct ProducerSettings {
     pub job_timeout_seconds: i64,
     pub result_ttl_seconds: i64,
     pub idempotency_ttl_seconds: i64,
+    #[serde(default)]
+    pub correlation_mappings: HashMap<String, String>,
 }
 
 impl From<&RRQSettings> for ProducerSettings {
@@ -23,6 +26,7 @@ impl From<&RRQSettings> for ProducerSettings {
             job_timeout_seconds: settings.default_job_timeout_seconds,
             result_ttl_seconds: settings.default_result_ttl_seconds,
             idempotency_ttl_seconds: settings.default_unique_job_lock_ttl_seconds,
+            correlation_mappings: settings.correlation_mappings.clone(),
         }
     }
 }

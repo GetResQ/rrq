@@ -124,6 +124,7 @@ pub(crate) async fn debug_generate_jobs(
             dlq_name: None,
             worker_id: None,
             trace_context: None,
+            correlation_context: None,
         };
 
         match status.as_str() {
