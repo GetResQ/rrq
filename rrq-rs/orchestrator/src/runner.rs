@@ -1337,6 +1337,25 @@ mod tests {
         (listener, addr)
     }
 
+    fn build_execution_request(request_id: &str, job_id: &str) -> ExecutionRequest {
+        ExecutionRequest {
+            protocol_version: rrq_protocol::PROTOCOL_VERSION.to_string(),
+            request_id: request_id.to_string(),
+            job_id: job_id.to_string(),
+            function_name: "echo".to_string(),
+            params: HashMap::new(),
+            context: rrq_protocol::ExecutionContext {
+                job_id: job_id.to_string(),
+                attempt: 1,
+                enqueue_time: "2024-01-01T00:00:00Z".parse().unwrap(),
+                queue_name: "default".to_string(),
+                deadline: None,
+                trace_context: None,
+                worker_id: None,
+            },
+        }
+    }
+
     #[tokio::test]
     async fn pool_enforces_per_process_max_in_flight() {
         let pool = Arc::new(build_test_pool(1));
@@ -1803,6 +1822,185 @@ mod tests {
         let mut guard = proc.lock().await;
         let _ = guard.child.kill().await;
         let _ = guard.child.wait().await;
+    }
+
+    #[tokio::test]
+    async fn execute_with_process_reuses_persistent_connection() {
+        let (listener, socket_addr) = bind_tcp_listener().await;
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            for (request_id, job_id) in [("req-1", "job-1"), ("req-2", "job-2")] {
+                let message = read_message(&mut stream).await.unwrap().unwrap();
+                let request = match message {
+                    RunnerMessage::Request { payload } => payload,
+                    _ => panic!("expected request"),
+                };
+                assert_eq!(request.request_id, request_id);
+                assert_eq!(request.job_id, job_id);
+                let response =
+                    ExecutionOutcome::success(job_id, request_id, serde_json::json!({"ok": true}));
+                write_message(&mut stream, &RunnerMessage::Response { payload: response })
+                    .await
+                    .unwrap();
+            }
+            assert!(
+                timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "expected requests to reuse the same socket connection"
+            );
+        });
+
+        let child = Command::new("sleep").arg("60").spawn().unwrap();
+        let process = SocketProcess {
+            child,
+            socket: socket_addr,
+            stdout_task: None,
+            stderr_task: None,
+            permits: Arc::new(Semaphore::new(1)),
+            connection: None,
+        };
+        let proc = Arc::new(Mutex::new(process));
+        let runner = SocketRunner {
+            pool: Arc::new(build_test_pool(1)),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        let first = runner
+            .execute_with_process(&proc, &build_execution_request("req-1", "job-1"))
+            .await
+            .unwrap();
+        assert_eq!(first.request_id.as_deref(), Some("req-1"));
+
+        let second = runner
+            .execute_with_process(&proc, &build_execution_request("req-2", "job-2"))
+            .await
+            .unwrap();
+        assert_eq!(second.request_id.as_deref(), Some("req-2"));
+
+        server.await.unwrap();
+        let mut guard = proc.lock().await;
+        let _ = guard.child.kill().await;
+        let _ = guard.child.wait().await;
+    }
+
+    #[tokio::test]
+    async fn execute_with_process_reconnects_after_connection_close() {
+        let (listener, socket_addr) = bind_tcp_listener().await;
+
+        let server = tokio::spawn(async move {
+            for (request_id, job_id) in [("req-1", "job-1"), ("req-2", "job-2")] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let message = read_message(&mut stream).await.unwrap().unwrap();
+                let request = match message {
+                    RunnerMessage::Request { payload } => payload,
+                    _ => panic!("expected request"),
+                };
+                assert_eq!(request.request_id, request_id);
+                assert_eq!(request.job_id, job_id);
+                let response =
+                    ExecutionOutcome::success(job_id, request_id, serde_json::json!({"ok": true}));
+                write_message(&mut stream, &RunnerMessage::Response { payload: response })
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let child = Command::new("sleep").arg("60").spawn().unwrap();
+        let process = SocketProcess {
+            child,
+            socket: socket_addr,
+            stdout_task: None,
+            stderr_task: None,
+            permits: Arc::new(Semaphore::new(1)),
+            connection: None,
+        };
+        let proc = Arc::new(Mutex::new(process));
+        let runner = SocketRunner {
+            pool: Arc::new(build_test_pool(1)),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        let first = runner
+            .execute_with_process(&proc, &build_execution_request("req-1", "job-1"))
+            .await
+            .unwrap();
+        assert_eq!(first.request_id.as_deref(), Some("req-1"));
+
+        let second = runner
+            .execute_with_process(&proc, &build_execution_request("req-2", "job-2"))
+            .await
+            .unwrap();
+        assert_eq!(second.request_id.as_deref(), Some("req-2"));
+
+        server.await.unwrap();
+        let mut guard = proc.lock().await;
+        let _ = guard.child.kill().await;
+        let _ = guard.child.wait().await;
+    }
+
+    #[tokio::test]
+    async fn persistent_connection_matches_out_of_order_responses() {
+        let (listener, socket_addr) = bind_tcp_listener().await;
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let first = match read_message(&mut stream).await.unwrap().unwrap() {
+                RunnerMessage::Request { payload } => payload,
+                _ => panic!("expected first request"),
+            };
+            let second = match read_message(&mut stream).await.unwrap().unwrap() {
+                RunnerMessage::Request { payload } => payload,
+                _ => panic!("expected second request"),
+            };
+
+            let second_response = ExecutionOutcome::success(
+                second.job_id.clone(),
+                second.request_id.clone(),
+                serde_json::json!({"order": 2}),
+            );
+            write_message(
+                &mut stream,
+                &RunnerMessage::Response {
+                    payload: second_response,
+                },
+            )
+            .await
+            .unwrap();
+
+            let first_response = ExecutionOutcome::success(
+                first.job_id.clone(),
+                first.request_id.clone(),
+                serde_json::json!({"order": 1}),
+            );
+            write_message(
+                &mut stream,
+                &RunnerMessage::Response {
+                    payload: first_response,
+                },
+            )
+            .await
+            .unwrap();
+        });
+
+        let connection = PersistentProcessConnection::connect(socket_addr, 64)
+            .await
+            .unwrap();
+        let request_one = build_execution_request("req-1", "job-1");
+        let request_two = build_execution_request("req-2", "job-2");
+
+        let (outcome_one, outcome_two) = tokio::join!(
+            connection.execute(&request_one, Some(Duration::from_secs(1))),
+            connection.execute(&request_two, Some(Duration::from_secs(1)))
+        );
+        let outcome_one = outcome_one.unwrap();
+        let outcome_two = outcome_two.unwrap();
+
+        assert_eq!(outcome_one.request_id.as_deref(), Some("req-1"));
+        assert_eq!(outcome_two.request_id.as_deref(), Some("req-2"));
+
+        server.await.unwrap();
     }
 
     #[test]

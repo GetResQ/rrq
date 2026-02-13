@@ -1138,6 +1138,7 @@ mod tests {
         let queue_name = ctx.settings.default_queue_name.clone();
         let dlq_name = ctx.settings.default_dlq_name.clone();
         let worker_id = "worker-batch";
+        let base_score = Utc::now().timestamp_millis() - 1_000;
 
         let mut job_ids = Vec::new();
         for index in 0..3 {
@@ -1145,11 +1146,7 @@ mod tests {
             job.id = format!("batch-job-{index}");
             ctx.store.save_job_definition(&job).await.unwrap();
             ctx.store
-                .add_job_to_queue(
-                    &queue_name,
-                    &job.id,
-                    (Utc::now().timestamp_millis() + index) as f64,
-                )
+                .add_job_to_queue(&queue_name, &job.id, (base_score + index as i64) as f64)
                 .await
                 .unwrap();
             job_ids.push(job.id);
@@ -1185,6 +1182,102 @@ mod tests {
             let _ = ctx.store.release_job_lock(&job_id).await;
             let _ = ctx.store.remove_active_job(worker_id, &job_id).await;
         }
+    }
+
+    #[tokio::test]
+    async fn job_store_atomic_claim_ready_jobs_skips_locked_candidates() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+        let worker_id = "worker-claim";
+        let locked_job_id = "batch-skip-job-0";
+        let base_score = Utc::now().timestamp_millis() - 1_000;
+
+        for index in 0..3 {
+            let mut job = build_job(&queue_name, &dlq_name);
+            job.id = format!("batch-skip-job-{index}");
+            ctx.store.save_job_definition(&job).await.unwrap();
+            ctx.store
+                .add_job_to_queue(&queue_name, &job.id, (base_score + index as i64) as f64)
+                .await
+                .unwrap();
+        }
+
+        let locked = ctx
+            .store
+            .try_lock_job(locked_job_id, "other-worker", 10_000)
+            .await
+            .unwrap();
+        assert!(locked);
+
+        let claimed = ctx
+            .store
+            .atomic_claim_ready_jobs(&queue_name, worker_id, 10_000, 2, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 2);
+        assert!(!claimed.iter().any(|id| id == locked_job_id));
+        assert_eq!(
+            ctx.store.get_job_lock_owner(locked_job_id).await.unwrap(),
+            Some("other-worker".to_string())
+        );
+        assert!(
+            ctx.store
+                .is_job_queued(&queue_name, locked_job_id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(ctx.store.queue_size(&queue_name).await.unwrap(), 1);
+
+        for job_id in claimed {
+            let _ = ctx.store.remove_active_job(worker_id, &job_id).await;
+            let _ = ctx.store.release_job_lock(&job_id).await;
+        }
+        let _ = ctx.store.release_job_lock(locked_job_id).await;
+    }
+
+    #[tokio::test]
+    async fn job_store_refresh_job_lock_timeout_requires_owner() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+        let mut job = build_job(&queue_name, &dlq_name);
+        job.id = "refresh-lock-job".to_string();
+        ctx.store.save_job_definition(&job).await.unwrap();
+
+        let locked = ctx
+            .store
+            .try_lock_job(&job.id, "worker-owner", 1_000)
+            .await
+            .unwrap();
+        assert!(locked);
+
+        let refreshed = ctx
+            .store
+            .refresh_job_lock_timeout(&job.id, "other-worker", 5_000)
+            .await
+            .unwrap();
+        assert!(!refreshed);
+        assert_eq!(
+            ctx.store.get_job_lock_owner(&job.id).await.unwrap(),
+            Some("worker-owner".to_string())
+        );
+
+        let refreshed = ctx
+            .store
+            .refresh_job_lock_timeout(&job.id, "worker-owner", 5_000)
+            .await
+            .unwrap();
+        assert!(refreshed);
+
+        let missing_lock_refreshed = ctx
+            .store
+            .refresh_job_lock_timeout("missing-job", "worker-owner", 5_000)
+            .await
+            .unwrap();
+        assert!(!missing_lock_refreshed);
+
+        let _ = ctx.store.release_job_lock(&job.id).await;
     }
 
     #[tokio::test]
