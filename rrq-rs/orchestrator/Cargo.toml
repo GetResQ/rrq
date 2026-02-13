@@ -37,7 +37,7 @@ uuid = { version = "1.20.0", features = ["v4"] }
 rand = "0.9.2"
 opentelemetry = { version = "0.31.0", default-features = false, features = ["trace", "metrics"] }
 opentelemetry-otlp = { version = "0.31.0", default-features = false, features = ["http-proto", "reqwest-client", "reqwest-rustls-webpki-roots", "trace", "metrics"] }
-opentelemetry_sdk = { version = "0.31.0", default-features = false, features = ["trace", "metrics", "rt-tokio", "experimental_trace_batch_span_processor_with_async_runtime"] }
+opentelemetry_sdk = { version = "0.31.0", default-features = false, features = ["trace", "metrics", "rt-tokio", "experimental_trace_batch_span_processor_with_async_runtime", "experimental_metrics_periodicreader_with_async_runtime"] }
 tracing-opentelemetry = "0.32.1"
 
 rrq-protocol = { version = "0.9.20", path = "../protocol" }

@@ -9,6 +9,7 @@ use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::{KeyValue, Value};
 use opentelemetry_otlp::{MetricExporter, SpanExporter, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::metrics as sdkmetrics;
+use opentelemetry_sdk::metrics::periodic_reader_with_async_runtime::PeriodicReader as AsyncPeriodicReader;
 use opentelemetry_sdk::propagation::{BaggagePropagator, TraceContextPropagator};
 use opentelemetry_sdk::trace::span_processor_with_async_runtime::BatchSpanProcessor;
 use opentelemetry_sdk::{Resource, runtime, trace as sdktrace};
@@ -206,9 +207,10 @@ fn init_metrics_provider(metadata: &ResourceMetadata) -> Option<String> {
         Err(err) => return Some(err),
     };
 
+    let reader = AsyncPeriodicReader::builder(exporter, runtime::Tokio).build();
     let meter_provider = sdkmetrics::SdkMeterProvider::builder()
         .with_resource(build_resource(metadata))
-        .with_periodic_exporter(exporter)
+        .with_reader(reader)
         .build();
     global::set_meter_provider(meter_provider.clone());
 
