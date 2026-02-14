@@ -182,21 +182,22 @@ fn default_env_filter() -> EnvFilter {
 }
 
 fn warn_if_global_otlp_endpoint_only() {
-    let has_global = env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .ok()
-        .is_some_and(|value| !value.is_empty());
+    let has_global = env_optional_nonempty("OTEL_EXPORTER_OTLP_ENDPOINT").is_some();
     if !has_global {
         return;
     }
-    let missing_traces = !otel_trace_enabled();
-    let missing_metrics = !otel_metrics_enabled();
-    let missing_logs = !otel_logs_enabled();
-    if missing_traces || missing_metrics || missing_logs {
-        tracing::warn!(
-            missing_traces,
-            missing_metrics,
-            missing_logs,
-            "OTEL_EXPORTER_OTLP_ENDPOINT is set but RRQ requires per-signal OTLP endpoint variables: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, OTEL_EXPORTER_OTLP_METRICS_ENDPOINT, OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
+    let signal_overrides = [
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+    ]
+    .iter()
+    .filter(|name| env::var(name).is_ok())
+    .count();
+    if signal_overrides < 3 {
+        tracing::debug!(
+            signal_overrides,
+            "using OTEL_EXPORTER_OTLP_ENDPOINT fallback for signals without explicit OTEL_EXPORTER_OTLP_{{TRACES|METRICS|LOGS}}_ENDPOINT"
         );
     }
 }
@@ -411,25 +412,20 @@ fn init_otel_log_layer(
 }
 
 fn otel_trace_enabled() -> bool {
-    env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-        .ok()
-        .is_some_and(|endpoint| !endpoint.is_empty())
+    resolve_otlp_trace_endpoint().is_some()
 }
 
 fn otel_metrics_enabled() -> bool {
-    env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
-        .ok()
-        .is_some_and(|endpoint| !endpoint.is_empty())
+    resolve_otlp_metrics_endpoint().is_some()
 }
 
 fn otel_logs_enabled() -> bool {
-    env::var("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
-        .ok()
-        .is_some_and(|endpoint| !endpoint.is_empty())
+    resolve_otlp_logs_endpoint().is_some()
 }
 
 fn build_otlp_span_exporter() -> Result<SpanExporter, String> {
-    let endpoint = resolve_otlp_trace_endpoint();
+    let endpoint = resolve_otlp_trace_endpoint()
+        .ok_or_else(|| "OTLP traces endpoint is not configured".to_string())?;
     let headers = resolve_otlp_headers("OTEL_EXPORTER_OTLP_TRACES_HEADERS");
 
     let mut exporter_builder = SpanExporter::builder().with_http().with_endpoint(endpoint);
@@ -440,7 +436,8 @@ fn build_otlp_span_exporter() -> Result<SpanExporter, String> {
 }
 
 fn build_otlp_metric_exporter() -> Result<MetricExporter, String> {
-    let endpoint = resolve_otlp_metrics_endpoint();
+    let endpoint = resolve_otlp_metrics_endpoint()
+        .ok_or_else(|| "OTLP metrics endpoint is not configured".to_string())?;
     let headers = resolve_otlp_headers("OTEL_EXPORTER_OTLP_METRICS_HEADERS");
 
     let mut exporter_builder = MetricExporter::builder()
@@ -453,7 +450,8 @@ fn build_otlp_metric_exporter() -> Result<MetricExporter, String> {
 }
 
 fn build_otlp_log_exporter() -> Result<LogExporter, String> {
-    let endpoint = resolve_otlp_logs_endpoint();
+    let endpoint = resolve_otlp_logs_endpoint()
+        .ok_or_else(|| "OTLP logs endpoint is not configured".to_string())?;
     let headers = resolve_otlp_headers("OTEL_EXPORTER_OTLP_LOGS_HEADERS");
 
     let mut exporter_builder = LogExporter::builder().with_http().with_endpoint(endpoint);
@@ -471,42 +469,41 @@ fn resolve_otlp_headers(signal_specific_header_env: &str) -> HashMap<String, Str
     headers
 }
 
-fn resolve_otlp_trace_endpoint() -> String {
-    let explicit_endpoint = env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").ok();
-    select_signal_endpoint(
-        explicit_endpoint.as_deref(),
-        "http://127.0.0.1:4318",
-        "traces",
-    )
+fn resolve_otlp_trace_endpoint() -> Option<String> {
+    resolve_otlp_signal_endpoint("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "traces")
 }
 
-fn resolve_otlp_metrics_endpoint() -> String {
-    let explicit_endpoint = env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").ok();
-    select_signal_endpoint(
-        explicit_endpoint.as_deref(),
-        "http://127.0.0.1:4318",
-        "metrics",
-    )
+fn resolve_otlp_metrics_endpoint() -> Option<String> {
+    resolve_otlp_signal_endpoint("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "metrics")
 }
 
-fn resolve_otlp_logs_endpoint() -> String {
-    let explicit_endpoint = env::var("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT").ok();
-    select_signal_endpoint(
-        explicit_endpoint.as_deref(),
-        "http://127.0.0.1:4318",
-        "logs",
-    )
+fn resolve_otlp_logs_endpoint() -> Option<String> {
+    resolve_otlp_signal_endpoint("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "logs")
 }
 
-fn select_signal_endpoint(
-    explicit_endpoint: Option<&str>,
-    default_base_endpoint: &str,
+fn resolve_otlp_signal_endpoint(signal_env: &str, signal: &str) -> Option<String> {
+    let explicit = env::var(signal_env).ok();
+    let global = env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
+    resolve_signal_endpoint_value(explicit.as_deref(), global.as_deref(), signal)
+}
+
+fn nonempty(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn resolve_signal_endpoint_value(
+    signal_endpoint: Option<&str>,
+    global_endpoint: Option<&str>,
     signal: &str,
-) -> String {
-    if let Some(endpoint) = explicit_endpoint.filter(|value| !value.is_empty()) {
-        return endpoint.to_string();
+) -> Option<String> {
+    match signal_endpoint {
+        // Explicit signal-specific setting (including empty) takes precedence.
+        Some(value) => nonempty(Some(value)),
+        None => nonempty(global_endpoint).map(|endpoint| ensure_signal_path(endpoint, signal)),
     }
-    ensure_signal_path(default_base_endpoint.to_string(), signal)
 }
 
 fn ensure_signal_path(endpoint: String, signal: &str) -> String {
@@ -924,26 +921,38 @@ mod tests {
     }
 
     #[test]
-    fn select_signal_endpoint_preserves_explicit_path() {
+    fn resolve_signal_endpoint_value_preserves_explicit_path() {
         assert_eq!(
-            select_signal_endpoint(
+            resolve_signal_endpoint_value(
                 Some("http://collector:4318/custom/traces"),
-                "http://127.0.0.1:4318",
-                "traces"
+                Some("http://global:4318"),
+                "traces",
             ),
-            "http://collector:4318/custom/traces"
+            Some("http://collector:4318/custom/traces".to_string())
         );
     }
 
     #[test]
-    fn select_signal_endpoint_uses_default_when_missing_or_blank() {
+    fn resolve_signal_endpoint_value_falls_back_to_global_for_missing_signal() {
         assert_eq!(
-            select_signal_endpoint(None, "http://collector:4318", "metrics"),
-            "http://collector:4318/v1/metrics"
+            resolve_signal_endpoint_value(None, Some("http://collector:4318"), "traces"),
+            Some("http://collector:4318/v1/traces".to_string())
         );
         assert_eq!(
-            select_signal_endpoint(Some(""), "http://collector:4318", "logs"),
-            "http://collector:4318/v1/logs"
+            resolve_signal_endpoint_value(None, Some("http://collector:4318"), "metrics"),
+            Some("http://collector:4318/v1/metrics".to_string())
+        );
+        assert_eq!(
+            resolve_signal_endpoint_value(None, Some("http://collector:4318"), "logs"),
+            Some("http://collector:4318/v1/logs".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_signal_endpoint_value_disables_signal_on_explicit_empty() {
+        assert_eq!(
+            resolve_signal_endpoint_value(Some(""), Some("http://collector:4318"), "logs"),
+            None
         );
     }
 

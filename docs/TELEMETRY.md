@@ -18,6 +18,9 @@ Orchestrator spans include `rrq.job` plus internal lifecycle spans such as
 RRQ does not auto-inject tracing headers in producers. You must explicitly pass
 `trace_context` when you enqueue.
 
+Producer libraries do not configure OTLP exporters for you. They rely on the
+OpenTelemetry SDK/exporter already configured in your process.
+
 ### Python
 
 ```python
@@ -106,9 +109,11 @@ Enable the `otel` feature and initialize tracing:
 rrq_runner::telemetry::otel::init_tracing("my-runner")?;
 ```
 
-### Runner OTLP endpoint precedence
+### OTLP endpoint precedence (RRQ runtime exporters)
 
-Runner OTLP export uses this precedence per signal (traces/metrics/logs):
+For RRQ components that initialize OTLP exporters (orchestrator and Rust
+runner), endpoint resolution uses this precedence per signal
+(traces/metrics/logs):
 - `OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT` (signal-specific)
 - `OTEL_EXPORTER_OTLP_ENDPOINT` (global fallback)
 - disabled (if neither is set)

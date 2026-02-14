@@ -49,6 +49,7 @@ pub struct RRQWorker {
     burst: bool,
     shutdown: Arc<AtomicBool>,
     queue_cursor: usize,
+    provisional_claim_lock_timeout_ms: i64,
 }
 
 impl RRQWorker {
@@ -84,6 +85,7 @@ impl RRQWorker {
             worker_concurrency
         };
         let runner_routes = settings.runner_routes.clone();
+        let provisional_claim_lock_timeout_ms = provisional_claim_lock_timeout_ms(&settings)?;
         let job_store = JobStore::new(settings.clone()).await?;
         let client = RRQClient::new(settings.clone(), job_store.clone());
         let mut queues = queues.unwrap_or_else(|| vec![settings.default_queue_name.clone()]);
@@ -125,6 +127,7 @@ impl RRQWorker {
             burst,
             shutdown: Arc::new(AtomicBool::new(false)),
             queue_cursor: 0,
+            provisional_claim_lock_timeout_ms,
         })
     }
 
@@ -288,15 +291,6 @@ impl RRQWorker {
                         "rrq.claim_ms" = Empty
                     );
                     let fetch_started = Instant::now();
-                    let provisional_lock_timeout_ms = self
-                        .settings
-                        .default_job_timeout_seconds
-                        .checked_add(self.settings.default_lock_timeout_extension_seconds)
-                        .and_then(|sum| sum.checked_mul(1000))
-                        .ok_or_else(|| anyhow::anyhow!("lock_timeout_ms overflow"))?;
-                    if provisional_lock_timeout_ms <= 0 {
-                        return Err(anyhow::anyhow!("lock_timeout_ms must be positive"));
-                    }
                     let claim_start_time = Utc::now();
                     telemetry::record_claim_attempt(&queue_name);
                     let claimed = self
@@ -304,7 +298,7 @@ impl RRQWorker {
                         .atomic_claim_ready_jobs(
                             &queue_name,
                             &self.worker_id,
-                            provisional_lock_timeout_ms,
+                            self.provisional_claim_lock_timeout_ms,
                             request_count,
                             claim_start_time,
                         )
@@ -737,12 +731,13 @@ impl RRQWorker {
                 }
             }
         }
-        // During forced shutdown we must stop runner execution before re-queueing
-        // claimed/in-flight jobs, otherwise duplicate execution is possible.
-        self.close_runners().await;
         for (_job_id, abort) in aborts {
             abort.abort();
         }
+        // Ensure runner processes are shut down before re-queueing interrupted jobs,
+        // but only after aborting execution tasks so transport teardown doesn't
+        // get misclassified as a real job failure (retry/DLQ).
+        self.close_runners().await;
         for (job_id, info) in running {
             let mut store = self.job_store.clone();
             let job_opt = store.get_job_definition(&job_id).await?;
@@ -788,6 +783,30 @@ impl RRQWorker {
 
         Ok(())
     }
+}
+
+fn provisional_claim_lock_timeout_ms(settings: &RRQSettings) -> Result<i64> {
+    if settings.default_job_timeout_seconds <= 0 {
+        return Err(anyhow::anyhow!(
+            "default_job_timeout_seconds must be positive"
+        ));
+    }
+    if settings.default_lock_timeout_extension_seconds < 0 {
+        return Err(anyhow::anyhow!(
+            "default_lock_timeout_extension_seconds must be >= 0"
+        ));
+    }
+    let lock_timeout_ms = settings
+        .default_job_timeout_seconds
+        .checked_add(settings.default_lock_timeout_extension_seconds)
+        .and_then(|sum| sum.checked_mul(1000))
+        .ok_or_else(|| anyhow::anyhow!("provisional claim lock timeout overflow"))?;
+    if lock_timeout_ms <= 0 {
+        return Err(anyhow::anyhow!(
+            "provisional claim lock timeout must be positive"
+        ));
+    }
+    Ok(lock_timeout_ms)
 }
 
 fn resolve_routed_runner(
@@ -1750,6 +1769,14 @@ mod tests {
         close_called: Arc<AtomicBool>,
     }
 
+    #[derive(Clone)]
+    struct CloseInterruptsExecuteRunner {
+        execute_started: Arc<Notify>,
+        execute_gate: Arc<Notify>,
+        close_started: Arc<Notify>,
+        close_gate: Arc<Notify>,
+    }
+
     impl BlockingRunner {
         fn new() -> Self {
             Self {
@@ -1767,6 +1794,17 @@ mod tests {
                 close_started: Arc::new(Notify::new()),
                 close_gate: Arc::new(Notify::new()),
                 close_called: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+
+    impl CloseInterruptsExecuteRunner {
+        fn new() -> Self {
+            Self {
+                execute_started: Arc::new(Notify::new()),
+                execute_gate: Arc::new(Notify::new()),
+                close_started: Arc::new(Notify::new()),
+                close_gate: Arc::new(Notify::new()),
             }
         }
     }
@@ -1804,6 +1842,23 @@ mod tests {
             self.close_started.notify_waiters();
             self.close_gate.notified().await;
             self.execute_gate.notify_waiters();
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Runner for CloseInterruptsExecuteRunner {
+        async fn execute(&self, _request: ExecutionRequest) -> Result<ExecutionOutcome> {
+            self.execute_started.notify_waiters();
+            self.execute_gate.notified().await;
+            Err(anyhow::anyhow!("runner stopped"))
+        }
+
+        async fn close(&self) -> Result<()> {
+            self.close_started.notify_waiters();
+            // Simulate connection teardown interrupting in-flight execute while shutdown is ongoing.
+            self.execute_gate.notify_waiters();
+            self.close_gate.notified().await;
             Ok(())
         }
     }
@@ -2329,6 +2384,105 @@ mod tests {
                 .is_job_queued(&queue_name, &job.id)
                 .await
                 .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_tasks_aborts_inflight_before_runner_close_to_avoid_retry_or_dlq() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        ctx.settings.default_runner_name = "test".to_string();
+        ctx.settings.runner_enable_inflight_cancel_hints = false;
+        ctx.settings.worker_shutdown_grace_period_seconds = 0.01;
+        let runner = Arc::new(CloseInterruptsExecuteRunner::new());
+        let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+        runners.insert("test".to_string(), runner.clone());
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let job = client
+            .enqueue(
+                "task",
+                serde_json::Map::new(),
+                EnqueueOptions {
+                    max_retries: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let queue_name = normalize_queue_name(&ctx.settings.default_queue_name);
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+
+        let mut worker = RRQWorker::new(
+            ctx.settings.clone(),
+            None,
+            Some("worker-abort-before-close".to_string()),
+            runners,
+            true,
+            1,
+        )
+        .await
+        .unwrap();
+
+        let fetched = worker.poll_for_jobs(1).await.unwrap();
+        assert_eq!(fetched, 1);
+        tokio::time::timeout(Duration::from_secs(1), runner.execute_started.notified())
+            .await
+            .expect("runner should start execution");
+
+        let mut inspect_store = worker.job_store.clone();
+        let mut drain = Box::pin(worker.drain_tasks());
+        tokio::select! {
+            _ = runner.close_started.notified() => {}
+            result = &mut drain => {
+                panic!("drain_tasks completed before runner close started: {result:?}");
+            }
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                panic!("runner close was not invoked during forced drain");
+            }
+        }
+
+        // While close() is blocked, in-flight execution should already be aborted and must not
+        // consume retry budget or move job to DLQ.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let loaded = inspect_store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .expect("job definition should exist");
+        assert_eq!(loaded.current_retries, 0);
+        assert!(
+            !inspect_store
+                .get_dlq_job_ids(&dlq_name)
+                .await
+                .unwrap()
+                .iter()
+                .any(|id| id == &job.id)
+        );
+
+        runner.close_gate.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(2), &mut drain)
+            .await
+            .expect("drain_tasks should complete after close unblocks")
+            .unwrap();
+
+        let loaded = inspect_store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .expect("job definition should exist after drain");
+        assert_eq!(loaded.current_retries, 0);
+        assert!(
+            inspect_store
+                .is_job_queued(&queue_name, &job.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !inspect_store
+                .get_dlq_job_ids(&dlq_name)
+                .await
+                .unwrap()
+                .iter()
+                .any(|id| id == &job.id)
         );
     }
 
@@ -2868,6 +3022,69 @@ mod tests {
         assert_eq!(calculate_backoff_seconds(&settings, 1), 2.0);
         assert_eq!(calculate_backoff_seconds(&settings, 2), 4.0);
         assert_eq!(calculate_backoff_seconds(&settings, 3), 5.0);
+    }
+
+    #[tokio::test]
+    async fn worker_new_rejects_non_positive_default_job_timeout() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        ctx.settings.default_runner_name = "test".to_string();
+        ctx.settings.default_job_timeout_seconds = 0;
+        let runner = Arc::new(StaticRunner::new(
+            TestOutcome::Success(json!({"ok": true})),
+            Duration::from_millis(0),
+        ));
+        let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+        runners.insert("test".to_string(), runner);
+
+        let err = match RRQWorker::new(
+            ctx.settings.clone(),
+            None,
+            Some("worker-1".to_string()),
+            runners,
+            true,
+            1,
+        )
+        .await
+        {
+            Ok(_) => panic!("worker creation should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("default_job_timeout_seconds must be positive")
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_new_rejects_overflowing_provisional_claim_lock_timeout() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        ctx.settings.default_runner_name = "test".to_string();
+        ctx.settings.default_job_timeout_seconds = i64::MAX;
+        ctx.settings.default_lock_timeout_extension_seconds = 1;
+        let runner = Arc::new(StaticRunner::new(
+            TestOutcome::Success(json!({"ok": true})),
+            Duration::from_millis(0),
+        ));
+        let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+        runners.insert("test".to_string(), runner);
+
+        let err = match RRQWorker::new(
+            ctx.settings.clone(),
+            None,
+            Some("worker-1".to_string()),
+            runners,
+            true,
+            1,
+        )
+        .await
+        {
+            Ok(_) => panic!("worker creation should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("provisional claim lock timeout overflow")
+        );
     }
 
     #[tokio::test]

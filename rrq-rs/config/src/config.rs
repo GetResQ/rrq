@@ -209,6 +209,22 @@ fn diagnose_config_error(config: &Value, err: &serde_json::Error) -> String {
 }
 
 fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
+    if settings.default_job_timeout_seconds <= 0 {
+        return Err(anyhow::anyhow!(
+            "default_job_timeout_seconds must be positive"
+        ));
+    }
+    if settings.default_lock_timeout_extension_seconds < 0 {
+        return Err(anyhow::anyhow!(
+            "default_lock_timeout_extension_seconds must be >= 0"
+        ));
+    }
+    settings
+        .default_job_timeout_seconds
+        .checked_add(settings.default_lock_timeout_extension_seconds)
+        .and_then(|sum| sum.checked_mul(1000))
+        .ok_or_else(|| anyhow::anyhow!("provisional claim lock timeout overflow"))?;
+
     if !settings.runner_shutdown_term_grace_seconds.is_finite()
         || settings.runner_shutdown_term_grace_seconds < 0.0
     {
@@ -575,5 +591,60 @@ mod tests {
         fs::write(&path, config).unwrap();
         let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
         assert!(err.to_string().contains("too large"));
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_non_positive_default_job_timeout() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r"
+        [rrq]
+        default_job_timeout_seconds = 0
+        ";
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("default_job_timeout_seconds must be positive")
+        );
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_negative_default_lock_timeout_extension() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r"
+        [rrq]
+        default_lock_timeout_extension_seconds = -1
+        ";
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("default_lock_timeout_extension_seconds must be >= 0")
+        );
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_overflowing_provisional_claim_lock_timeout() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = format!(
+            r"
+        [rrq]
+        default_job_timeout_seconds = {}
+        default_lock_timeout_extension_seconds = 1
+        ",
+            i64::MAX
+        );
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("provisional claim lock timeout overflow")
+        );
     }
 }
