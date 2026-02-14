@@ -572,27 +572,95 @@ impl RRQWorker {
         job_id: &str,
         job: &Job,
         pending_error: Option<&str>,
-    ) {
+    ) -> bool {
         let should_requeue = matches!(
             job.status,
             JobStatus::Active | JobStatus::Pending | JobStatus::Retrying
         );
         if should_requeue {
-            if job.status == JobStatus::Active {
-                let _ = self.job_store.mark_job_pending(job_id, pending_error).await;
+            if job.status == JobStatus::Active
+                && let Err(err) = self.job_store.mark_job_pending(job_id, pending_error).await
+            {
+                tracing::warn!(
+                    "rrq.queue" = %queue_name,
+                    "rrq.job_id" = %job_id,
+                    error = %err,
+                    "failed to mark claimed job pending before requeue"
+                );
+                return false;
             }
-            let already_queued = self
-                .job_store
-                .is_job_queued(queue_name, job_id)
-                .await
-                .unwrap_or(false);
-            if !already_queued {
-                let _ = self
+            let already_queued = match self.job_store.is_job_queued(queue_name, job_id).await {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!(
+                        "rrq.queue" = %queue_name,
+                        "rrq.job_id" = %job_id,
+                        error = %err,
+                        "failed to verify claimed job queue membership before requeue"
+                    );
+                    return false;
+                }
+            };
+            if !already_queued
+                && let Err(err) = self
                     .job_store
                     .add_job_to_queue(queue_name, job_id, Utc::now().timestamp_millis() as f64)
-                    .await;
+                    .await
+            {
+                tracing::warn!(
+                    "rrq.queue" = %queue_name,
+                    "rrq.job_id" = %job_id,
+                    error = %err,
+                    "failed to requeue claimed job"
+                );
+                return false;
             }
         }
+        true
+    }
+
+    async fn requeue_claimed_job_without_definition(
+        &mut self,
+        queue_name: &str,
+        job_id: &str,
+        pending_error: Option<&str>,
+    ) -> bool {
+        if let Err(err) = self.job_store.mark_job_pending(job_id, pending_error).await {
+            tracing::warn!(
+                "rrq.queue" = %queue_name,
+                "rrq.job_id" = %job_id,
+                error = %err,
+                "failed to mark claimed job without definition pending before requeue"
+            );
+            return false;
+        }
+        let already_queued = match self.job_store.is_job_queued(queue_name, job_id).await {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(
+                    "rrq.queue" = %queue_name,
+                    "rrq.job_id" = %job_id,
+                    error = %err,
+                    "failed to verify claimed job without definition queue membership before requeue"
+                );
+                return false;
+            }
+        };
+        if !already_queued
+            && let Err(err) = self
+                .job_store
+                .add_job_to_queue(queue_name, job_id, Utc::now().timestamp_millis() as f64)
+                .await
+        {
+            tracing::warn!(
+                "rrq.queue" = %queue_name,
+                "rrq.job_id" = %job_id,
+                error = %err,
+                "failed to requeue claimed job without definition"
+            );
+            return false;
+        }
+        true
     }
 
     async fn cleanup_claimed_job_state(&mut self, job_id: &str) {
@@ -637,8 +705,17 @@ impl RRQWorker {
             );
             if let Some(job) = job {
                 if job.worker_id.as_deref() == Some(self.worker_id.as_str()) {
-                    self.requeue_claimed_job_if_needed(queue_name, job_id, job, pending_error)
-                        .await;
+                    if !self
+                        .requeue_claimed_job_if_needed(queue_name, job_id, job, pending_error)
+                        .await
+                    {
+                        tracing::warn!(
+                            "rrq.queue" = %queue_name,
+                            "rrq.job_id" = %job_id,
+                            "preserving claimed job because fallback requeue writes failed"
+                        );
+                        return;
+                    }
                 } else {
                     tracing::warn!(
                         "rrq.queue" = %queue_name,
@@ -653,9 +730,16 @@ impl RRQWorker {
         if !lock_owned_by_other
             && let Some(job) = job
             && job.worker_id.as_deref() == Some(self.worker_id.as_str())
+            && !self
+                .requeue_claimed_job_if_needed(queue_name, job_id, job, pending_error)
+                .await
         {
-            self.requeue_claimed_job_if_needed(queue_name, job_id, job, pending_error)
-                .await;
+            tracing::warn!(
+                "rrq.queue" = %queue_name,
+                "rrq.job_id" = %job_id,
+                "preserving claimed job because requeue writes failed"
+            );
+            return;
         }
         self.cleanup_claimed_job_state(job_id).await;
     }
@@ -767,6 +851,21 @@ impl RRQWorker {
                             error = %err,
                             "failed to move malformed claimed job to DLQ"
                         );
+                        if !self
+                            .requeue_claimed_job_without_definition(
+                                queue_name,
+                                job_id,
+                                Some("Failed to move malformed claimed job to DLQ. Re-queued."),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                "rrq.queue" = %queue_name,
+                                "rrq.job_id" = %job_id,
+                                "preserving claimed malformed job because DLQ persistence and fallback requeue both failed"
+                            );
+                            return;
+                        }
                     } else if let Some(unique_key) = unique_key.as_deref()
                         && let Err(err) = self.job_store.release_unique_job_lock(unique_key).await
                     {
@@ -794,6 +893,21 @@ impl RRQWorker {
                         error = %err,
                         "failed to read claimed job hash while attempting malformed-job quarantine"
                     );
+                    if !self
+                        .requeue_claimed_job_without_definition(
+                            queue_name,
+                            job_id,
+                            Some("Failed to load malformed claimed job for DLQ move. Re-queued."),
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            "rrq.queue" = %queue_name,
+                            "rrq.job_id" = %job_id,
+                            "preserving claimed malformed job because fallback requeue writes failed"
+                        );
+                        return;
+                    }
                 }
             }
         }
@@ -814,19 +928,17 @@ impl RRQWorker {
             );
             return;
         };
-        if !lock_owned_by_other {
-            let _ = self.job_store.mark_job_pending(job_id, pending_error).await;
-            let already_queued = self
-                .job_store
-                .is_job_queued(queue_name, job_id)
+        if !lock_owned_by_other
+            && !self
+                .requeue_claimed_job_without_definition(queue_name, job_id, pending_error)
                 .await
-                .unwrap_or(false);
-            if !already_queued {
-                let _ = self
-                    .job_store
-                    .add_job_to_queue(queue_name, job_id, Utc::now().timestamp_millis() as f64)
-                    .await;
-            }
+        {
+            tracing::warn!(
+                "rrq.queue" = %queue_name,
+                "rrq.job_id" = %job_id,
+                "preserving claimed job without definition because requeue writes failed"
+            );
+            return;
         }
         self.cleanup_claimed_job_state(job_id).await;
     }
@@ -1875,7 +1987,7 @@ async fn sleep_with_shutdown(shutdown: &Arc<AtomicBool>, duration: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{JOB_KEY_PREFIX, LOCK_KEY_PREFIX};
+    use crate::constants::{DLQ_KEY_PREFIX, JOB_KEY_PREFIX, LOCK_KEY_PREFIX};
     use crate::test_support::RedisTestContext;
     use redis::AsyncCommands;
     use serde_json::json;
@@ -2974,6 +3086,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn release_claimed_job_without_definition_requeue_write_failure_preserves_claim_state() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        ctx.settings.default_runner_name = "test".to_string();
+        let runner = Arc::new(StaticRunner::new(
+            TestOutcome::Success(json!({"ok": true})),
+            Duration::from_millis(0),
+        ));
+        let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+        runners.insert("test".to_string(), runner);
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let job = client
+            .enqueue("task", serde_json::Map::new(), EnqueueOptions::default())
+            .await
+            .unwrap();
+
+        let mut worker = RRQWorker::new(
+            ctx.settings.clone(),
+            None,
+            Some("worker-1".to_string()),
+            runners,
+            true,
+            1,
+        )
+        .await
+        .unwrap();
+        let queue_name = normalize_queue_name(&ctx.settings.default_queue_name);
+        let claimed = worker
+            .job_store
+            .atomic_claim_ready_jobs(&queue_name, &worker.worker_id, 10_000, 0, 1, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(claimed, vec![job.id.clone()]);
+
+        let redis = redis::Client::open(ctx.settings.redis_dsn.as_str()).unwrap();
+        let mut conn = redis.get_multiplexed_async_connection().await.unwrap();
+        let queue_key = queue_name.clone();
+        conn.set::<_, _, ()>(&queue_key, "wrongtype").await.unwrap();
+
+        worker
+            .release_claimed_job_without_definition(
+                &queue_name,
+                &job.id,
+                Some("Failed to parse claimed job definition. Re-queued."),
+            )
+            .await;
+
+        let reloaded = worker
+            .job_store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.status, JobStatus::Pending);
+        let active = worker
+            .job_store
+            .get_active_job_ids(&worker.worker_id)
+            .await
+            .unwrap();
+        assert!(
+            active.contains(&job.id),
+            "claim state should be preserved when requeue writes fail"
+        );
+        assert_eq!(
+            worker.job_store.get_job_lock_owner(&job.id).await.unwrap(),
+            Some(worker.worker_id.clone())
+        );
+
+        conn.del::<_, ()>(&queue_key).await.unwrap();
+
+        worker
+            .release_claimed_job_without_definition(&queue_name, &job.id, Some("cleanup"))
+            .await;
+
+        assert!(
+            worker
+                .job_store
+                .is_job_queued(&queue_name, &job.id)
+                .await
+                .unwrap()
+        );
+        let active_after = worker
+            .job_store
+            .get_active_job_ids(&worker.worker_id)
+            .await
+            .unwrap();
+        assert!(!active_after.contains(&job.id));
+        assert_eq!(
+            worker.job_store.get_job_lock_owner(&job.id).await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
     async fn release_claimed_job_without_definition_lookup_error_preserves_claim_state() {
         let mut ctx = RedisTestContext::new().await.unwrap();
         ctx.settings.default_runner_name = "test".to_string();
@@ -3052,6 +3257,99 @@ mod tests {
             active.contains(&job.id),
             "active tracking should remain unchanged when ownership lookup fails"
         );
+    }
+
+    #[tokio::test]
+    async fn quarantine_claimed_job_without_definition_preserves_claim_when_dlq_and_requeue_fail() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        ctx.settings.default_runner_name = "test".to_string();
+        let runner = Arc::new(StaticRunner::new(
+            TestOutcome::Success(json!({"ok": true})),
+            Duration::from_millis(0),
+        ));
+        let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+        runners.insert("test".to_string(), runner);
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let job = client
+            .enqueue("task", serde_json::Map::new(), EnqueueOptions::default())
+            .await
+            .unwrap();
+
+        let mut worker = RRQWorker::new(
+            ctx.settings.clone(),
+            None,
+            Some("worker-1".to_string()),
+            runners,
+            true,
+            1,
+        )
+        .await
+        .unwrap();
+        let queue_name = normalize_queue_name(&ctx.settings.default_queue_name);
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+        let claimed = worker
+            .job_store
+            .atomic_claim_ready_jobs(&queue_name, &worker.worker_id, 10_000, 0, 1, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(claimed, vec![job.id.clone()]);
+
+        let redis = redis::Client::open(ctx.settings.redis_dsn.as_str()).unwrap();
+        let mut conn = redis.get_multiplexed_async_connection().await.unwrap();
+        let queue_key = queue_name.clone();
+        let dlq_key = if dlq_name.starts_with(DLQ_KEY_PREFIX) {
+            dlq_name.clone()
+        } else {
+            format!("{DLQ_KEY_PREFIX}{dlq_name}")
+        };
+        conn.set::<_, _, ()>(&queue_key, "wrongtype").await.unwrap();
+        conn.set::<_, _, ()>(&dlq_key, "wrongtype").await.unwrap();
+
+        worker
+            .quarantine_claimed_job_without_definition(
+                &queue_name,
+                &job.id,
+                "Failed to parse claimed job definition. Moved to DLQ.",
+            )
+            .await;
+
+        let active = worker
+            .job_store
+            .get_active_job_ids(&worker.worker_id)
+            .await
+            .unwrap();
+        assert!(
+            active.contains(&job.id),
+            "claim state should be preserved when DLQ persistence and fallback requeue both fail"
+        );
+        assert_eq!(
+            worker.job_store.get_job_lock_owner(&job.id).await.unwrap(),
+            Some(worker.worker_id.clone())
+        );
+
+        conn.del::<_, ()>(&queue_key).await.unwrap();
+        conn.del::<_, ()>(&dlq_key).await.unwrap();
+
+        worker
+            .quarantine_claimed_job_without_definition(
+                &queue_name,
+                &job.id,
+                "Failed to parse claimed job definition. Moved to DLQ.",
+            )
+            .await;
+
+        let active_after = worker
+            .job_store
+            .get_active_job_ids(&worker.worker_id)
+            .await
+            .unwrap();
+        assert!(!active_after.contains(&job.id));
+        assert_eq!(
+            worker.job_store.get_job_lock_owner(&job.id).await.unwrap(),
+            None
+        );
+        let dlq_ids = worker.job_store.get_dlq_job_ids(&dlq_name).await.unwrap();
+        assert!(dlq_ids.iter().any(|id| id == &job.id));
     }
 
     #[tokio::test]
