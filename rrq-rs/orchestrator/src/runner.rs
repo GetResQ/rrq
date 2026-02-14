@@ -33,6 +33,8 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, timeout};
 use tracing::{debug, info, warn};
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+// Built-in RRQ runner runtimes cap in-flight requests per TCP connection at 64.
+const MAX_IN_FLIGHT_PER_CONNECTION_LIMIT: usize = 64;
 const REUSE_SOCKET_MAX_ATTEMPTS: usize = 5;
 const REUSE_SOCKET_RETRY_DELAY: Duration = Duration::from_millis(50);
 
@@ -132,6 +134,23 @@ fn shutdown_term_grace_from_settings(timeout_seconds: f64) -> Duration {
     } else {
         Duration::ZERO
     }
+}
+
+fn validate_max_in_flight_limit(max_in_flight: usize, runner_name: &str) -> Result<()> {
+    if max_in_flight == 0 {
+        return Err(anyhow::anyhow!(
+            "max_in_flight must be positive for runner '{}'",
+            runner_name
+        ));
+    }
+    if max_in_flight > MAX_IN_FLIGHT_PER_CONNECTION_LIMIT {
+        return Err(anyhow::anyhow!(
+            "max_in_flight must be <= {} for runner '{}'",
+            MAX_IN_FLIGHT_PER_CONNECTION_LIMIT,
+            runner_name
+        ));
+    }
+    Ok(())
 }
 
 fn is_response_timeout_error(err: &anyhow::Error) -> bool {
@@ -620,9 +639,7 @@ impl SocketRunnerPool {
         if pool_size == 0 {
             return Err(anyhow::anyhow!("pool_size must be positive"));
         }
-        if max_in_flight == 0 {
-            return Err(anyhow::anyhow!("max_in_flight must be positive"));
-        }
+        validate_max_in_flight_limit(max_in_flight, &name)?;
         if cmd.is_empty() {
             return Err(anyhow::anyhow!("cmd must not be empty"));
         }
@@ -1595,12 +1612,7 @@ pub fn resolve_runner_max_in_flight(
         } else {
             config.max_in_flight.unwrap_or(1)
         };
-        if limit == 0 {
-            return Err(anyhow::anyhow!(
-                "max_in_flight must be positive for runner '{}'",
-                name
-            ));
-        }
+        validate_max_in_flight_limit(limit, name)?;
         max_in_flight.insert(name.clone(), limit);
     }
     Ok(max_in_flight)
@@ -1997,6 +2009,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pool_new_rejects_max_in_flight_above_protocol_limit() {
+        let result = SocketRunnerPool::new(
+            "test",
+            vec!["sleep".to_string(), "60".to_string()],
+            1,
+            MAX_IN_FLIGHT_PER_CONNECTION_LIMIT + 1,
+            None,
+            None,
+            Some("127.0.0.1:9000".to_string()),
+            None,
+            Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
+            Duration::from_millis(50),
+            true,
+        )
+        .await;
+        let err = match result {
+            Ok(_) => panic!("pool creation should reject max_in_flight above protocol limit"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("max_in_flight must be <="));
+    }
+
+    #[tokio::test]
     async fn execute_with_timeout_includes_process_acquire_wait() {
         let pool = Arc::new(build_test_pool(1));
         let runner = Arc::new(SocketRunner {
@@ -2158,6 +2193,29 @@ mod tests {
         assert!(err.to_string().contains("pool_size must be positive"));
         let err = resolve_runner_max_in_flight(&settings, false).unwrap_err();
         assert!(err.to_string().contains("max_in_flight must be positive"));
+    }
+
+    #[test]
+    fn resolve_pool_sizes_and_max_in_flight_validate_protocol_limit() {
+        let mut settings = RRQSettings::default();
+        let mut runners = HashMap::new();
+        runners.insert(
+            "python".to_string(),
+            RunnerConfig {
+                runner_type: RunnerType::Socket,
+                cmd: Some(vec!["rrq-runner".to_string()]),
+                pool_size: Some(1),
+                max_in_flight: Some(MAX_IN_FLIGHT_PER_CONNECTION_LIMIT + 1),
+                env: None,
+                cwd: None,
+                tcp_socket: Some("127.0.0.1:9000".to_string()),
+                response_timeout_seconds: None,
+            },
+        );
+        settings.runners = runners;
+
+        let err = resolve_runner_max_in_flight(&settings, false).unwrap_err();
+        assert!(err.to_string().contains("max_in_flight must be <="));
     }
 
     // parse_tcp_socket tests are in rrq_config::tcp_socket module
