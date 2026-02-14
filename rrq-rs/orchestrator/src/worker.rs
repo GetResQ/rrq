@@ -562,15 +562,64 @@ impl RRQWorker {
         None
     }
 
+    fn is_wrongtype_error(err: &anyhow::Error) -> bool {
+        err.to_string().to_ascii_lowercase().contains("wrongtype")
+    }
+
+    async fn requeue_claimed_job_if_needed(
+        &mut self,
+        queue_name: &str,
+        job_id: &str,
+        job: &Job,
+        pending_error: Option<&str>,
+    ) {
+        let should_requeue = matches!(
+            job.status,
+            JobStatus::Active | JobStatus::Pending | JobStatus::Retrying
+        );
+        if should_requeue {
+            if job.status == JobStatus::Active {
+                let _ = self.job_store.mark_job_pending(job_id, pending_error).await;
+            }
+            let already_queued = self
+                .job_store
+                .is_job_queued(queue_name, job_id)
+                .await
+                .unwrap_or(false);
+            if !already_queued {
+                let _ = self
+                    .job_store
+                    .add_job_to_queue(queue_name, job_id, Utc::now().timestamp_millis() as f64)
+                    .await;
+            }
+        }
+    }
+
     async fn cleanup_claimed_job_state(&mut self, job_id: &str) {
         let _ = self
             .job_store
             .remove_active_job(&self.worker_id, job_id)
             .await;
-        let _ = self
+        if let Err(err) = self
             .job_store
             .release_job_lock_if_owner(job_id, &self.worker_id)
-            .await;
+            .await
+        {
+            tracing::warn!(
+                "rrq.job_id" = %job_id,
+                error = %err,
+                "failed to release claimed job lock if owned by current worker"
+            );
+            if Self::is_wrongtype_error(&err)
+                && let Err(force_err) = self.job_store.release_job_lock(job_id).await
+            {
+                tracing::warn!(
+                    "rrq.job_id" = %job_id,
+                    error = %force_err,
+                    "failed to force-release malformed claimed job lock"
+                );
+            }
+        }
     }
 
     async fn release_claimed_job(
@@ -584,31 +633,29 @@ impl RRQWorker {
             tracing::warn!(
                 "rrq.queue" = %queue_name,
                 "rrq.job_id" = %job_id,
-                "preserving claimed job because lock ownership is unknown"
+                "lock ownership unknown while releasing claimed job; applying fallback cleanup"
             );
-            return;
-        };
-        if !lock_owned_by_other && let Some(job) = job {
-            let should_requeue = matches!(
-                job.status,
-                JobStatus::Active | JobStatus::Pending | JobStatus::Retrying
-            );
-            if should_requeue {
-                if job.status == JobStatus::Active {
-                    let _ = self.job_store.mark_job_pending(job_id, pending_error).await;
-                }
-                let already_queued = self
-                    .job_store
-                    .is_job_queued(queue_name, job_id)
-                    .await
-                    .unwrap_or(false);
-                if !already_queued {
-                    let _ = self
-                        .job_store
-                        .add_job_to_queue(queue_name, job_id, Utc::now().timestamp_millis() as f64)
+            if let Some(job) = job {
+                if job.worker_id.as_deref() == Some(self.worker_id.as_str()) {
+                    self.requeue_claimed_job_if_needed(queue_name, job_id, job, pending_error)
                         .await;
+                } else {
+                    tracing::warn!(
+                        "rrq.queue" = %queue_name,
+                        "rrq.job_id" = %job_id,
+                        "skipping fallback requeue for unknown lock ownership because claimed job is assigned to another worker"
+                    );
                 }
             }
+            self.cleanup_claimed_job_state(job_id).await;
+            return;
+        };
+        if !lock_owned_by_other
+            && let Some(job) = job
+            && job.worker_id.as_deref() == Some(self.worker_id.as_str())
+        {
+            self.requeue_claimed_job_if_needed(queue_name, job_id, job, pending_error)
+                .await;
         }
         self.cleanup_claimed_job_state(job_id).await;
     }
@@ -2745,7 +2792,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn release_claimed_job_lock_owner_lookup_error_preserves_claim_state() {
+    async fn release_claimed_job_lock_owner_lookup_error_requeues_and_cleans_up_claim_state() {
         let mut ctx = RedisTestContext::new().await.unwrap();
         ctx.settings.default_runner_name = "test".to_string();
         let runner = Arc::new(StaticRunner::new(
@@ -2811,16 +2858,16 @@ mod tests {
             .unwrap();
         assert_eq!(
             reloaded.status,
-            JobStatus::Active,
-            "job should not be marked pending when lock ownership is uncertain"
+            JobStatus::Pending,
+            "job should be marked pending by fallback release when lock ownership is unknown"
         );
         assert!(
-            !worker
+            worker
                 .job_store
                 .is_job_queued(&queue_name, &job.id)
                 .await
                 .unwrap(),
-            "job should not be requeued when lock-owner lookup fails"
+            "job should be requeued by fallback release when lock-owner lookup fails"
         );
         let active = worker
             .job_store
@@ -2828,9 +2875,26 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            active.contains(&job.id),
-            "active tracking should remain unchanged when ownership lookup fails"
+            !active.contains(&job.id),
+            "active tracking should be cleaned up when ownership lookup fails"
         );
+        assert_eq!(
+            worker.job_store.get_job_lock_owner(&job.id).await.unwrap(),
+            None
+        );
+
+        let reclaimed = worker
+            .job_store
+            .atomic_claim_ready_jobs(&queue_name, &worker.worker_id, 10_000, 0, 1, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(reclaimed, vec![job.id.clone()]);
+
+        let _ = worker
+            .job_store
+            .remove_active_job(&worker.worker_id, &job.id)
+            .await;
+        let _ = worker.job_store.release_job_lock(&job.id).await;
     }
 
     #[tokio::test]
