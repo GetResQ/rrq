@@ -63,6 +63,9 @@ impl RRQClient {
             function_name = %function_name,
             queue_name = %queue_name
         );
+        if let Some(provided_trace_context) = options.trace_context.as_ref() {
+            telemetry::set_parent_from_trace_context(&span, provided_trace_context);
+        }
         let _enter = span.enter();
         let trace_context = telemetry::inject_current_trace_context(options.trace_context.clone());
         let correlation_context = telemetry::extract_correlation_context(

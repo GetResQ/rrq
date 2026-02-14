@@ -782,7 +782,9 @@ fn truncate_utf8(value: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentelemetry_sdk::trace as sdktrace;
     use serde_json::json;
+    use tracing_subscriber::layer::SubscriberExt;
 
     #[test]
     fn parse_log_format_handles_pretty_values() {
@@ -941,6 +943,37 @@ mod tests {
         assert_eq!(
             select_signal_endpoint(Some(""), "http://collector:4318", "logs"),
             "http://collector:4318/v1/logs"
+        );
+    }
+
+    #[test]
+    fn set_parent_from_trace_context_preserves_upstream_trace_id_when_injecting() {
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+
+        let provided_traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let provided =
+            HashMap::from([("traceparent".to_string(), provided_traceparent.to_string())]);
+
+        let tracer_provider = sdktrace::SdkTracerProvider::builder().build();
+        let tracer = tracer_provider.tracer("telemetry-tests");
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
+
+        let merged = tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("rrq.enqueue");
+            set_parent_from_trace_context(&span, &provided);
+            let _enter = span.enter();
+            inject_current_trace_context(Some(provided.clone())).expect("trace context")
+        });
+
+        let merged_traceparent = merged
+            .get("traceparent")
+            .expect("traceparent should be present");
+        assert!(
+            merged_traceparent.starts_with("00-4bf92f3577b34da6a3ce929d0e0e4736-"),
+            "expected injected traceparent to keep upstream trace id, got {merged_traceparent}"
         );
     }
 }
