@@ -1441,12 +1441,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(claimed, vec![job.id.clone()]);
-        assert!(
-            !ctx.store
-                .is_job_queued(&queue_name, &job.id)
-                .await
-                .unwrap()
-        );
+        assert!(!ctx.store.is_job_queued(&queue_name, &job.id).await.unwrap());
         assert_eq!(
             ctx.store.get_job_lock_owner(&job.id).await.unwrap(),
             Some(worker_id.to_string())
