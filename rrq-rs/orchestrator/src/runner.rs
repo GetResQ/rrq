@@ -507,6 +507,11 @@ impl PersistentProcessConnection {
         self.closed.load(Ordering::SeqCst)
     }
 
+    async fn remove_pending_request(&self, request_id: &str) -> bool {
+        let mut pending = self.pending.lock().await;
+        pending.remove(request_id).is_some()
+    }
+
     async fn execute(
         &self,
         request: &ExecutionRequest,
@@ -1034,6 +1039,31 @@ impl SocketRunnerPool {
         Ok(())
     }
 
+    async fn remove_pending_request_for_socket(
+        &self,
+        socket: RunnerSocketTarget,
+        request_id: &str,
+    ) -> bool {
+        let processes = {
+            let processes = self.processes.lock().await;
+            processes.clone()
+        };
+        for proc in processes {
+            let connection = {
+                let guard = proc.lock().await;
+                if guard.socket == socket {
+                    guard.connection.clone()
+                } else {
+                    None
+                }
+            };
+            if let Some(connection) = connection {
+                return connection.remove_pending_request(request_id).await;
+            }
+        }
+        false
+    }
+
     pub async fn close(&self) -> Result<()> {
         let mut processes = self.processes.lock().await;
         for proc in processes.iter() {
@@ -1200,6 +1230,24 @@ impl SocketRunner {
         write_message(&mut stream, &message).await
     }
 
+    async fn clear_pending_request_for_timeout(
+        &self,
+        request_id: &str,
+        socket: RunnerSocketTarget,
+    ) {
+        let removed = self
+            .pool
+            .remove_pending_request_for_socket(socket, request_id)
+            .await;
+        if removed {
+            debug!(
+                request_id = %request_id,
+                socket = %socket,
+                "removed timed-out request from persistent pending map"
+            );
+        }
+    }
+
     async fn finalize_execute_result(
         &self,
         proc: &Arc<Mutex<SocketProcess>>,
@@ -1270,6 +1318,8 @@ impl SocketRunner {
         }
 
         if let Some(info) = timed_out {
+            self.clear_pending_request_for_timeout(request.request_id.as_str(), info.socket)
+                .await;
             if has_other_on_socket {
                 debug!(
                     job_id = %request.job_id,
@@ -1375,6 +1425,8 @@ impl Runner for SocketRunner {
             let mut in_flight = self.in_flight.lock().await;
             in_flight.remove(&request_id);
         }
+        self.clear_pending_request_for_timeout(&request_id, info.socket)
+            .await;
 
         self.pool
             .terminate_process_for_socket(info.socket, "worker_timeout")
@@ -2622,6 +2674,87 @@ mod tests {
             status.is_none(),
             "shared process should remain alive while other requests are in-flight"
         );
+        drop(permit);
+        pool.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_worker_timeout_removes_timed_out_request_from_shared_pending_map() {
+        let pool = Arc::new(build_test_pool(2));
+        let runner = SocketRunner {
+            pool: pool.clone(),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
+            send_cancel_hints: false,
+        };
+        let (proc, permit) = pool.acquire_process().await.unwrap();
+        let socket = { proc.lock().await.socket };
+        let (sender, _receiver) = mpsc::channel::<RunnerMessage>(8);
+        let connection = Arc::new(PersistentProcessConnection {
+            sender,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            closed: Arc::new(AtomicBool::new(false)),
+        });
+        let (timed_out_sender, timed_out_receiver) = oneshot::channel::<Result<ExecutionOutcome>>();
+        let (other_sender, _other_receiver) = oneshot::channel::<Result<ExecutionOutcome>>();
+        {
+            let mut pending = connection.pending.lock().await;
+            pending.insert("req-timeout".to_string(), timed_out_sender);
+            pending.insert("req-other".to_string(), other_sender);
+        }
+        {
+            let mut guard = proc.lock().await;
+            guard.connection = Some(connection.clone());
+        }
+        {
+            let mut in_flight = runner.in_flight.lock().await;
+            in_flight.insert(
+                "req-timeout".to_string(),
+                InFlightRequest {
+                    job_id: "job-timeout".to_string(),
+                    socket,
+                },
+            );
+            in_flight.insert(
+                "req-other".to_string(),
+                InFlightRequest {
+                    job_id: "job-other".to_string(),
+                    socket,
+                },
+            );
+        }
+
+        let request = build_execution_request("req-timeout", "job-timeout");
+        runner
+            .cleanup_worker_timeout_with_permit_held(&request, false)
+            .await;
+
+        let canceled = timeout(Duration::from_millis(50), timed_out_receiver)
+            .await
+            .expect("timed-out sender should be dropped during cleanup");
+        assert!(
+            canceled.is_err(),
+            "timed-out pending sender should be canceled"
+        );
+
+        let in_flight = runner.in_flight.lock().await;
+        assert!(!in_flight.contains_key("req-timeout"));
+        assert!(in_flight.contains_key("req-other"));
+        drop(in_flight);
+
+        let pending = connection.pending.lock().await;
+        assert!(!pending.contains_key("req-timeout"));
+        assert!(pending.contains_key("req-other"));
+        drop(pending);
+
+        let status = {
+            let mut guard = proc.lock().await;
+            guard.child.try_wait().unwrap()
+        };
+        assert!(
+            status.is_none(),
+            "shared process should remain alive while other requests are in-flight"
+        );
+
         drop(permit);
         pool.close().await.unwrap();
     }
