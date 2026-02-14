@@ -524,6 +524,11 @@ impl PersistentProcessConnection {
             let mut pending = self.pending.lock().await;
             pending.insert(request_id.clone(), sender);
         }
+        if self.is_closed() {
+            let mut pending = self.pending.lock().await;
+            pending.remove(&request_id);
+            return Err(anyhow::anyhow!("runner connection closed"));
+        }
 
         let send_result = self
             .sender
@@ -578,9 +583,7 @@ async fn close_pending_with_error(
     closed: &Arc<AtomicBool>,
     message: String,
 ) {
-    if closed.swap(true, Ordering::SeqCst) {
-        return;
-    }
+    closed.store(true, Ordering::SeqCst);
     let senders = {
         let mut pending = pending.lock().await;
         pending
@@ -2900,6 +2903,59 @@ mod tests {
         assert!(err.to_string().contains("req-1"));
 
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn close_pending_with_error_drains_even_when_already_closed() {
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let closed = Arc::new(AtomicBool::new(true));
+        let (sender, receiver) = oneshot::channel::<Result<ExecutionOutcome>>();
+        {
+            let mut guard = pending.lock().await;
+            guard.insert("req-1".to_string(), sender);
+        }
+
+        close_pending_with_error(&pending, &closed, "runner connection closed".to_string()).await;
+
+        let result = receiver.await.expect("pending sender should be completed");
+        let err = result.expect_err("pending request should fail when connection is closed");
+        assert!(err.to_string().contains("runner connection closed"));
+        assert!(pending.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn persistent_connection_execute_handles_close_race_after_pending_insert() {
+        let (sender, _receiver) = mpsc::channel::<RunnerMessage>(8);
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let closed = Arc::new(AtomicBool::new(false));
+        let connection = Arc::new(PersistentProcessConnection {
+            sender,
+            pending: pending.clone(),
+            closed: closed.clone(),
+        });
+        let request = build_execution_request("req-race", "job-race");
+
+        let pending_guard = pending.lock().await;
+        let execute_task = tokio::spawn({
+            let connection = connection.clone();
+            let request = request.clone();
+            async move {
+                connection
+                    .execute(&request, Some(Duration::from_millis(50)))
+                    .await
+            }
+        });
+
+        tokio::task::yield_now().await;
+        closed.store(true, Ordering::SeqCst);
+        drop(pending_guard);
+
+        let err = execute_task
+            .await
+            .expect("execute task should complete")
+            .expect_err("execution should fail when connection closes during setup");
+        assert!(err.to_string().contains("runner connection closed"));
+        assert!(pending.lock().await.is_empty());
     }
 
     #[test]
