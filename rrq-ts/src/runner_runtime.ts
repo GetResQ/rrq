@@ -91,6 +91,7 @@ type RunnerMessage =
 
 export type Handler = (
   request: ExecutionRequest,
+  signal: AbortSignal,
 ) => Promise<ExecutionOutcome | unknown> | ExecutionOutcome | unknown;
 
 export class Registry {
@@ -100,14 +101,15 @@ export class Registry {
     this.handlers.set(name, handler);
   }
 
-  async execute(request: ExecutionRequest): Promise<ExecutionOutcome> {
+  async execute(request: ExecutionRequest, signal?: AbortSignal): Promise<ExecutionOutcome> {
     const handler = this.handlers.get(request.function_name);
     if (!handler) {
       return errorOutcome(request, "handler_not_found", "Handler not found");
     }
 
     try {
-      const result = await handler(request);
+      const executionSignal = signal ?? new AbortController().signal;
+      const result = await handler(request, executionSignal);
       if (isExecutionOutcome(result)) {
         const jobId = result.job_id && result.job_id.length > 0 ? result.job_id : request.job_id;
         const requestId =
@@ -292,7 +294,7 @@ export class RunnerRuntime {
     const signal = controller.signal;
     const deadline = request.context.deadline;
     if (!deadline) {
-      const outcome = await this.registry.execute(request);
+      const outcome = await this.registry.execute(request, signal);
       recordOutcome(span, outcome, (Date.now() - start) / 1000);
       span.close();
       return outcome;
@@ -315,7 +317,7 @@ export class RunnerRuntime {
 
     try {
       const outcome = await withTimeout(
-        this.registry.execute(request),
+        this.registry.execute(request, signal),
         remainingMs,
         signal,
         () => controller.abort(),

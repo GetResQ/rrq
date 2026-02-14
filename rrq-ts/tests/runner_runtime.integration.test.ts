@@ -85,6 +85,19 @@ async function waitForMessages(socket: net.Socket, count: number): Promise<Runne
   });
 }
 
+async function waitForCondition(
+  condition: () => boolean,
+  timeoutMs: number = 500,
+): Promise<void> {
+  const start = Date.now();
+  while (!condition()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error("condition wait timed out");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 async function withServer(
   registry: Registry,
   handler: (socket: net.Socket) => void,
@@ -213,6 +226,126 @@ describe("RunnerRuntime integration", () => {
         expect(message.payload.status).toBe("error");
         expect(message.payload.error?.type).toBe("cancelled");
       }
+    } finally {
+      client.end();
+      await new Promise((resolve) => client.once("close", resolve));
+      await new Promise<void>((resolve) => server.close(resolve));
+    }
+  });
+
+  it("propagates cancel abort signal to handlers", async () => {
+    const registry = new Registry();
+    let handlerObservedAbort = false;
+    let startedResolve: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      startedResolve = resolve;
+    });
+    registry.register("handler", async (_request, signal) => {
+      startedResolve?.();
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) {
+          handlerObservedAbort = true;
+          resolve();
+          return;
+        }
+        signal.addEventListener(
+          "abort",
+          () => {
+            handlerObservedAbort = true;
+            resolve();
+          },
+          { once: true },
+        );
+      });
+      const abortError = new Error("Job cancelled");
+      abortError.name = "AbortError";
+      throw abortError;
+    });
+    const runtime = new RunnerRuntime(registry);
+    const { server, port } = await withServer(registry, (socket) =>
+      (runtime as any).handleConnection(socket),
+    );
+
+    const client = net.connect(port, "127.0.0.1");
+    try {
+      const jobId = "job-cancel-propagation";
+      const requestId = "req-cancel-propagation";
+      const request = buildRequest({ request_id: requestId, job_id: jobId });
+      client.write(encodeMessage({ type: "request", payload: request }));
+      await started;
+
+      client.write(
+        encodeMessage({
+          type: "cancel",
+          payload: {
+            protocol_version: "2",
+            job_id: jobId,
+            request_id: requestId,
+            hard_kill: false,
+          },
+        }),
+      );
+
+      const [message] = await waitForMessages(client, 1);
+      expect(message.type).toBe("response");
+      expect(message.payload.status).toBe("error");
+      expect(message.payload.error?.type).toBe("cancelled");
+
+      await waitForCondition(() => handlerObservedAbort);
+      expect(handlerObservedAbort).toBe(true);
+    } finally {
+      client.end();
+      await new Promise((resolve) => client.once("close", resolve));
+      await new Promise<void>((resolve) => server.close(resolve));
+    }
+  });
+
+  it("aborts handler when deadline timeout expires", async () => {
+    const registry = new Registry();
+    let handlerObservedAbort = false;
+    registry.register("handler", async (_request, signal) => {
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) {
+          handlerObservedAbort = true;
+          resolve();
+          return;
+        }
+        signal.addEventListener(
+          "abort",
+          () => {
+            handlerObservedAbort = true;
+            resolve();
+          },
+          { once: true },
+        );
+      });
+      return { ok: true };
+    });
+    const runtime = new RunnerRuntime(registry);
+    const { server, port } = await withServer(registry, (socket) =>
+      (runtime as any).handleConnection(socket),
+    );
+
+    const client = net.connect(port, "127.0.0.1");
+    try {
+      const base = buildRequest();
+      const request = buildRequest({
+        request_id: "req-deadline-abort",
+        job_id: "job-deadline-abort",
+        context: {
+          ...base.context,
+          deadline: new Date(Date.now() + 20).toISOString(),
+        },
+      });
+      client.write(encodeMessage({ type: "request", payload: request }));
+
+      const [message] = await waitForMessages(client, 1);
+      expect(message.type).toBe("response");
+      expect(message.payload.status).toBe("timeout");
+      expect(message.payload.error?.type).toBe("timeout");
+
+      await waitForCondition(() => handlerObservedAbort);
+      expect(handlerObservedAbort).toBe(true);
     } finally {
       client.end();
       await new Promise((resolve) => client.once("close", resolve));

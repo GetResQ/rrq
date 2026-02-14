@@ -55,6 +55,21 @@ describe("Registry", () => {
     expect(outcome.status).toBe("success");
     expect(seen).toEqual({ tenant_id: "t-1" });
   });
+
+  it("passes the provided abort signal to handlers", async () => {
+    const registry = new Registry();
+    const controller = new AbortController();
+    let seenSignal: AbortSignal | undefined;
+    registry.register("handler", async (_request, signal) => {
+      seenSignal = signal;
+      return { ok: true };
+    });
+
+    const outcome = await registry.execute(baseRequest, controller.signal);
+
+    expect(outcome.status).toBe("success");
+    expect(seenSignal).toBe(controller.signal);
+  });
 });
 
 describe("parseTcpSocket", () => {

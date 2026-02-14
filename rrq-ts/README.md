@@ -181,15 +181,17 @@ console.log(status);
 
 ```typescript
 type Handler = (
-  request: ExecutionRequest
+  request: ExecutionRequest,
+  signal: AbortSignal
 ) => Promise<ExecutionOutcome | unknown> | ExecutionOutcome | unknown;
 ```
 
-### Cancellation Behavior (Known Limitation)
+### Cancellation Behavior
 
-- Runner cancellation and deadline enforcement are best-effort in TypeScript.
-- Handlers currently receive only `request` (no `AbortSignal` argument), so user code may continue running after a cancel/timeout response is emitted.
-- This is most visible with long-running side effects; make handlers idempotent and safe to retry.
+- Handlers receive an `AbortSignal`.
+- Runner `cancel` requests and deadline timeouts abort that signal.
+- Pass the signal to downstream APIs (`fetch`, database clients, etc.) so in-flight work stops promptly.
+- Keep handlers idempotent and retry-safe for libraries that do not support cancellation.
 
 ### Execution Request
 
