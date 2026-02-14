@@ -139,6 +139,7 @@ pub mod otel {
     static METER_PROVIDER: OnceLock<opentelemetry_sdk::metrics::SdkMeterProvider> = OnceLock::new();
     static RUNNER_LABEL: OnceLock<String> = OnceLock::new();
 
+    #[derive(Clone)]
     struct RunnerMetrics {
         runner_inflight: UpDownCounter<i64>,
         runner_channel_pressure: Histogram<f64>,
@@ -170,15 +171,16 @@ pub mod otel {
             .as_str()
     }
 
-    fn runner_metrics() -> Option<&'static RunnerMetrics> {
+    fn runner_metrics() -> Option<RunnerMetrics> {
         if let Some(metrics) = RUNNER_METRICS.get() {
-            return Some(metrics);
+            return Some(metrics.clone());
         }
 
-        // If another component already configured a global meter provider, use it.
+        // Build transient instruments from the current global provider without
+        // caching. This avoids permanently binding RUNNER_METRICS to the
+        // process-default no-op provider before init_metrics_provider() runs.
         let meter = global::meter("rrq.runner");
-        let _ = RUNNER_METRICS.set(RunnerMetrics::new(&meter));
-        RUNNER_METRICS.get()
+        Some(RunnerMetrics::new(&meter))
     }
 
     pub fn record_runner_inflight_delta(delta: i64) {

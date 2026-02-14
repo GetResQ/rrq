@@ -85,10 +85,7 @@ async function waitForMessages(socket: net.Socket, count: number): Promise<Runne
   });
 }
 
-async function waitForCondition(
-  condition: () => boolean,
-  timeoutMs: number = 500,
-): Promise<void> {
+async function waitForCondition(condition: () => boolean, timeoutMs: number = 500): Promise<void> {
   const start = Date.now();
   while (!condition()) {
     if (Date.now() - start > timeoutMs) {

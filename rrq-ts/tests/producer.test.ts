@@ -102,8 +102,9 @@ describe("RRQClient producer requests", () => {
     const originalFromConfig = RustProducer.fromConfig;
     const seen: Array<Record<string, unknown>> = [];
     const stub = new StubProducer({ job_id: "job-config" });
-    (RustProducer as unknown as { fromConfig: (config: Record<string, unknown>) => RustProducer })
-      .fromConfig = ((config: Record<string, unknown>) => {
+    (
+      RustProducer as unknown as { fromConfig: (config: Record<string, unknown>) => RustProducer }
+    ).fromConfig = ((config: Record<string, unknown>) => {
       seen.push(config);
       return stub as unknown as RustProducer;
     }) as (config: Record<string, unknown>) => RustProducer;
@@ -117,9 +118,8 @@ describe("RRQClient producer requests", () => {
       });
       void client;
     } finally {
-      (
-        RustProducer as unknown as { fromConfig: typeof RustProducer.fromConfig }
-      ).fromConfig = originalFromConfig;
+      (RustProducer as unknown as { fromConfig: typeof RustProducer.fromConfig }).fromConfig =
+        originalFromConfig;
     }
 
     expect(seen).toHaveLength(1);
