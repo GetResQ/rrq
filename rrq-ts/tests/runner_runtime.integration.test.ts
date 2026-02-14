@@ -22,6 +22,7 @@ type ExecutionRequestPayload = {
     queue_name: string;
     deadline: string | null;
     trace_context: Record<string, string> | null;
+    correlation_context: Record<string, string> | null;
     worker_id: string | null;
   };
 };
@@ -111,6 +112,7 @@ function buildRequest(overrides?: Partial<ExecutionRequestPayload>): ExecutionRe
       queue_name: "default",
       deadline: null,
       trace_context: null,
+      correlation_context: null,
       worker_id: null,
     },
     ...overrides,
@@ -173,14 +175,8 @@ describe("RunnerRuntime integration", () => {
 
   it("cancels all requests for a job id", async () => {
     const registry = new Registry();
-    registry.register("handler", async (_request, signal) => {
-      await new Promise((_resolve, reject) => {
-        signal.addEventListener("abort", () => {
-          const err = new Error("Job cancelled");
-          err.name = "AbortError";
-          reject(err);
-        });
-      });
+    registry.register("handler", async () => {
+      await new Promise(() => {});
       return { ok: true };
     });
     const runtime = new RunnerRuntime(registry);
@@ -226,14 +222,8 @@ describe("RunnerRuntime integration", () => {
 
   it("returns busy when in-flight limit is exceeded", async () => {
     const registry = new Registry();
-    registry.register("handler", async (_request, signal) => {
-      await new Promise((_resolve, reject) => {
-        signal.addEventListener("abort", () => {
-          const err = new Error("Job cancelled");
-          err.name = "AbortError";
-          reject(err);
-        });
-      });
+    registry.register("handler", async () => {
+      await new Promise(() => {});
       return { ok: true };
     });
     const runtime = new RunnerRuntime(registry);

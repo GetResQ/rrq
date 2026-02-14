@@ -94,6 +94,15 @@ export class OtelTelemetry implements Telemetry {
     if (request.context.worker_id) {
       attributes["rrq.worker_id"] = request.context.worker_id;
     }
+    const correlationContext = request.context.correlation_context;
+    if (correlationContext) {
+      for (const [key, value] of Object.entries(correlationContext)) {
+        if (!key || !value) {
+          continue;
+        }
+        attributes[key] = value;
+      }
+    }
     const enqueueMs = Date.parse(request.context.enqueue_time);
     if (!Number.isNaN(enqueueMs)) {
       attributes["rrq.queue_wait_ms"] = Math.max(Date.now() - enqueueMs, 0);

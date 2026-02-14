@@ -1,6 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
+import rrq.producer_ffi as producer_ffi
 from rrq.producer_ffi import ProducerConfigModel, ProducerSettingsModel
 
 
@@ -52,14 +53,14 @@ def test_producer_config_model_defaults_correlation_mappings() -> None:
     assert config.correlation_mappings == {}
 
 
-def test_producer_config_model_normalizes_bare_queue_name() -> None:
+def test_producer_config_model_preserves_bare_queue_name() -> None:
     config = ProducerConfigModel.model_validate(
         {
             "redis_dsn": "redis://localhost:6379/0",
             "queue_name": "custom",
         }
     )
-    assert config.queue_name == "rrq:queue:custom"
+    assert config.queue_name == "custom"
 
 
 def test_producer_config_model_preserves_prefixed_queue_name() -> None:
@@ -80,3 +81,17 @@ def test_producer_config_model_rejects_blank_queue_name() -> None:
                 "queue_name": "   ",
             }
         )
+
+
+def test_producer_config_model_validation_does_not_load_ffi(monkeypatch) -> None:
+    def _raise_if_called() -> None:
+        raise AssertionError("validation must not load FFI")
+
+    monkeypatch.setattr(producer_ffi, "_get_library", _raise_if_called)
+    config = ProducerConfigModel.model_validate(
+        {
+            "redis_dsn": "redis://localhost:6379/0",
+            "queue_name": "custom",
+        }
+    )
+    assert config.queue_name == "custom"

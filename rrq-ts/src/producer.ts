@@ -9,6 +9,7 @@ export interface ProducerConfig {
   jobTimeoutSeconds?: number;
   resultTtlSeconds?: number;
   idempotencyTtlSeconds?: number;
+  correlationMappings?: Record<string, string>;
 }
 
 export interface EnqueueOptions {
@@ -21,6 +22,7 @@ export interface EnqueueOptions {
   jobTimeoutSeconds?: number;
   resultTtlSeconds?: number;
   deferUntil?: Date;
+  enqueueTime?: Date;
   deferBySeconds?: number;
   traceContext?: Record<string, string> | null;
 }
@@ -51,6 +53,7 @@ const ProducerOptionsSchema = z
     result_ttl_seconds: z.number().int().optional(),
     trace_context: z.record(z.string()).optional(),
     defer_until: z.string().optional(),
+    enqueue_time: z.string().optional(),
     defer_by_seconds: z.number().optional(),
     rate_limit_key: z.string().optional(),
     rate_limit_seconds: z.number().optional(),
@@ -185,6 +188,9 @@ export class RRQClient {
     if (options.deferUntil) {
       payload.defer_until = formatDeferUntil(options.deferUntil);
     }
+    if (options.enqueueTime) {
+      payload.enqueue_time = formatEnqueueTime(options.enqueueTime);
+    }
     if (options.deferBySeconds !== undefined) {
       payload.defer_by_seconds = options.deferBySeconds;
     }
@@ -220,6 +226,13 @@ function formatDeferUntil(value: Date): string {
   return value.toISOString();
 }
 
+function formatEnqueueTime(value: Date): string {
+  if (Number.isNaN(value.getTime())) {
+    throw new RustProducerError("Invalid enqueueTime timestamp");
+  }
+  return value.toISOString();
+}
+
 function toProducerConfig(config: ProducerConfig): Record<string, unknown> {
   return {
     redis_dsn: config.redisDsn,
@@ -228,5 +241,6 @@ function toProducerConfig(config: ProducerConfig): Record<string, unknown> {
     job_timeout_seconds: config.jobTimeoutSeconds,
     result_ttl_seconds: config.resultTtlSeconds,
     idempotency_ttl_seconds: config.idempotencyTtlSeconds,
+    correlation_mappings: config.correlationMappings,
   };
 }

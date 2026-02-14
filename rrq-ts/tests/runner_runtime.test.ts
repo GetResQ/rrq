@@ -15,6 +15,7 @@ const baseRequest = {
     queue_name: "default",
     deadline: null,
     trace_context: null,
+    correlation_context: null,
     worker_id: null,
   },
 };
@@ -22,7 +23,7 @@ const baseRequest = {
 describe("Registry", () => {
   it("returns handler_not_found when no handler is registered", async () => {
     const registry = new Registry();
-    const outcome = await registry.execute(baseRequest, new AbortController().signal);
+    const outcome = await registry.execute(baseRequest);
     expect(outcome.status).toBe("error");
     expect(outcome.error?.type).toBe("handler_not_found");
   });
@@ -30,9 +31,29 @@ describe("Registry", () => {
   it("wraps raw handler results in a success outcome", async () => {
     const registry = new Registry();
     registry.register("handler", async () => ({ ok: true }));
-    const outcome = await registry.execute(baseRequest, new AbortController().signal);
+    const outcome = await registry.execute(baseRequest);
     expect(outcome.status).toBe("success");
     expect(outcome.result).toEqual({ ok: true });
+  });
+
+  it("preserves correlation_context on the request", async () => {
+    const registry = new Registry();
+    let seen: Record<string, string> | null | undefined;
+    registry.register("handler", async (request) => {
+      seen = request.context.correlation_context;
+      return { ok: true };
+    });
+
+    const outcome = await registry.execute({
+      ...baseRequest,
+      context: {
+        ...baseRequest.context,
+        correlation_context: { tenant_id: "t-1" },
+      },
+    });
+
+    expect(outcome.status).toBe("success");
+    expect(seen).toEqual({ tenant_id: "t-1" });
   });
 });
 

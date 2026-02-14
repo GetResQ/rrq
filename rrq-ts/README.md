@@ -61,7 +61,7 @@ import { RunnerRuntime, Registry } from "rrq-ts";
 
 const registry = new Registry();
 
-registry.register("send_email", async (request, signal) => {
+registry.register("send_email", async (request) => {
   const { to, template } = request.params;
 
   // Your email sending logic here
@@ -113,9 +113,24 @@ interface EnqueueOptions {
   maxRetries?: number;                // Max retry attempts
   jobTimeoutSeconds?: number;         // Execution timeout
   resultTtlSeconds?: number;          // How long to keep results
+  enqueueTime?: Date;                 // Explicit enqueue timestamp
   deferUntil?: Date;                  // Schedule for specific time
   deferBySeconds?: number;            // Delay execution
   traceContext?: Record<string, string>;  // Distributed tracing
+}
+```
+
+### Producer Config
+
+```typescript
+interface ProducerConfig {
+  redisDsn: string;
+  queueName?: string;
+  maxRetries?: number;
+  jobTimeoutSeconds?: number;
+  resultTtlSeconds?: number;
+  idempotencyTtlSeconds?: number;
+  correlationMappings?: Record<string, string>; // e.g. { tenant_id: "params.tenant.id" }
 }
 ```
 
@@ -166,8 +181,7 @@ console.log(status);
 
 ```typescript
 type Handler = (
-  request: ExecutionRequest,
-  signal: AbortSignal
+  request: ExecutionRequest
 ) => Promise<ExecutionOutcome | unknown> | ExecutionOutcome | unknown;
 ```
 
@@ -187,6 +201,7 @@ interface ExecutionRequest {
     enqueue_time: string;
     deadline?: string | null;
     trace_context?: Record<string, string> | null;
+    correlation_context?: Record<string, string> | null;
     worker_id?: string | null;
   };
 }

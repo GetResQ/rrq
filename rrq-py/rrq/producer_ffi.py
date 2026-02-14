@@ -35,9 +35,7 @@ class ProducerConfigModel(BaseModel):
             return value
         if not value.strip():
             raise ValueError("queue_name cannot be blank")
-        if value.startswith(get_producer_constants().queue_key_prefix):
-            return value
-        return f"{get_producer_constants().queue_key_prefix}{value}"
+        return value
 
 
 class ProducerSettingsModel(BaseModel):
