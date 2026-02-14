@@ -740,7 +740,8 @@ fn lookup_value_in_params<'a>(
     params: &'a Map<String, JsonValue>,
     path: &str,
 ) -> Option<&'a JsonValue> {
-    let cleaned = path.trim().trim_start_matches("params.");
+    let trimmed = path.trim();
+    let cleaned = trimmed.strip_prefix("params.").unwrap_or(trimmed);
     if cleaned.is_empty() {
         return None;
     }
@@ -1018,6 +1019,27 @@ mod tests {
         assert_eq!(
             extracted.get("session_id").map(|value| value.len()),
             Some(256)
+        );
+    }
+
+    #[test]
+    fn extract_correlation_context_strips_only_one_params_prefix() {
+        let params = json!({
+            "params": { "id": "nested-id" },
+            "id": "top-level-id"
+        })
+        .as_object()
+        .expect("object params")
+        .clone();
+        let mappings =
+            HashMap::from([("correlation_id".to_string(), "params.params.id".to_string())]);
+
+        let extracted =
+            extract_correlation_context(&params, &mappings, None).expect("expected correlation");
+
+        assert_eq!(
+            extracted.get("correlation_id").map(String::as_str),
+            Some("nested-id")
         );
     }
 }
