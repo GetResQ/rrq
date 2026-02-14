@@ -207,6 +207,8 @@ mod tests {
     use crate::constants::UNIQUE_JOB_LOCK_PREFIX;
     use crate::test_support::RedisTestContext;
     use chrono::Duration as ChronoDuration;
+    use serde_json::json;
+    use std::collections::HashMap;
 
     #[tokio::test]
     async fn enqueue_with_defer_by_and_unique_lock() {
@@ -435,5 +437,95 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.queue_name.as_deref(), Some(queue_name));
+    }
+
+    #[tokio::test]
+    async fn enqueue_extracts_and_persists_correlation_context_from_mappings() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        ctx.settings.correlation_mappings = HashMap::from([
+            ("session_id".to_string(), "session.id".to_string()),
+            ("message_id".to_string(), "params.message_id".to_string()),
+        ]);
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let params = json!({
+            "session": { "id": "sess-99" },
+            "message_id": "msg-123"
+        })
+        .as_object()
+        .expect("params object")
+        .clone();
+
+        let job = client
+            .enqueue("task", params, EnqueueOptions::default())
+            .await
+            .unwrap();
+        let correlation = job
+            .correlation_context
+            .as_ref()
+            .expect("correlation context should be set");
+        assert_eq!(
+            correlation.get("session_id").map(String::as_str),
+            Some("sess-99")
+        );
+        assert_eq!(
+            correlation.get("message_id").map(String::as_str),
+            Some("msg-123")
+        );
+
+        let stored = ctx
+            .store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let stored_correlation = stored
+            .correlation_context
+            .as_ref()
+            .expect("stored correlation context should be set");
+        assert_eq!(
+            stored_correlation.get("session_id").map(String::as_str),
+            Some("sess-99")
+        );
+        assert_eq!(
+            stored_correlation.get("message_id").map(String::as_str),
+            Some("msg-123")
+        );
+    }
+
+    #[tokio::test]
+    async fn enqueue_prefers_trace_context_values_for_correlation() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        ctx.settings.correlation_mappings =
+            HashMap::from([("session_id".to_string(), "session.id".to_string())]);
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let params = json!({
+            "session": { "id": "sess-from-params" }
+        })
+        .as_object()
+        .expect("params object")
+        .clone();
+        let trace_context =
+            HashMap::from([("session_id".to_string(), "sess-from-trace".to_string())]);
+
+        let job = client
+            .enqueue(
+                "task",
+                params,
+                EnqueueOptions {
+                    trace_context: Some(trace_context),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let correlation = job
+            .correlation_context
+            .as_ref()
+            .expect("correlation context should be set");
+        assert_eq!(
+            correlation.get("session_id").map(String::as_str),
+            Some("sess-from-trace")
+        );
     }
 }

@@ -35,3 +35,47 @@ pub fn load_producer_settings(config_path: Option<&str>) -> Result<ProducerSetti
     let settings = crate::config::load_toml_settings(config_path)?;
     Ok(ProducerSettings::from(&settings))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn producer_settings_from_rrq_settings_copies_core_and_correlation_fields() {
+        let settings = RRQSettings {
+            redis_dsn: "redis://localhost:6379/9".to_string(),
+            default_queue_name: "rrq:queue:test".to_string(),
+            default_max_retries: 11,
+            default_job_timeout_seconds: 222,
+            default_result_ttl_seconds: 333,
+            default_unique_job_lock_ttl_seconds: 444,
+            correlation_mappings: HashMap::from([
+                ("session_id".to_string(), "params.session.id".to_string()),
+                ("message_id".to_string(), "params.message.id".to_string()),
+            ]),
+            ..Default::default()
+        };
+
+        let producer = ProducerSettings::from(&settings);
+        assert_eq!(producer.redis_dsn, "redis://localhost:6379/9");
+        assert_eq!(producer.queue_name, "rrq:queue:test");
+        assert_eq!(producer.max_retries, 11);
+        assert_eq!(producer.job_timeout_seconds, 222);
+        assert_eq!(producer.result_ttl_seconds, 333);
+        assert_eq!(producer.idempotency_ttl_seconds, 444);
+        assert_eq!(
+            producer
+                .correlation_mappings
+                .get("session_id")
+                .map(String::as_str),
+            Some("params.session.id")
+        );
+        assert_eq!(
+            producer
+                .correlation_mappings
+                .get("message_id")
+                .map(String::as_str),
+            Some("params.message.id")
+        );
+    }
+}

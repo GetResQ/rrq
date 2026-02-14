@@ -626,7 +626,7 @@ pub extern "C" fn rrq_string_free(ptr: *mut c_char) {
 mod tests {
     use super::*;
     use serde::Deserialize;
-    use std::ffi::CStr;
+    use std::ffi::{CStr, CString};
 
     #[derive(Debug, Deserialize)]
     struct ConstantsPayload {
@@ -684,5 +684,64 @@ mod tests {
                 .map(String::as_str),
             Some("params.message.id")
         );
+    }
+
+    #[test]
+    fn producer_new_rejects_invalid_json() {
+        let mut err: *mut c_char = ptr::null_mut();
+        let payload = CString::new("{invalid-json").expect("payload");
+        let handle = rrq_producer_new(payload.as_ptr(), &mut err);
+        assert!(handle.is_null());
+        assert!(!err.is_null());
+        let err_message = unsafe { CStr::from_ptr(err) }
+            .to_str()
+            .expect("utf-8 error message")
+            .to_string();
+        rrq_string_free(err);
+        assert!(err_message.contains("invalid producer config"));
+    }
+
+    #[test]
+    fn producer_new_rejects_null_config_pointer() {
+        let mut err: *mut c_char = ptr::null_mut();
+        let handle = rrq_producer_new(ptr::null(), &mut err);
+        assert!(handle.is_null());
+        assert!(!err.is_null());
+        let err_message = unsafe { CStr::from_ptr(err) }
+            .to_str()
+            .expect("utf-8 error message")
+            .to_string();
+        rrq_string_free(err);
+        assert!(err_message.contains("received null pointer"));
+    }
+
+    #[test]
+    fn producer_enqueue_rejects_null_handle() {
+        let mut err: *mut c_char = ptr::null_mut();
+        let payload = CString::new(r#"{"function_name":"task"}"#).expect("payload");
+        let response = rrq_producer_enqueue(ptr::null_mut(), payload.as_ptr(), &mut err);
+        assert!(response.is_null());
+        assert!(!err.is_null());
+        let err_message = unsafe { CStr::from_ptr(err) }
+            .to_str()
+            .expect("utf-8 error message")
+            .to_string();
+        rrq_string_free(err);
+        assert!(err_message.contains("producer handle is null"));
+    }
+
+    #[test]
+    fn producer_get_job_status_rejects_null_handle() {
+        let mut err: *mut c_char = ptr::null_mut();
+        let payload = CString::new(r#"{"job_id":"job-1"}"#).expect("payload");
+        let response = rrq_producer_get_job_status(ptr::null_mut(), payload.as_ptr(), &mut err);
+        assert!(response.is_null());
+        assert!(!err.is_null());
+        let err_message = unsafe { CStr::from_ptr(err) }
+            .to_str()
+            .expect("utf-8 error message")
+            .to_string();
+        rrq_string_free(err);
+        assert!(err_message.contains("producer handle is null"));
     }
 }

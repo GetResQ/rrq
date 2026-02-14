@@ -783,7 +783,7 @@ fn truncate_utf8(value: &str, max_len: usize) -> String {
 mod tests {
     use super::*;
     use opentelemetry_sdk::trace as sdktrace;
-    use serde_json::json;
+    use serde_json::{Map, Value as JsonValue, json};
     use tracing_subscriber::layer::SubscriberExt;
 
     #[test]
@@ -974,6 +974,50 @@ mod tests {
         assert!(
             merged_traceparent.starts_with("00-4bf92f3577b34da6a3ce929d0e0e4736-"),
             "expected injected traceparent to keep upstream trace id, got {merged_traceparent}"
+        );
+    }
+
+    #[test]
+    fn extract_correlation_context_enforces_key_and_value_limits() {
+        let mut params = Map::new();
+        let mut mappings = HashMap::new();
+        for index in 0..20 {
+            let field = format!("field_{index}");
+            params.insert(field.clone(), JsonValue::String("x".repeat(400)));
+            mappings.insert(format!("attr_{index}"), field);
+        }
+        mappings.insert(String::new(), "field_0".to_string());
+        mappings.insert("k".repeat(65), "field_0".to_string());
+
+        let extracted =
+            extract_correlation_context(&params, &mappings, None).expect("correlation context");
+
+        assert_eq!(extracted.len(), 16);
+        assert!(
+            extracted
+                .keys()
+                .all(|key| !key.is_empty() && key.len() <= 64)
+        );
+        assert!(extracted.values().all(|value| value.len() <= 256));
+    }
+
+    #[test]
+    fn extract_correlation_context_truncates_trace_context_values() {
+        let params = json!({
+            "session": { "id": "sess-from-params" }
+        })
+        .as_object()
+        .expect("object params")
+        .clone();
+        let mappings = HashMap::from([("session_id".to_string(), "session.id".to_string())]);
+        let trace_context = HashMap::from([("session_id".to_string(), "z".repeat(300))]);
+
+        let extracted = extract_correlation_context(&params, &mappings, Some(&trace_context))
+            .expect("expected correlation");
+
+        assert_eq!(
+            extracted.get("session_id").map(|value| value.len()),
+            Some(256)
         );
     }
 }
