@@ -14,13 +14,14 @@ categories = ["asynchronous"]
 [dependencies]
 async-trait = "0.1.89"
 rrq-protocol = { version = "0.10.0", path = "../protocol" }
+rrq-config = { version = "0.10.0", path = "../config" }
 chrono = "0.4.43"
 serde_json = "1.0.149"
 tokio = { version = "1.49.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1.44"
 
 opentelemetry = { version = "0.31.0", optional = true, default-features = false, features = ["trace", "metrics", "logs"] }
-opentelemetry-otlp = { version = "0.31.0", optional = true, default-features = false, features = ["grpc-tonic", "trace", "metrics", "logs"] }
+opentelemetry-otlp = { version = "0.31.0", optional = true, default-features = false, features = ["http-proto", "reqwest-client", "reqwest-rustls-webpki-roots", "trace", "metrics", "logs"] }
 opentelemetry_sdk = { version = "0.31.0", optional = true, default-features = false, features = ["rt-tokio", "trace", "metrics", "logs"] }
 opentelemetry-appender-tracing = { version = "0.31.1", optional = true }
 tracing-opentelemetry = { version = "0.32.1", optional = true }

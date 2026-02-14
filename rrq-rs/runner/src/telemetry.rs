@@ -13,26 +13,6 @@ impl Clone for Box<dyn Telemetry> {
     }
 }
 
-#[cfg(feature = "otel")]
-fn nonempty(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-}
-
-#[cfg(feature = "otel")]
-fn resolve_signal_endpoint_value(
-    signal_endpoint: Option<&str>,
-    global_endpoint: Option<&str>,
-) -> Option<String> {
-    match signal_endpoint {
-        // Explicit signal-specific setting (including empty) takes precedence.
-        Some(value) => nonempty(Some(value)),
-        None => nonempty(global_endpoint),
-    }
-}
-
 #[derive(Clone, Default)]
 pub struct NoopTelemetry;
 
@@ -128,28 +108,6 @@ mod tests {
         let span = cloned.runner_span(&request);
         let _guard = span.enter();
     }
-
-    #[cfg(feature = "otel")]
-    #[test]
-    fn resolve_signal_endpoint_value_prefers_signal_specific() {
-        let resolved =
-            resolve_signal_endpoint_value(Some("http://signal:4317"), Some("http://global:4317"));
-        assert_eq!(resolved.as_deref(), Some("http://signal:4317"));
-    }
-
-    #[cfg(feature = "otel")]
-    #[test]
-    fn resolve_signal_endpoint_value_falls_back_to_global() {
-        let resolved = resolve_signal_endpoint_value(None, Some("http://global:4317"));
-        assert_eq!(resolved.as_deref(), Some("http://global:4317"));
-    }
-
-    #[cfg(feature = "otel")]
-    #[test]
-    fn resolve_signal_endpoint_value_allows_explicit_disable() {
-        let resolved = resolve_signal_endpoint_value(Some(""), Some("http://global:4317"));
-        assert_eq!(resolved, None);
-    }
 }
 
 #[cfg(feature = "otel")]
@@ -164,7 +122,8 @@ pub mod otel {
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry::{KeyValue, global};
     use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
-    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_otlp::{WithExportConfig, WithHttpConfig};
+    use rrq_config::{OtlpEnvConfig, OtlpGlobalEndpointStyle, OtlpSignal, resolve_otlp_env};
     use tracing::Span;
     use tracing::field::Empty;
     use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -173,7 +132,6 @@ pub mod otel {
     use crate::types::OutcomeStatus;
 
     use super::Telemetry;
-    use super::{nonempty, resolve_signal_endpoint_value};
 
     static RUNNER_METRICS: OnceLock<RunnerMetrics> = OnceLock::new();
     static TRACE_PROVIDER: OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> = OnceLock::new();
@@ -205,17 +163,29 @@ pub mod otel {
 
     fn runner_label() -> &'static str {
         RUNNER_LABEL
-            .get_or_init(|| {
-                std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "rrq-runner".to_string())
+            .get_or_init(|| match std::env::var("OTEL_SERVICE_NAME") {
+                Ok(value) if !value.is_empty() => value,
+                _ => std::env::var("SERVICE_NAME").unwrap_or_else(|_| "rrq-runner".to_string()),
             })
             .as_str()
+    }
+
+    fn runner_metrics() -> Option<&'static RunnerMetrics> {
+        if let Some(metrics) = RUNNER_METRICS.get() {
+            return Some(metrics);
+        }
+
+        // If another component already configured a global meter provider, use it.
+        let meter = global::meter("rrq.runner");
+        let _ = RUNNER_METRICS.set(RunnerMetrics::new(&meter));
+        RUNNER_METRICS.get()
     }
 
     pub fn record_runner_inflight_delta(delta: i64) {
         if delta == 0 {
             return;
         }
-        let Some(metrics) = RUNNER_METRICS.get() else {
+        let Some(metrics) = runner_metrics() else {
             return;
         };
         metrics.runner_inflight.add(
@@ -225,7 +195,7 @@ pub mod otel {
     }
 
     pub fn record_runner_channel_pressure(pressure: usize) {
-        let Some(metrics) = RUNNER_METRICS.get() else {
+        let Some(metrics) = runner_metrics() else {
             return;
         };
         metrics.runner_channel_pressure.record(
@@ -235,7 +205,7 @@ pub mod otel {
     }
 
     pub fn record_deadline_expired() {
-        let Some(metrics) = RUNNER_METRICS.get() else {
+        let Some(metrics) = runner_metrics() else {
             return;
         };
         metrics
@@ -244,7 +214,7 @@ pub mod otel {
     }
 
     pub fn record_cancellation(scope: &str) {
-        let Some(metrics) = RUNNER_METRICS.get() else {
+        let Some(metrics) = runner_metrics() else {
             return;
         };
         metrics.cancellations_total.add(
@@ -261,7 +231,7 @@ pub mod otel {
         outcome: OutcomeStatus,
         duration: std::time::Duration,
     ) {
-        let Some(metrics) = RUNNER_METRICS.get() else {
+        let Some(metrics) = runner_metrics() else {
             return;
         };
         let outcome = match outcome {
@@ -370,6 +340,7 @@ pub mod otel {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
 
+        let otlp = resolve_otlp_env(OtlpGlobalEndpointStyle::AppendHttpSignalPath);
         opentelemetry::global::set_text_map_propagator(
             opentelemetry_sdk::propagation::TraceContextPropagator::new(),
         );
@@ -377,9 +348,9 @@ pub mod otel {
         let resource = Resource::builder()
             .with_service_name(service_name.to_string())
             .build();
-        let (trace_layer, trace_error) = init_trace_layer(service_name, resource.clone());
-        let (log_layer, logs_error) = init_logs_layer(resource.clone());
-        let metrics_error = init_metrics_provider(service_name, resource).err();
+        let (trace_layer, trace_error) = init_trace_layer(service_name, resource.clone(), &otlp);
+        let (log_layer, logs_error) = init_logs_layer(resource.clone(), &otlp);
+        let metrics_error = init_metrics_provider(service_name, resource, &otlp).err();
         match (trace_layer, log_layer) {
             (Some(trace_layer), Some(log_layer)) => tracing_subscriber::registry()
                 .with(trace_layer)
@@ -398,7 +369,7 @@ pub mod otel {
                 .with(tracing_subscriber::fmt::layer())
                 .try_init()?,
         };
-        warn_if_global_otlp_endpoint_only();
+        warn_if_global_otlp_endpoint_only(&otlp);
         if let Some(error) = trace_error {
             tracing::warn!(error = %error, "OpenTelemetry tracing exporter failed to initialize");
         }
@@ -415,6 +386,7 @@ pub mod otel {
     fn init_trace_layer(
         service_name: &str,
         resource: opentelemetry_sdk::Resource,
+        otlp: &OtlpEnvConfig,
     ) -> (
         Option<
             tracing_opentelemetry::OpenTelemetryLayer<
@@ -424,13 +396,14 @@ pub mod otel {
         >,
         Option<String>,
     ) {
-        let Some(endpoint) = signal_endpoint("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") else {
+        let Some(endpoint) = otlp.signal(OtlpSignal::Traces).endpoint.as_deref() else {
             return (None, None);
         };
 
         let exporter = match opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
-            .with_endpoint(endpoint)
+            .with_http()
+            .with_endpoint(endpoint.to_string())
+            .with_headers(otlp.signal(OtlpSignal::Traces).headers.clone())
             .build()
         {
             Ok(exporter) => exporter,
@@ -450,13 +423,15 @@ pub mod otel {
     fn init_metrics_provider(
         service_name: &str,
         resource: opentelemetry_sdk::Resource,
+        otlp: &OtlpEnvConfig,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(endpoint) = signal_endpoint("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") else {
+        let Some(endpoint) = otlp.signal(OtlpSignal::Metrics).endpoint.as_deref() else {
             return Ok(());
         };
         let exporter = opentelemetry_otlp::MetricExporter::builder()
-            .with_tonic()
-            .with_endpoint(endpoint)
+            .with_http()
+            .with_endpoint(endpoint.to_string())
+            .with_headers(otlp.signal(OtlpSignal::Metrics).headers.clone())
             .build()?;
         let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
             .with_resource(resource)
@@ -472,6 +447,7 @@ pub mod otel {
 
     fn init_logs_layer(
         resource: opentelemetry_sdk::Resource,
+        otlp: &OtlpEnvConfig,
     ) -> (
         Option<
             OpenTelemetryTracingBridge<
@@ -481,13 +457,14 @@ pub mod otel {
         >,
         Option<String>,
     ) {
-        let Some(endpoint) = signal_endpoint("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") else {
+        let Some(endpoint) = otlp.signal(OtlpSignal::Logs).endpoint.as_deref() else {
             return (None, None);
         };
 
         let exporter = match opentelemetry_otlp::LogExporter::builder()
-            .with_tonic()
-            .with_endpoint(endpoint)
+            .with_http()
+            .with_endpoint(endpoint.to_string())
+            .with_headers(otlp.signal(OtlpSignal::Logs).headers.clone())
             .build()
         {
             Ok(exporter) => exporter,
@@ -508,26 +485,14 @@ pub mod otel {
         (Some(layer), None)
     }
 
-    fn signal_endpoint(name: &str) -> Option<String> {
-        let signal = std::env::var(name).ok();
-        let global = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
-        resolve_signal_endpoint_value(signal.as_deref(), global.as_deref())
-    }
-
-    fn warn_if_global_otlp_endpoint_only() {
-        let has_global =
-            nonempty(std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok().as_deref()).is_some();
-        if !has_global {
+    fn warn_if_global_otlp_endpoint_only(otlp: &OtlpEnvConfig) {
+        if !otlp.has_global_endpoint() {
             return;
         }
-        let missing_traces = std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").is_err();
-        let missing_metrics = std::env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").is_err();
-        let missing_logs = std::env::var("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT").is_err();
-        if missing_traces || missing_metrics || missing_logs {
+        let signal_overrides = otlp.explicit_signal_endpoint_count();
+        if signal_overrides < 3 {
             tracing::debug!(
-                missing_traces,
-                missing_metrics,
-                missing_logs,
+                signal_overrides,
                 "using OTEL_EXPORTER_OTLP_ENDPOINT fallback for signals without explicit OTEL_EXPORTER_OTLP_{{TRACES|METRICS|LOGS}}_ENDPOINT"
             );
         }

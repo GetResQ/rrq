@@ -1242,31 +1242,54 @@ impl SocketRunner {
 
     async fn cleanup_worker_timeout_with_permit_held(
         &self,
-        proc: &Arc<Mutex<SocketProcess>>,
         request: &ExecutionRequest,
         send_cancel_hint: bool,
     ) {
+        let (timed_out, has_other_on_socket) = {
+            let mut in_flight = self.in_flight.lock().await;
+            let timed_out = in_flight.remove(&request.request_id);
+            let has_other_on_socket = timed_out
+                .as_ref()
+                .is_some_and(|info| in_flight.values().any(|other| other.socket == info.socket));
+            (timed_out, has_other_on_socket)
+        };
+
         if send_cancel_hint
             && self.send_cancel_hints
-            && let Some((request_id, info)) = self
-                .resolve_in_flight_target(&request.job_id, Some(request.request_id.as_str()))
+            && let Some(info) = timed_out.as_ref()
+            && let Err(err) = self
+                .send_cancel_hint(request.request_id.as_str(), info)
                 .await
-            && let Err(err) = self.send_cancel_hint(&request_id, &info).await
         {
             warn!(
                 job_id = %request.job_id,
-                request_id = %request_id,
+                request_id = %request.request_id,
                 error = %err,
                 "failed to send runner cancel hint during worker timeout cleanup"
             );
         }
 
-        {
-            let mut in_flight = self.in_flight.lock().await;
-            in_flight.remove(&request.request_id);
+        if let Some(info) = timed_out {
+            if has_other_on_socket {
+                debug!(
+                    job_id = %request.job_id,
+                    request_id = %request.request_id,
+                    socket = %info.socket,
+                    "skipping runner process termination during worker timeout cleanup because socket has other in-flight requests"
+                );
+            } else {
+                let _ = self
+                    .pool
+                    .terminate_process_for_socket(info.socket, "worker_timeout")
+                    .await;
+            }
+        } else {
+            debug!(
+                job_id = %request.job_id,
+                request_id = %request.request_id,
+                "skipping runner process termination during worker timeout cleanup because request is not registered in-flight"
+            );
         }
-
-        let _ = self.pool.terminate_process(proc, "worker_timeout").await;
     }
 }
 
@@ -1305,7 +1328,7 @@ impl Runner for SocketRunner {
                 self.finalize_execute_result(&proc, &request, result).await,
             )),
             Err(_) => {
-                self.cleanup_worker_timeout_with_permit_held(&proc, &request, send_cancel_hint)
+                self.cleanup_worker_timeout_with_permit_held(&request, send_cancel_hint)
                     .await;
                 RunnerExecutionResult::TimedOut
             }
@@ -2524,6 +2547,83 @@ mod tests {
         }
         assert!(exited, "timed-out process should be terminated");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_worker_timeout_skips_termination_when_request_not_in_flight() {
+        let pool = Arc::new(build_test_pool(2));
+        let runner = SocketRunner {
+            pool: pool.clone(),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
+            send_cancel_hints: false,
+        };
+        let (proc, permit) = pool.acquire_process().await.unwrap();
+        let request = build_execution_request("req-missing", "job-missing");
+
+        runner
+            .cleanup_worker_timeout_with_permit_held(&request, false)
+            .await;
+
+        let status = {
+            let mut guard = proc.lock().await;
+            guard.child.try_wait().unwrap()
+        };
+        assert!(
+            status.is_none(),
+            "process should remain alive when timed-out request was never in-flight"
+        );
+        drop(permit);
+        pool.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_worker_timeout_does_not_kill_shared_process_with_other_in_flight() {
+        let pool = Arc::new(build_test_pool(2));
+        let runner = SocketRunner {
+            pool: pool.clone(),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
+            send_cancel_hints: false,
+        };
+        let (proc, permit) = pool.acquire_process().await.unwrap();
+        let socket = { proc.lock().await.socket };
+        {
+            let mut in_flight = runner.in_flight.lock().await;
+            in_flight.insert(
+                "req-timeout".to_string(),
+                InFlightRequest {
+                    job_id: "job-timeout".to_string(),
+                    socket,
+                },
+            );
+            in_flight.insert(
+                "req-other".to_string(),
+                InFlightRequest {
+                    job_id: "job-other".to_string(),
+                    socket,
+                },
+            );
+        }
+
+        let request = build_execution_request("req-timeout", "job-timeout");
+        runner
+            .cleanup_worker_timeout_with_permit_held(&request, false)
+            .await;
+
+        let in_flight = runner.in_flight.lock().await;
+        assert!(!in_flight.contains_key("req-timeout"));
+        assert!(in_flight.contains_key("req-other"));
+        drop(in_flight);
+
+        let status = {
+            let mut guard = proc.lock().await;
+            guard.child.try_wait().unwrap()
+        };
+        assert!(
+            status.is_none(),
+            "shared process should remain alive while other requests are in-flight"
+        );
+        drop(permit);
+        pool.close().await.unwrap();
     }
 
     #[tokio::test]

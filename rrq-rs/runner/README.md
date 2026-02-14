@@ -138,12 +138,13 @@ Configure via:
 - `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` - Traces endpoint (highest precedence)
 - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` - Metrics endpoint (highest precedence)
 - `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` - Logs endpoint (highest precedence)
-- `OTEL_EXPORTER_OTLP_ENDPOINT` - Fallback endpoint for any signal endpoint that is unset
+- `OTEL_EXPORTER_OTLP_ENDPOINT` - Fallback base OTLP/HTTP endpoint (for example `http://127.0.0.1:4318`)
+- `OTEL_EXPORTER_OTLP_HEADERS` and `OTEL_EXPORTER_OTLP_{TRACES|METRICS|LOGS}_HEADERS` - Comma-separated `key=value` headers
 - `OTEL_SERVICE_NAME` - Service name
 
 Endpoint resolution rules:
 - Signal-specific endpoint vars take precedence over `OTEL_EXPORTER_OTLP_ENDPOINT`
-- If a signal-specific endpoint is unset, RRQ falls back to `OTEL_EXPORTER_OTLP_ENDPOINT`
+- If a signal-specific endpoint is unset, RRQ falls back to `OTEL_EXPORTER_OTLP_ENDPOINT` and appends `/v1/{traces|metrics|logs}`
 - If a signal-specific endpoint is explicitly set to an empty value, that signal is disabled (no fallback)
 
 ## Configuration

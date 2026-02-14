@@ -299,6 +299,7 @@ impl RRQWorker {
                             &queue_name,
                             &self.worker_id,
                             self.provisional_claim_lock_timeout_ms,
+                            self.settings.default_lock_timeout_extension_seconds,
                             request_count,
                             claim_start_time,
                         )
@@ -2515,7 +2516,7 @@ mod tests {
         let queue_name = normalize_queue_name(&ctx.settings.default_queue_name);
         let claimed = worker
             .job_store
-            .atomic_claim_ready_jobs(&queue_name, &worker.worker_id, 10_000, 1, Utc::now())
+            .atomic_claim_ready_jobs(&queue_name, &worker.worker_id, 10_000, 0, 1, Utc::now())
             .await
             .unwrap();
         assert_eq!(claimed, vec![job.id.clone()]);
@@ -2591,7 +2592,7 @@ mod tests {
         let queue_name = normalize_queue_name(&ctx.settings.default_queue_name);
         let claimed = worker
             .job_store
-            .atomic_claim_ready_jobs(&queue_name, &worker.worker_id, 10_000, 1, Utc::now())
+            .atomic_claim_ready_jobs(&queue_name, &worker.worker_id, 10_000, 0, 1, Utc::now())
             .await
             .unwrap();
         assert_eq!(claimed, vec![job.id.clone()]);
@@ -2675,7 +2676,7 @@ mod tests {
         let queue_name = normalize_queue_name(&ctx.settings.default_queue_name);
         let claimed = worker
             .job_store
-            .atomic_claim_ready_jobs(&queue_name, &worker.worker_id, 10_000, 1, Utc::now())
+            .atomic_claim_ready_jobs(&queue_name, &worker.worker_id, 10_000, 0, 1, Utc::now())
             .await
             .unwrap();
         assert_eq!(claimed, vec![job.id.clone()]);
@@ -2751,7 +2752,7 @@ mod tests {
         let queue_name = normalize_queue_name(&ctx.settings.default_queue_name);
         let claimed = worker
             .job_store
-            .atomic_claim_ready_jobs(&queue_name, &worker.worker_id, 10_000, 1, Utc::now())
+            .atomic_claim_ready_jobs(&queue_name, &worker.worker_id, 10_000, 0, 1, Utc::now())
             .await
             .unwrap();
         assert_eq!(claimed, vec![job.id.clone()]);

@@ -18,6 +18,7 @@ use opentelemetry_sdk::metrics::periodic_reader_with_async_runtime::PeriodicRead
 use opentelemetry_sdk::propagation::{BaggagePropagator, TraceContextPropagator};
 use opentelemetry_sdk::trace::span_processor_with_async_runtime::BatchSpanProcessor;
 use opentelemetry_sdk::{Resource, runtime, trace as sdktrace};
+use rrq_config::{OtlpEnvConfig, OtlpGlobalEndpointStyle, OtlpSignal, resolve_otlp_env};
 use serde_json::{Map, Value as JsonValue};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::EnvFilter;
@@ -90,10 +91,11 @@ fn parse_log_format(value: &str) -> LogFormat {
 }
 
 pub fn init_tracing() {
+    let otlp = resolve_otlp_env(OtlpGlobalEndpointStyle::AppendHttpSignalPath);
     let metadata = resolve_resource_metadata();
-    let (otel_layer, trace_error) = init_otel_layer(&metadata);
-    let metrics_error = init_metrics_provider(&metadata);
-    let (otel_log_layer, logs_error) = init_otel_log_layer(&metadata);
+    let (otel_layer, trace_error) = init_otel_layer(&metadata, &otlp);
+    let metrics_error = init_metrics_provider(&metadata, &otlp);
+    let (otel_log_layer, logs_error) = init_otel_log_layer(&metadata, &otlp);
     match log_format() {
         LogFormat::Json => {
             match (otel_layer, otel_log_layer) {
@@ -164,7 +166,7 @@ pub fn init_tracing() {
             };
         }
     }
-    warn_if_global_otlp_endpoint_only();
+    warn_if_global_otlp_endpoint_only(&otlp);
 
     if let Some(error) = trace_error {
         tracing::warn!(error = %error, "OpenTelemetry tracing exporter failed to initialize");
@@ -181,19 +183,11 @@ fn default_env_filter() -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
 }
 
-fn warn_if_global_otlp_endpoint_only() {
-    let has_global = env_optional_nonempty("OTEL_EXPORTER_OTLP_ENDPOINT").is_some();
-    if !has_global {
+fn warn_if_global_otlp_endpoint_only(otlp: &OtlpEnvConfig) {
+    if !otlp.has_global_endpoint() {
         return;
     }
-    let signal_overrides = [
-        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
-        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
-    ]
-    .iter()
-    .filter(|name| env::var(name).is_ok())
-    .count();
+    let signal_overrides = otlp.explicit_signal_endpoint_count();
     if signal_overrides < 3 {
         tracing::debug!(
             signal_overrides,
@@ -324,13 +318,14 @@ fn build_resource(metadata: &ResourceMetadata) -> Resource {
 
 fn init_otel_layer(
     metadata: &ResourceMetadata,
+    otlp: &OtlpEnvConfig,
 ) -> (
     Option<
         tracing_opentelemetry::OpenTelemetryLayer<tracing_subscriber::Registry, sdktrace::Tracer>,
     >,
     Option<String>,
 ) {
-    if !otel_trace_enabled() {
+    if otlp.signal(OtlpSignal::Traces).endpoint.is_none() {
         return (None, None);
     }
 
@@ -339,7 +334,7 @@ fn init_otel_layer(
         Box::new(BaggagePropagator::new()),
     ]));
 
-    let exporter = match build_otlp_span_exporter() {
+    let exporter = match build_otlp_span_exporter(otlp) {
         Ok(exporter) => exporter,
         Err(err) => return (None, Some(err)),
     };
@@ -357,12 +352,10 @@ fn init_otel_layer(
     (Some(layer), None)
 }
 
-fn init_metrics_provider(metadata: &ResourceMetadata) -> Option<String> {
-    if !otel_metrics_enabled() {
-        return None;
-    }
+fn init_metrics_provider(metadata: &ResourceMetadata, otlp: &OtlpEnvConfig) -> Option<String> {
+    otlp.signal(OtlpSignal::Metrics).endpoint.as_ref()?;
 
-    let exporter = match build_otlp_metric_exporter() {
+    let exporter = match build_otlp_metric_exporter(otlp) {
         Ok(exporter) => exporter,
         Err(err) => return Some(err),
     };
@@ -383,15 +376,16 @@ fn init_metrics_provider(metadata: &ResourceMetadata) -> Option<String> {
 
 fn init_otel_log_layer(
     metadata: &ResourceMetadata,
+    otlp: &OtlpEnvConfig,
 ) -> (
     Option<OpenTelemetryTracingBridge<sdklogs::SdkLoggerProvider, sdklogs::SdkLogger>>,
     Option<String>,
 ) {
-    if !otel_logs_enabled() {
+    if otlp.signal(OtlpSignal::Logs).endpoint.is_none() {
         return (None, None);
     }
 
-    let exporter = match build_otlp_log_exporter() {
+    let exporter = match build_otlp_log_exporter(otlp) {
         Ok(exporter) => exporter,
         Err(err) => return (None, Some(err)),
     };
@@ -411,131 +405,48 @@ fn init_otel_log_layer(
     (Some(layer), None)
 }
 
-fn otel_trace_enabled() -> bool {
-    resolve_otlp_trace_endpoint().is_some()
-}
-
-fn otel_metrics_enabled() -> bool {
-    resolve_otlp_metrics_endpoint().is_some()
-}
-
-fn otel_logs_enabled() -> bool {
-    resolve_otlp_logs_endpoint().is_some()
-}
-
-fn build_otlp_span_exporter() -> Result<SpanExporter, String> {
-    let endpoint = resolve_otlp_trace_endpoint()
+fn build_otlp_span_exporter(otlp: &OtlpEnvConfig) -> Result<SpanExporter, String> {
+    let signal = otlp.signal(OtlpSignal::Traces);
+    let endpoint = signal
+        .endpoint
+        .clone()
         .ok_or_else(|| "OTLP traces endpoint is not configured".to_string())?;
-    let headers = resolve_otlp_headers("OTEL_EXPORTER_OTLP_TRACES_HEADERS");
 
     let mut exporter_builder = SpanExporter::builder().with_http().with_endpoint(endpoint);
-    if !headers.is_empty() {
-        exporter_builder = exporter_builder.with_headers(headers);
+    if !signal.headers.is_empty() {
+        exporter_builder = exporter_builder.with_headers(signal.headers.clone());
     }
     exporter_builder.build().map_err(|err| err.to_string())
 }
 
-fn build_otlp_metric_exporter() -> Result<MetricExporter, String> {
-    let endpoint = resolve_otlp_metrics_endpoint()
+fn build_otlp_metric_exporter(otlp: &OtlpEnvConfig) -> Result<MetricExporter, String> {
+    let signal = otlp.signal(OtlpSignal::Metrics);
+    let endpoint = signal
+        .endpoint
+        .clone()
         .ok_or_else(|| "OTLP metrics endpoint is not configured".to_string())?;
-    let headers = resolve_otlp_headers("OTEL_EXPORTER_OTLP_METRICS_HEADERS");
 
     let mut exporter_builder = MetricExporter::builder()
         .with_http()
         .with_endpoint(endpoint);
-    if !headers.is_empty() {
-        exporter_builder = exporter_builder.with_headers(headers);
+    if !signal.headers.is_empty() {
+        exporter_builder = exporter_builder.with_headers(signal.headers.clone());
     }
     exporter_builder.build().map_err(|err| err.to_string())
 }
 
-fn build_otlp_log_exporter() -> Result<LogExporter, String> {
-    let endpoint = resolve_otlp_logs_endpoint()
+fn build_otlp_log_exporter(otlp: &OtlpEnvConfig) -> Result<LogExporter, String> {
+    let signal = otlp.signal(OtlpSignal::Logs);
+    let endpoint = signal
+        .endpoint
+        .clone()
         .ok_or_else(|| "OTLP logs endpoint is not configured".to_string())?;
-    let headers = resolve_otlp_headers("OTEL_EXPORTER_OTLP_LOGS_HEADERS");
 
     let mut exporter_builder = LogExporter::builder().with_http().with_endpoint(endpoint);
-    if !headers.is_empty() {
-        exporter_builder = exporter_builder.with_headers(headers);
+    if !signal.headers.is_empty() {
+        exporter_builder = exporter_builder.with_headers(signal.headers.clone());
     }
     exporter_builder.build().map_err(|err| err.to_string())
-}
-
-fn resolve_otlp_headers(signal_specific_header_env: &str) -> HashMap<String, String> {
-    let mut headers = parse_otlp_headers(env::var("OTEL_EXPORTER_OTLP_HEADERS").ok());
-    for (key, value) in parse_otlp_headers(env::var(signal_specific_header_env).ok()) {
-        headers.insert(key, value);
-    }
-    headers
-}
-
-fn resolve_otlp_trace_endpoint() -> Option<String> {
-    resolve_otlp_signal_endpoint("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "traces")
-}
-
-fn resolve_otlp_metrics_endpoint() -> Option<String> {
-    resolve_otlp_signal_endpoint("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "metrics")
-}
-
-fn resolve_otlp_logs_endpoint() -> Option<String> {
-    resolve_otlp_signal_endpoint("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "logs")
-}
-
-fn resolve_otlp_signal_endpoint(signal_env: &str, signal: &str) -> Option<String> {
-    let explicit = env::var(signal_env).ok();
-    let global = env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
-    resolve_signal_endpoint_value(explicit.as_deref(), global.as_deref(), signal)
-}
-
-fn nonempty(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-}
-
-fn resolve_signal_endpoint_value(
-    signal_endpoint: Option<&str>,
-    global_endpoint: Option<&str>,
-    signal: &str,
-) -> Option<String> {
-    match signal_endpoint {
-        // Explicit signal-specific setting (including empty) takes precedence.
-        Some(value) => nonempty(Some(value)),
-        None => nonempty(global_endpoint).map(|endpoint| ensure_signal_path(endpoint, signal)),
-    }
-}
-
-fn ensure_signal_path(endpoint: String, signal: &str) -> String {
-    let expected_suffix = format!("/v1/{signal}");
-    let (endpoint_path, endpoint_suffix) = split_endpoint_suffix(&endpoint);
-    let endpoint_path = endpoint_path.trim_end_matches('/');
-
-    if endpoint_path.ends_with(&expected_suffix) {
-        return format!("{endpoint_path}{endpoint_suffix}");
-    }
-
-    let base = strip_otlp_signal_suffix(endpoint_path);
-    format!("{base}{expected_suffix}{endpoint_suffix}")
-}
-
-fn split_endpoint_suffix(endpoint: &str) -> (&str, &str) {
-    let split_index = endpoint
-        .find('?')
-        .into_iter()
-        .chain(endpoint.find('#'))
-        .min()
-        .unwrap_or(endpoint.len());
-    endpoint.split_at(split_index)
-}
-
-fn strip_otlp_signal_suffix(endpoint: &str) -> &str {
-    for suffix in ["/v1/traces", "/v1/metrics", "/v1/logs"] {
-        if let Some(base) = endpoint.strip_suffix(suffix) {
-            return base;
-        }
-    }
-    endpoint
 }
 
 fn env_optional_nonempty(key: &str) -> Option<String> {
@@ -560,28 +471,6 @@ fn otel_resource_attribute(key: &str) -> Option<String> {
         return Some(value.to_string());
     }
     None
-}
-
-fn parse_otlp_headers(raw: Option<String>) -> HashMap<String, String> {
-    let mut headers = HashMap::new();
-    let Some(raw) = raw else {
-        return headers;
-    };
-
-    for pair in raw.split(',') {
-        let pair = pair.trim();
-        if pair.is_empty() {
-            continue;
-        }
-        if let Some((key, value)) = pair.split_once('=') {
-            let key = key.trim();
-            let value = value.trim();
-            if !key.is_empty() && !value.is_empty() {
-                headers.insert(key.to_string(), value.to_string());
-            }
-        }
-    }
-    headers
 }
 
 fn add_counter(counter: &Counter<u64>, value: u64, attrs: &[(&str, Value)]) {
@@ -877,83 +766,6 @@ mod tests {
         ]);
 
         assert_eq!(extract_correlation_context(&params, &mappings, None), None);
-    }
-
-    #[test]
-    fn parse_otlp_headers_parses_pairs() {
-        let headers = parse_otlp_headers(Some("a=b, c = d, e=f".to_string()));
-        assert_eq!(headers.get("a").map(String::as_str), Some("b"));
-        assert_eq!(headers.get("c").map(String::as_str), Some("d"));
-        assert_eq!(headers.get("e").map(String::as_str), Some("f"));
-    }
-
-    #[test]
-    fn parse_otlp_headers_skips_invalid_pairs() {
-        let headers = parse_otlp_headers(Some("=,onlykey, k= , =v".to_string()));
-        assert!(headers.is_empty());
-    }
-
-    #[test]
-    fn ensure_signal_path_appends_v1_signal() {
-        assert_eq!(
-            ensure_signal_path("http://collector:4318".to_string(), "metrics"),
-            "http://collector:4318/v1/metrics"
-        );
-        assert_eq!(
-            ensure_signal_path("http://collector:4318/v1/traces".to_string(), "traces"),
-            "http://collector:4318/v1/traces"
-        );
-    }
-
-    #[test]
-    fn ensure_signal_path_replaces_existing_signal_suffix() {
-        assert_eq!(
-            ensure_signal_path("http://collector:4318/v1/traces".to_string(), "metrics"),
-            "http://collector:4318/v1/metrics"
-        );
-        assert_eq!(
-            ensure_signal_path(
-                "http://collector:4318/v1/metrics?token=abc".to_string(),
-                "traces"
-            ),
-            "http://collector:4318/v1/traces?token=abc"
-        );
-    }
-
-    #[test]
-    fn resolve_signal_endpoint_value_preserves_explicit_path() {
-        assert_eq!(
-            resolve_signal_endpoint_value(
-                Some("http://collector:4318/custom/traces"),
-                Some("http://global:4318"),
-                "traces",
-            ),
-            Some("http://collector:4318/custom/traces".to_string())
-        );
-    }
-
-    #[test]
-    fn resolve_signal_endpoint_value_falls_back_to_global_for_missing_signal() {
-        assert_eq!(
-            resolve_signal_endpoint_value(None, Some("http://collector:4318"), "traces"),
-            Some("http://collector:4318/v1/traces".to_string())
-        );
-        assert_eq!(
-            resolve_signal_endpoint_value(None, Some("http://collector:4318"), "metrics"),
-            Some("http://collector:4318/v1/metrics".to_string())
-        );
-        assert_eq!(
-            resolve_signal_endpoint_value(None, Some("http://collector:4318"), "logs"),
-            Some("http://collector:4318/v1/logs".to_string())
-        );
-    }
-
-    #[test]
-    fn resolve_signal_endpoint_value_disables_signal_on_explicit_empty() {
-        assert_eq!(
-            resolve_signal_endpoint_value(Some(""), Some("http://collector:4318"), "logs"),
-            None
-        );
     }
 
     #[test]

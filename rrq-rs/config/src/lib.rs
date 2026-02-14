@@ -1,6 +1,7 @@
 pub mod config;
 pub mod cron;
 pub mod defaults;
+pub mod otlp;
 pub mod producer;
 pub mod queue;
 pub mod settings;
@@ -11,6 +12,9 @@ pub use config::{
 };
 pub use cron::CronJob;
 pub use defaults::*;
+pub use otlp::{
+    OtlpEnvConfig, OtlpGlobalEndpointStyle, OtlpSignal, OtlpSignalConfig, resolve_otlp_env,
+};
 pub use producer::{ProducerSettings, load_producer_settings};
 pub use queue::normalize_queue_name;
 pub use settings::{RRQSettings, RunnerConfig, RunnerType, WatchSettings};
