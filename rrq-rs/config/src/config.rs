@@ -11,6 +11,7 @@ use crate::tcp_socket::parse_tcp_socket;
 pub const DEFAULT_CONFIG_FILENAME: &str = "rrq.toml";
 pub const ENV_CONFIG_KEY: &str = "RRQ_CONFIG";
 
+#[must_use]
 pub fn resolve_config_source(config_path: Option<&str>) -> (Option<String>, String) {
     if let Some(path) = config_path {
         return (Some(path.to_string()), "--config parameter".to_string());
@@ -49,7 +50,7 @@ pub fn load_toml_settings(config_path: Option<&str>) -> Result<RRQSettings> {
         serde_json::to_value(toml_value).context("failed to convert TOML to JSON")?;
 
     json_value = normalize_toml_payload(json_value)?;
-    let env_overrides = env_overrides()?;
+    let env_overrides = env_overrides();
     let merged = deep_merge(json_value, env_overrides);
 
     let settings: RRQSettings = serde_json::from_value(merged.clone()).map_err(|err| {
@@ -95,7 +96,7 @@ fn normalize_queue_fields(map: &mut Map<String, Value>) {
     }
 }
 
-fn env_overrides() -> Result<Value> {
+fn env_overrides() -> Value {
     let mut payload = Map::new();
 
     set_env_string(&mut payload, "redis_dsn", "RRQ_REDIS_DSN");
@@ -105,7 +106,7 @@ fn env_overrides() -> Result<Value> {
         "RRQ_CAPTURE_RUNNER_OUTPUT",
     );
 
-    Ok(Value::Object(payload))
+    Value::Object(payload)
 }
 
 fn set_env_string(map: &mut Map<String, Value>, key: &str, env: &str) {
@@ -228,6 +229,24 @@ fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
 
     let default_pool_size = num_cpus::get();
     for (name, config) in &settings.runners {
+        // Validate pool_size if specified
+        if let Some(pool_size) = config.pool_size
+            && pool_size == 0
+        {
+            return Err(anyhow::anyhow!(
+                "runner '{name}' has invalid pool_size: 0 - must be a positive integer"
+            ));
+        }
+
+        // Validate max_in_flight if specified
+        if let Some(max_in_flight) = config.max_in_flight
+            && max_in_flight == 0
+        {
+            return Err(anyhow::anyhow!(
+                "runner '{name}' has invalid max_in_flight: 0 - must be a positive integer"
+            ));
+        }
+
         // Check for missing required fields
         if config.tcp_socket.is_none() {
             return Err(anyhow::anyhow!(
@@ -248,8 +267,11 @@ fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
 
             // Validate port range is sufficient for pool_size
             let pool_size = config.pool_size.unwrap_or(default_pool_size);
-            let max_port = spec.port as u32 + pool_size.saturating_sub(1) as u32;
-            if max_port > u16::MAX as u32 {
+            let port_span = u32::try_from(pool_size.saturating_sub(1)).map_err(|_| {
+                anyhow::anyhow!("runner '{name}' pool_size is too large: {pool_size}")
+            })?;
+            let max_port = u32::from(spec.port) + port_span;
+            if max_port > u32::from(u16::MAX) {
                 return Err(anyhow::anyhow!(
                     "runner '{name}' tcp_socket port range insufficient for pool_size {pool_size} \
                     (port {} + {} would exceed 65535)",
@@ -257,24 +279,6 @@ fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
                     pool_size - 1
                 ));
             }
-        }
-
-        // Validate pool_size if specified
-        if let Some(pool_size) = config.pool_size
-            && pool_size == 0
-        {
-            return Err(anyhow::anyhow!(
-                "runner '{name}' has invalid pool_size: 0 - must be a positive integer"
-            ));
-        }
-
-        // Validate max_in_flight if specified
-        if let Some(max_in_flight) = config.max_in_flight
-            && max_in_flight == 0
-        {
-            return Err(anyhow::anyhow!(
-                "runner '{name}' has invalid max_in_flight: 0 - must be a positive integer"
-            ));
         }
     }
 

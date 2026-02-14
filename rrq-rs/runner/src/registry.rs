@@ -34,6 +34,7 @@ pub struct Registry {
 }
 
 impl Registry {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             handlers: HashMap::new(),
@@ -49,6 +50,7 @@ impl Registry {
         self.handlers.insert(name.into(), handler);
     }
 
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<Arc<dyn Handler>> {
         self.handlers.get(name).cloned()
     }
@@ -73,7 +75,7 @@ impl Registry {
             None => ExecutionOutcome::handler_not_found(
                 job_id.clone(),
                 request_id.clone(),
-                format!("No handler registered for function '{}'", function_name),
+                format!("No handler registered for function '{function_name}'"),
             ),
         };
         if outcome.job_id.is_none() {

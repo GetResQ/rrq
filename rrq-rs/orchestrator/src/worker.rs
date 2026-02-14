@@ -737,6 +737,9 @@ impl RRQWorker {
                 }
             }
         }
+        // During forced shutdown we must stop runner execution before re-queueing
+        // claimed/in-flight jobs, otherwise duplicate execution is possible.
+        self.close_runners().await;
         for (_job_id, abort) in aborts {
             abort.abort();
         }
@@ -1738,11 +1741,32 @@ mod tests {
         started_queues: Arc<TokioMutex<Vec<String>>>,
     }
 
+    #[derive(Clone)]
+    struct CloseAwareRunner {
+        execute_started: Arc<Notify>,
+        execute_gate: Arc<Notify>,
+        close_started: Arc<Notify>,
+        close_gate: Arc<Notify>,
+        close_called: Arc<AtomicBool>,
+    }
+
     impl BlockingRunner {
         fn new() -> Self {
             Self {
                 gate: Arc::new(Notify::new()),
                 started_queues: Arc::new(TokioMutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl CloseAwareRunner {
+        fn new() -> Self {
+            Self {
+                execute_started: Arc::new(Notify::new()),
+                execute_gate: Arc::new(Notify::new()),
+                close_started: Arc::new(Notify::new()),
+                close_gate: Arc::new(Notify::new()),
+                close_called: Arc::new(AtomicBool::new(false)),
             }
         }
     }
@@ -1763,6 +1787,23 @@ mod tests {
         }
 
         async fn cancel(&self, _job_id: &str, _request_id: Option<&str>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Runner for CloseAwareRunner {
+        async fn execute(&self, _request: ExecutionRequest) -> Result<ExecutionOutcome> {
+            self.execute_started.notify_waiters();
+            self.execute_gate.notified().await;
+            Err(anyhow::anyhow!("runner stopped"))
+        }
+
+        async fn close(&self) -> Result<()> {
+            self.close_called.store(true, Ordering::SeqCst);
+            self.close_started.notify_waiters();
+            self.close_gate.notified().await;
+            self.execute_gate.notify_waiters();
             Ok(())
         }
     }
@@ -2221,6 +2262,74 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn drain_tasks_waits_for_runner_close_before_requeue_when_cancel_hints_disabled() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        ctx.settings.default_runner_name = "test".to_string();
+        ctx.settings.runner_enable_inflight_cancel_hints = false;
+        ctx.settings.worker_shutdown_grace_period_seconds = 0.01;
+        let runner = Arc::new(CloseAwareRunner::new());
+        let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+        runners.insert("test".to_string(), runner.clone());
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let job = client
+            .enqueue("task", serde_json::Map::new(), EnqueueOptions::default())
+            .await
+            .unwrap();
+        let queue_name = normalize_queue_name(&ctx.settings.default_queue_name);
+
+        let mut worker = RRQWorker::new(
+            ctx.settings.clone(),
+            None,
+            Some("worker-close-order".to_string()),
+            runners,
+            true,
+            1,
+        )
+        .await
+        .unwrap();
+
+        let fetched = worker.poll_for_jobs(1).await.unwrap();
+        assert_eq!(fetched, 1);
+        tokio::time::timeout(Duration::from_secs(1), runner.execute_started.notified())
+            .await
+            .expect("runner should start execution");
+
+        let mut inspect_store = worker.job_store.clone();
+        let mut drain = Box::pin(worker.drain_tasks());
+        tokio::select! {
+            _ = runner.close_started.notified() => {}
+            result = &mut drain => {
+                panic!("drain_tasks completed before runner close started: {result:?}");
+            }
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                panic!("runner close was not invoked during forced drain");
+            }
+        }
+
+        // Requeue must not happen until close() has completed.
+        assert!(
+            !inspect_store
+                .is_job_queued(&queue_name, &job.id)
+                .await
+                .unwrap()
+        );
+        assert!(runner.close_called.load(Ordering::SeqCst));
+
+        runner.close_gate.notify_waiters();
+        tokio::time::timeout(Duration::from_secs(2), &mut drain)
+            .await
+            .expect("drain_tasks should complete after close unblocks")
+            .unwrap();
+
+        assert!(
+            inspect_store
+                .is_job_queued(&queue_name, &job.id)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

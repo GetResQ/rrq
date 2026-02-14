@@ -106,6 +106,16 @@ Enable the `otel` feature and initialize tracing:
 rrq_runner::telemetry::otel::init_tracing("my-runner")?;
 ```
 
+### Runner OTLP endpoint precedence
+
+Runner OTLP export uses this precedence per signal (traces/metrics/logs):
+- `OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT` (signal-specific)
+- `OTEL_EXPORTER_OTLP_ENDPOINT` (global fallback)
+- disabled (if neither is set)
+
+Special case:
+- If `OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT` is explicitly set to an empty value, that signal is disabled and does not fall back to `OTEL_EXPORTER_OTLP_ENDPOINT`.
+
 ## Metrics (OTel)
 
 When OTLP metrics export is enabled, RRQ emits counters/histograms for queue

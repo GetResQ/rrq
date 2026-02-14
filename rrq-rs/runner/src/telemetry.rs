@@ -13,6 +13,26 @@ impl Clone for Box<dyn Telemetry> {
     }
 }
 
+#[cfg(feature = "otel")]
+fn nonempty(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+#[cfg(feature = "otel")]
+fn resolve_signal_endpoint_value(
+    signal_endpoint: Option<&str>,
+    global_endpoint: Option<&str>,
+) -> Option<String> {
+    match signal_endpoint {
+        // Explicit signal-specific setting (including empty) takes precedence.
+        Some(value) => nonempty(Some(value)),
+        None => nonempty(global_endpoint),
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct NoopTelemetry;
 
@@ -108,6 +128,28 @@ mod tests {
         let span = cloned.runner_span(&request);
         let _guard = span.enter();
     }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    fn resolve_signal_endpoint_value_prefers_signal_specific() {
+        let resolved =
+            resolve_signal_endpoint_value(Some("http://signal:4317"), Some("http://global:4317"));
+        assert_eq!(resolved.as_deref(), Some("http://signal:4317"));
+    }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    fn resolve_signal_endpoint_value_falls_back_to_global() {
+        let resolved = resolve_signal_endpoint_value(None, Some("http://global:4317"));
+        assert_eq!(resolved.as_deref(), Some("http://global:4317"));
+    }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    fn resolve_signal_endpoint_value_allows_explicit_disable() {
+        let resolved = resolve_signal_endpoint_value(Some(""), Some("http://global:4317"));
+        assert_eq!(resolved, None);
+    }
 }
 
 #[cfg(feature = "otel")]
@@ -131,6 +173,7 @@ pub mod otel {
     use crate::types::OutcomeStatus;
 
     use super::Telemetry;
+    use super::{nonempty, resolve_signal_endpoint_value};
 
     static RUNNER_METRICS: OnceLock<RunnerMetrics> = OnceLock::new();
     static TRACE_PROVIDER: OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> = OnceLock::new();
@@ -466,25 +509,26 @@ pub mod otel {
     }
 
     fn signal_endpoint(name: &str) -> Option<String> {
-        std::env::var(name).ok().filter(|value| !value.is_empty())
+        let signal = std::env::var(name).ok();
+        let global = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
+        resolve_signal_endpoint_value(signal.as_deref(), global.as_deref())
     }
 
     fn warn_if_global_otlp_endpoint_only() {
-        let has_global = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-            .ok()
-            .is_some_and(|value| !value.is_empty());
+        let has_global =
+            nonempty(std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok().as_deref()).is_some();
         if !has_global {
             return;
         }
-        let missing_traces = signal_endpoint("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").is_none();
-        let missing_metrics = signal_endpoint("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").is_none();
-        let missing_logs = signal_endpoint("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT").is_none();
+        let missing_traces = std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").is_err();
+        let missing_metrics = std::env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").is_err();
+        let missing_logs = std::env::var("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT").is_err();
         if missing_traces || missing_metrics || missing_logs {
-            tracing::warn!(
+            tracing::debug!(
                 missing_traces,
                 missing_metrics,
                 missing_logs,
-                "OTEL_EXPORTER_OTLP_ENDPOINT is set but RRQ runner requires per-signal OTLP endpoint variables: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, OTEL_EXPORTER_OTLP_METRICS_ENDPOINT, OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"
+                "using OTEL_EXPORTER_OTLP_ENDPOINT fallback for signals without explicit OTEL_EXPORTER_OTLP_{{TRACES|METRICS|LOGS}}_ENDPOINT"
             );
         }
     }

@@ -1,5 +1,6 @@
 use crate::defaults::QUEUE_KEY_PREFIX;
 
+#[must_use]
 pub fn normalize_queue_name(queue_name: &str) -> String {
     if queue_name.starts_with(QUEUE_KEY_PREFIX) {
         queue_name.to_string()
