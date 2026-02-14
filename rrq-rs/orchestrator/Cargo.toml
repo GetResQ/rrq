@@ -1,6 +1,6 @@
 [package]
 name = "rrq"
-version = "0.9.20"
+version = "0.10.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "RRQ orchestrator CLI and worker runtime."
@@ -41,8 +41,8 @@ opentelemetry_sdk = { version = "0.31.0", default-features = false, features = [
 opentelemetry-appender-tracing = "0.31.1"
 tracing-opentelemetry = "0.32.1"
 
-rrq-protocol = { version = "0.9.20", path = "../protocol" }
-rrq-config = { version = "0.9.20", path = "../config" }
+rrq-protocol = { version = "0.10.0", path = "../protocol" }
+rrq-config = { version = "0.10.0", path = "../config" }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30.1", default-features = false, features = ["signal", "process"] }
@@ -50,7 +50,7 @@ nix = { version = "0.30.1", default-features = false, features = ["signal", "pro
 [dev-dependencies]
 serde_json = "1.0.149"
 tokio = { version = "1.49.0", features = ["io-std", "io-util", "macros", "rt-multi-thread"] }
-rrq-producer = { version = "0.9.20", path = "../producer" }
+rrq-producer = { version = "0.10.0", path = "../producer" }
 
 [lints]
 workspace = true
