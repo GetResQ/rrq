@@ -185,6 +185,12 @@ type Handler = (
 ) => Promise<ExecutionOutcome | unknown> | ExecutionOutcome | unknown;
 ```
 
+### Cancellation Behavior (Known Limitation)
+
+- Runner cancellation and deadline enforcement are best-effort in TypeScript.
+- Handlers currently receive only `request` (no `AbortSignal` argument), so user code may continue running after a cancel/timeout response is emitted.
+- This is most visible with long-running side effects; make handlers idempotent and safe to retry.
+
 ### Execution Request
 
 ```typescript
