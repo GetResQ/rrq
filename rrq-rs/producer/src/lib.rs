@@ -832,6 +832,8 @@ fn build_debounce_script() -> Script {
                     end\n\
                     if ARGV[15] ~= '' then\n\
                         redis.call('HSET', existing_job_key, 'correlation_context', ARGV[15])\n\
+                    else\n\
+                        redis.call('HDEL', existing_job_key, 'correlation_context')\n\
                     end\n\
                     redis.call('ZADD', KEYS[1], ARGV[16], existing_id)\n\
                     local ttl = tonumber(ARGV[17])\n\
@@ -1271,6 +1273,67 @@ mod tests {
         let queue_key = format_queue_key("default");
         let count: i64 = conn.zcard(queue_key).await.unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn producer_debounce_clears_stale_correlation_context_on_update() {
+        let _guard = redis_lock().lock().await;
+        let dsn = std::env::var("RRQ_TEST_REDIS_DSN")
+            .unwrap_or_else(|_| "redis://localhost:6379/15".to_string());
+        let client = redis::Client::open(dsn.as_str()).unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let _: () = redis::cmd("FLUSHDB").query_async(&mut conn).await.unwrap();
+
+        let producer = Producer::with_config(
+            &dsn,
+            ProducerConfig {
+                correlation_mappings: HashMap::from([(
+                    "session_id".to_string(),
+                    "session.id".to_string(),
+                )]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let first_params = json!({
+            "session": { "id": "sess-1" }
+        })
+        .as_object()
+        .expect("params object")
+        .clone();
+
+        let job_id = producer
+            .enqueue_with_debounce(
+                "work",
+                first_params,
+                "debounce-key",
+                Duration::from_secs(5),
+                EnqueueOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        let second_id = producer
+            .enqueue_with_debounce(
+                "work",
+                serde_json::Map::new(),
+                "debounce-key",
+                Duration::from_secs(5),
+                EnqueueOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(job_id, second_id);
+
+        let job_key = format!("{JOB_KEY_PREFIX}{job_id}");
+        let correlation_context: Option<String> =
+            conn.hget(&job_key, "correlation_context").await.unwrap();
+        assert!(
+            correlation_context.is_none(),
+            "correlation_context should be removed when debounce update has no mapped values"
+        );
     }
 
     #[tokio::test]
