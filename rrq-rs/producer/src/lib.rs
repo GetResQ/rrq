@@ -531,7 +531,7 @@ struct HashMapInjector<'a>(&'a mut HashMap<String, String>);
 
 impl<'a> Injector for HashMapInjector<'a> {
     fn set(&mut self, key: &str, value: String) {
-        self.0.insert(key.to_string(), value);
+        self.0.entry(key.to_string()).or_insert(value);
     }
 }
 
@@ -932,6 +932,28 @@ mod tests {
         let merged = merge_trace_context(Some(existing)).expect("expected trace context");
 
         assert_eq!(merged.get("message_id").map(String::as_str), Some("m-1"));
+    }
+
+    #[test]
+    fn hash_map_injector_preserves_existing_trace_headers() {
+        let mut map = HashMap::from([(
+            "traceparent".to_string(),
+            "00-upstream-trace-upstream-span-01".to_string(),
+        )]);
+        {
+            let mut injector = HashMapInjector(&mut map);
+            injector.set("traceparent", "00-local-trace-local-span-01".to_string());
+            injector.set("tracestate", "vendor=value".to_string());
+        }
+
+        assert_eq!(
+            map.get("traceparent").map(String::as_str),
+            Some("00-upstream-trace-upstream-span-01")
+        );
+        assert_eq!(
+            map.get("tracestate").map(String::as_str),
+            Some("vendor=value")
+        );
     }
 
     #[test]
