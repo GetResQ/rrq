@@ -20,7 +20,7 @@ for _, job_id in ipairs(candidates) do
         break
     end
     local job_key = 'rrq:job:' .. job_id
-    if redis.call('HEXISTS', job_key, 'enqueue_time') ~= 1 then
+    if redis.call('EXISTS', job_key) ~= 1 then
         redis.call('ZREM', KEYS[1], job_id)
     else
         local lock_timeout_ms = default_lock_timeout_ms

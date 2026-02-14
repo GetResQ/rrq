@@ -134,6 +134,7 @@ pub mod otel {
     use super::Telemetry;
 
     static RUNNER_METRICS: OnceLock<RunnerMetrics> = OnceLock::new();
+    static METRICS_ENDPOINT_CONFIGURED: OnceLock<bool> = OnceLock::new();
     static TRACE_PROVIDER: OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> = OnceLock::new();
     static LOG_PROVIDER: OnceLock<opentelemetry_sdk::logs::SdkLoggerProvider> = OnceLock::new();
     static METER_PROVIDER: OnceLock<opentelemetry_sdk::metrics::SdkMeterProvider> = OnceLock::new();
@@ -171,9 +172,21 @@ pub mod otel {
             .as_str()
     }
 
+    fn metrics_endpoint_configured() -> bool {
+        *METRICS_ENDPOINT_CONFIGURED.get_or_init(|| {
+            resolve_otlp_env(OtlpGlobalEndpointStyle::AppendHttpSignalPath)
+                .signal(OtlpSignal::Metrics)
+                .endpoint
+                .is_some()
+        })
+    }
+
     fn runner_metrics() -> Option<RunnerMetrics> {
         if let Some(metrics) = RUNNER_METRICS.get() {
             return Some(metrics.clone());
+        }
+        if !metrics_endpoint_configured() {
+            return None;
         }
 
         // Build transient instruments from the current global provider without
@@ -496,6 +509,75 @@ pub mod otel {
             tracing::debug!(
                 signal_overrides,
                 "using OTEL_EXPORTER_OTLP_ENDPOINT fallback for signals without explicit OTEL_EXPORTER_OTLP_{{TRACES|METRICS|LOGS}}_ENDPOINT"
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::collections::HashMap;
+        use std::sync::{Mutex, OnceLock};
+
+        use opentelemetry_sdk::Resource;
+        use rrq_config::OtlpSignalConfig;
+
+        use super::*;
+
+        static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+        fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+            TEST_MUTEX
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .expect("test mutex poisoned")
+        }
+
+        #[test]
+        fn early_metric_emission_does_not_prebind_metrics_cache() {
+            let _guard = test_lock();
+            assert!(
+                METER_PROVIDER.get().is_none(),
+                "test requires uninitialized meter provider"
+            );
+            assert!(
+                RUNNER_METRICS.get().is_none(),
+                "test requires empty runner metrics cache"
+            );
+
+            // Emit before metrics provider init to model startup ordering where
+            // runtime counters may fire before init_tracing().
+            record_deadline_expired();
+            assert!(
+                RUNNER_METRICS.get().is_none(),
+                "early metric emission must not cache no-op instruments"
+            );
+            assert!(
+                METRICS_ENDPOINT_CONFIGURED.get().is_some(),
+                "metrics endpoint configuration should be cached after first emission"
+            );
+
+            let otlp = OtlpEnvConfig {
+                metrics: OtlpSignalConfig {
+                    endpoint: Some("http://127.0.0.1:4318/v1/metrics".to_string()),
+                    headers: HashMap::new(),
+                    has_explicit_endpoint_env: true,
+                },
+                ..OtlpEnvConfig::default()
+            };
+            let resource = Resource::builder()
+                .with_service_name("rrq-runner-test".to_string())
+                .build();
+
+            init_metrics_provider("rrq-runner-test", resource, &otlp)
+                .expect("metrics provider should initialize");
+
+            assert!(
+                METER_PROVIDER.get().is_some(),
+                "metrics provider should be cached after init"
+            );
+            assert!(
+                RUNNER_METRICS.get().is_some(),
+                "runner metrics cache should initialize after provider setup"
             );
         }
     }

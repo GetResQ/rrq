@@ -1409,6 +1409,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn job_store_atomic_claim_ready_jobs_claims_existing_hash_missing_enqueue_time() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let queue_name = ctx.settings.default_queue_name.clone();
+        let dlq_name = ctx.settings.default_dlq_name.clone();
+        let worker_id = "worker-missing-enqueue-time";
+        let mut job = build_job(&queue_name, &dlq_name);
+        job.id = "missing-enqueue-time-job".to_string();
+        ctx.store.save_job_definition(&job).await.unwrap();
+        ctx.store
+            .add_job_to_queue(
+                &queue_name,
+                &job.id,
+                (Utc::now().timestamp_millis() - 1_000) as f64,
+            )
+            .await
+            .unwrap();
+
+        let job_key = format!("{JOB_KEY_PREFIX}{}", job.id);
+        let removed: i64 = redis::cmd("HDEL")
+            .arg(&job_key)
+            .arg("enqueue_time")
+            .query_async(&mut ctx.store.conn)
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+
+        let claimed = ctx
+            .store
+            .atomic_claim_ready_jobs(&queue_name, worker_id, 10_000, 0, 1, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(claimed, vec![job.id.clone()]);
+        assert!(
+            !ctx.store
+                .is_job_queued(&queue_name, &job.id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            ctx.store.get_job_lock_owner(&job.id).await.unwrap(),
+            Some(worker_id.to_string())
+        );
+        let active = ctx.store.get_active_job_ids(worker_id).await.unwrap();
+        assert!(active.contains(&job.id));
+
+        let _ = ctx.store.remove_active_job(worker_id, &job.id).await;
+        let _ = ctx.store.release_job_lock(&job.id).await;
+    }
+
+    #[tokio::test]
     async fn job_store_get_job_definitions_skips_malformed_hash_entries() {
         let mut ctx = RedisTestContext::new().await.unwrap();
         let malformed_job_id = "malformed-job";
