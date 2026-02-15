@@ -11,6 +11,7 @@ pub struct TcpSocketSpec {
 
 impl TcpSocketSpec {
     /// Returns a socket address with the given port (used for pool port allocation).
+    #[must_use]
     pub fn addr(&self, port: u16) -> SocketAddr {
         SocketAddr::new(self.host, port)
     }
@@ -76,7 +77,7 @@ mod tests {
     #[test]
     fn parse_tcp_socket_ipv4_localhost() {
         let spec = parse_tcp_socket("127.0.0.1:9000").unwrap();
-        assert_eq!(spec.host, IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+        assert_eq!(spec.host, IpAddr::V4(Ipv4Addr::LOCALHOST));
         assert_eq!(spec.port, 9000);
     }
 

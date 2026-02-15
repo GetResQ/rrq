@@ -282,6 +282,7 @@ mod tests {
             dlq_name: Some(dlq_name.to_string()),
             worker_id: None,
             trace_context: None,
+            correlation_context: None,
         }
     }
 

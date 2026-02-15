@@ -2,9 +2,11 @@ use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use rrq_config::normalize_queue_name;
 use serde_json::Value;
+use std::time::Instant;
 
 use crate::job::{Job, JobStatus};
 use crate::store::JobStore;
+use crate::telemetry;
 use rrq_config::RRQSettings;
 
 #[derive(Debug, Clone, Default)]
@@ -40,12 +42,20 @@ impl RRQClient {
         params: serde_json::Map<String, Value>,
         options: EnqueueOptions,
     ) -> Result<Job> {
+        let enqueue_started = Instant::now();
         let job_id = options.job_id.unwrap_or_else(Job::new_id);
         let queue_name = normalize_queue_name(
             &options
                 .queue_name
                 .unwrap_or_else(|| self.settings.default_queue_name.clone()),
         );
+        let record_enqueue_result = |result: &str| {
+            telemetry::record_enqueue(
+                &queue_name,
+                result,
+                enqueue_started.elapsed().as_secs_f64() * 1000.0,
+            );
+        };
 
         let span = tracing::info_span!(
             "rrq.enqueue",
@@ -53,20 +63,40 @@ impl RRQClient {
             function_name = %function_name,
             queue_name = %queue_name
         );
+        if let Some(provided_trace_context) = options.trace_context.as_ref() {
+            telemetry::set_parent_from_trace_context(&span, provided_trace_context);
+        }
         let _enter = span.enter();
+        let trace_context = telemetry::inject_current_trace_context(options.trace_context.clone());
+        let correlation_context = telemetry::extract_correlation_context(
+            &params,
+            &self.settings.correlation_mappings,
+            trace_context.as_ref(),
+        );
+        if let Some(correlation_context) = correlation_context.as_ref() {
+            telemetry::apply_correlation_context_to_span(&span, correlation_context);
+        }
 
         let job_timeout_seconds = options
             .job_timeout_seconds
             .unwrap_or(self.settings.default_job_timeout_seconds);
         if job_timeout_seconds <= 0 {
-            anyhow::bail!("job_timeout_seconds must be positive");
+            record_enqueue_result("invalid_timeout");
+            return Err(anyhow::anyhow!("job_timeout_seconds must be positive"));
         }
-        let lock_ttl_floor = job_timeout_seconds
+        let lock_ttl_floor = match job_timeout_seconds
             .checked_add(self.settings.default_lock_timeout_extension_seconds)
             .and_then(|value| value.checked_add(1))
-            .ok_or_else(|| anyhow::anyhow!("lock_ttl_seconds overflow"))?;
+        {
+            Some(lock_ttl_floor) => lock_ttl_floor,
+            None => {
+                record_enqueue_result("lock_ttl_overflow");
+                return Err(anyhow::anyhow!("lock_ttl_seconds overflow"));
+            }
+        };
         if lock_ttl_floor <= 0 {
-            anyhow::bail!("lock_ttl_seconds must be positive");
+            record_enqueue_result("invalid_lock_ttl");
+            return Err(anyhow::anyhow!("lock_ttl_seconds must be positive"));
         }
 
         let enqueue_time = Utc::now();
@@ -138,7 +168,8 @@ impl RRQClient {
             queue_name: Some(queue_name.clone()),
             dlq_name: None,
             worker_id: None,
-            trace_context: options.trace_context,
+            trace_context,
+            correlation_context,
         };
 
         let score_ms = desired_run_time.timestamp_millis() as f64;
@@ -152,16 +183,19 @@ impl RRQClient {
                 if unique_acquired && let Some(unique_key) = options.unique_key.as_deref() {
                     let _ = self.job_store.release_unique_job_lock(unique_key).await;
                 }
+                record_enqueue_result("duplicate_job_id");
                 anyhow::bail!("job_id already exists");
             }
             Err(err) => {
                 if unique_acquired && let Some(unique_key) = options.unique_key.as_deref() {
                     let _ = self.job_store.release_unique_job_lock(unique_key).await;
                 }
+                record_enqueue_result("error");
                 return Err(err);
             }
         }
 
+        record_enqueue_result("enqueued");
         tracing::info!("job enqueued");
         Ok(job)
     }
@@ -173,6 +207,8 @@ mod tests {
     use crate::constants::UNIQUE_JOB_LOCK_PREFIX;
     use crate::test_support::RedisTestContext;
     use chrono::Duration as ChronoDuration;
+    use serde_json::json;
+    use std::collections::HashMap;
 
     #[tokio::test]
     async fn enqueue_with_defer_by_and_unique_lock() {
@@ -401,5 +437,95 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.queue_name.as_deref(), Some(queue_name));
+    }
+
+    #[tokio::test]
+    async fn enqueue_extracts_and_persists_correlation_context_from_mappings() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        ctx.settings.correlation_mappings = HashMap::from([
+            ("session_id".to_string(), "session.id".to_string()),
+            ("message_id".to_string(), "params.message_id".to_string()),
+        ]);
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let params = json!({
+            "session": { "id": "sess-99" },
+            "message_id": "msg-123"
+        })
+        .as_object()
+        .expect("params object")
+        .clone();
+
+        let job = client
+            .enqueue("task", params, EnqueueOptions::default())
+            .await
+            .unwrap();
+        let correlation = job
+            .correlation_context
+            .as_ref()
+            .expect("correlation context should be set");
+        assert_eq!(
+            correlation.get("session_id").map(String::as_str),
+            Some("sess-99")
+        );
+        assert_eq!(
+            correlation.get("message_id").map(String::as_str),
+            Some("msg-123")
+        );
+
+        let stored = ctx
+            .store
+            .get_job_definition(&job.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let stored_correlation = stored
+            .correlation_context
+            .as_ref()
+            .expect("stored correlation context should be set");
+        assert_eq!(
+            stored_correlation.get("session_id").map(String::as_str),
+            Some("sess-99")
+        );
+        assert_eq!(
+            stored_correlation.get("message_id").map(String::as_str),
+            Some("msg-123")
+        );
+    }
+
+    #[tokio::test]
+    async fn enqueue_prefers_trace_context_values_for_correlation() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        ctx.settings.correlation_mappings =
+            HashMap::from([("session_id".to_string(), "session.id".to_string())]);
+        let mut client = RRQClient::new(ctx.settings.clone(), ctx.store.clone());
+        let params = json!({
+            "session": { "id": "sess-from-params" }
+        })
+        .as_object()
+        .expect("params object")
+        .clone();
+        let trace_context =
+            HashMap::from([("session_id".to_string(), "sess-from-trace".to_string())]);
+
+        let job = client
+            .enqueue(
+                "task",
+                params,
+                EnqueueOptions {
+                    trace_context: Some(trace_context),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let correlation = job
+            .correlation_context
+            .as_ref()
+            .expect("correlation context should be set");
+        assert_eq!(
+            correlation.get("session_id").map(String::as_str),
+            Some("sess-from-trace")
+        );
     }
 }

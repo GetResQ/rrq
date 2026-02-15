@@ -14,6 +14,7 @@ async def test_python_runner_context_includes_trace_and_deadline() -> None:
 
     async def handler(request):  # type: ignore[no-untyped-def]
         captured["trace_context"] = request.context.trace_context
+        captured["correlation_context"] = request.context.correlation_context
         captured["deadline"] = request.context.deadline
         captured["worker_id"] = request.context.worker_id
         return {"ok": True}
@@ -36,6 +37,7 @@ async def test_python_runner_context_includes_trace_and_deadline() -> None:
             queue_name="default",
             deadline=deadline,
             trace_context={"traceparent": "00-abc-123-01"},
+            correlation_context={"tenant_id": "t-1"},
             worker_id="worker-123",
         ),
     )
@@ -45,5 +47,6 @@ async def test_python_runner_context_includes_trace_and_deadline() -> None:
     assert outcome.status == "success"
     assert outcome.request_id == "req-ctx"
     assert captured["trace_context"] == {"traceparent": "00-abc-123-01"}
+    assert captured["correlation_context"] == {"tenant_id": "t-1"}
     assert captured["deadline"] == deadline
     assert captured["worker_id"] == "worker-123"

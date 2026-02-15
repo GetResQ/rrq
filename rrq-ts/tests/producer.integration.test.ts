@@ -62,6 +62,15 @@ describe("RRQClient producer integration", () => {
     expect(score as number).toBeGreaterThanOrEqual(minScore);
   });
 
+  it("uses explicit enqueueTime when provided", async () => {
+    const enqueueTime = new Date("2024-01-01T00:00:00.000Z");
+    const jobId = await client.enqueue("handler", { enqueueTime });
+    const jobKey = `${CONSTANTS.job_key_prefix}${jobId}`;
+    const stored = await redis.hGet(jobKey, "enqueue_time");
+    expect(stored).not.toBeNull();
+    expect(Date.parse(stored as string)).toBe(enqueueTime.getTime());
+  });
+
   it("reuses job id for unique keys", async () => {
     const uniqueKey = "user-unique-1";
     const job1 = await client.enqueue("handler", { uniqueKey });

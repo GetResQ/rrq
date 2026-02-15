@@ -78,6 +78,54 @@ describe("RRQClient producer requests", () => {
     ).rejects.toBeInstanceOf(RustProducerError);
   });
 
+  it("includes enqueue_time when enqueueTime is provided", async () => {
+    const stub = new StubProducer({ job_id: "job-5" });
+    const client = new RRQClient({ producer: stub as unknown as RustProducer });
+    const enqueueTime = new Date("2024-01-01T00:00:00.000Z");
+
+    await client.enqueue("handler", { enqueueTime });
+
+    const options = (stub.lastRequest?.options as any) ?? {};
+    expect(options.enqueue_time).toBe(enqueueTime.toISOString());
+  });
+
+  it("rejects invalid enqueueTime timestamps", async () => {
+    const stub = new StubProducer({ job_id: "job-6" });
+    const client = new RRQClient({ producer: stub as unknown as RustProducer });
+
+    await expect(
+      client.enqueue("handler", { enqueueTime: new Date("invalid") }),
+    ).rejects.toBeInstanceOf(RustProducerError);
+  });
+
+  it("passes correlation mappings through config payload", () => {
+    const originalFromConfig = RustProducer.fromConfig;
+    const seen: Array<Record<string, unknown>> = [];
+    const stub = new StubProducer({ job_id: "job-config" });
+    (
+      RustProducer as unknown as { fromConfig: (config: Record<string, unknown>) => RustProducer }
+    ).fromConfig = ((config: Record<string, unknown>) => {
+      seen.push(config);
+      return stub as unknown as RustProducer;
+    }) as (config: Record<string, unknown>) => RustProducer;
+
+    try {
+      const client = new RRQClient({
+        config: {
+          redisDsn: "redis://localhost:6379/0",
+          correlationMappings: { session_id: "params.session.id" },
+        },
+      });
+      void client;
+    } finally {
+      (RustProducer as unknown as { fromConfig: typeof RustProducer.fromConfig }).fromConfig =
+        originalFromConfig;
+    }
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.correlation_mappings).toEqual({ session_id: "params.session.id" });
+  });
+
   it("omits unique_ttl_seconds unless provided", async () => {
     const stub = new StubProducer({ job_id: "job-4" });
     const client = new RRQClient({ producer: stub as unknown as RustProducer });

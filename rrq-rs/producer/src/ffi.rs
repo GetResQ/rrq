@@ -46,6 +46,7 @@ struct ProducerConfigPayload {
     job_timeout_seconds: Option<i64>,
     result_ttl_seconds: Option<i64>,
     idempotency_ttl_seconds: Option<i64>,
+    correlation_mappings: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -242,7 +243,31 @@ fn producer_config_from_settings(settings: &ProducerSettings) -> ProducerConfig 
         job_timeout_seconds: settings.job_timeout_seconds,
         result_ttl_seconds: settings.result_ttl_seconds,
         idempotency_ttl_seconds: settings.idempotency_ttl_seconds,
+        correlation_mappings: settings.correlation_mappings.clone(),
     }
+}
+
+fn producer_config_from_payload(payload: ProducerConfigPayload) -> (String, ProducerConfig) {
+    let ProducerConfigPayload {
+        redis_dsn,
+        queue_name,
+        max_retries,
+        job_timeout_seconds,
+        result_ttl_seconds,
+        idempotency_ttl_seconds,
+        correlation_mappings,
+    } = payload;
+    let default_config = ProducerConfig::default();
+    let config = ProducerConfig {
+        queue_name: queue_name.unwrap_or(default_config.queue_name),
+        max_retries: max_retries.unwrap_or(default_config.max_retries),
+        job_timeout_seconds: job_timeout_seconds.unwrap_or(default_config.job_timeout_seconds),
+        result_ttl_seconds: result_ttl_seconds.unwrap_or(default_config.result_ttl_seconds),
+        idempotency_ttl_seconds: idempotency_ttl_seconds
+            .unwrap_or(default_config.idempotency_ttl_seconds),
+        correlation_mappings: correlation_mappings.unwrap_or(default_config.correlation_mappings),
+    };
+    (redis_dsn, config)
 }
 
 #[unsafe(no_mangle)]
@@ -260,31 +285,10 @@ pub extern "C" fn rrq_producer_new(
             .enable_all()
             .build()
             .map_err(|err| err.to_string())?;
+        let (redis_dsn, config) = producer_config_from_payload(config_payload);
 
-        let default_config = ProducerConfig::default();
-        let config = ProducerConfig {
-            queue_name: config_payload
-                .queue_name
-                .unwrap_or(default_config.queue_name),
-            max_retries: config_payload
-                .max_retries
-                .unwrap_or(default_config.max_retries),
-            job_timeout_seconds: config_payload
-                .job_timeout_seconds
-                .unwrap_or(default_config.job_timeout_seconds),
-            result_ttl_seconds: config_payload
-                .result_ttl_seconds
-                .unwrap_or(default_config.result_ttl_seconds),
-            idempotency_ttl_seconds: config_payload
-                .idempotency_ttl_seconds
-                .unwrap_or(default_config.idempotency_ttl_seconds),
-        };
-
-        let producer = block_on_runtime(
-            &runtime,
-            Producer::with_config(config_payload.redis_dsn, config),
-        )?
-        .map_err(|err| err.to_string())?;
+        let producer = block_on_runtime(&runtime, Producer::with_config(redis_dsn, config))?
+            .map_err(|err| err.to_string())?;
 
         Ok(Box::into_raw(Box::new(ProducerHandle {
             runtime,
@@ -622,7 +626,7 @@ pub extern "C" fn rrq_string_free(ptr: *mut c_char) {
 mod tests {
     use super::*;
     use serde::Deserialize;
-    use std::ffi::CStr;
+    use std::ffi::{CStr, CString};
 
     #[derive(Debug, Deserialize)]
     struct ConstantsPayload {
@@ -650,5 +654,94 @@ mod tests {
             payload.idempotency_key_prefix,
             crate::IDEMPOTENCY_KEY_PREFIX
         );
+    }
+
+    #[test]
+    fn producer_config_from_payload_uses_correlation_mappings() {
+        let payload: ProducerConfigPayload = serde_json::from_str(
+            r#"{
+                "redis_dsn": "redis://localhost:6379/0",
+                "correlation_mappings": {
+                    "session_id": "params.session.id",
+                    "message_id": "params.message.id"
+                }
+            }"#,
+        )
+        .expect("payload parses");
+
+        let (_dsn, config) = producer_config_from_payload(payload);
+        assert_eq!(
+            config
+                .correlation_mappings
+                .get("session_id")
+                .map(String::as_str),
+            Some("params.session.id")
+        );
+        assert_eq!(
+            config
+                .correlation_mappings
+                .get("message_id")
+                .map(String::as_str),
+            Some("params.message.id")
+        );
+    }
+
+    #[test]
+    fn producer_new_rejects_invalid_json() {
+        let mut err: *mut c_char = ptr::null_mut();
+        let payload = CString::new("{invalid-json").expect("payload");
+        let handle = rrq_producer_new(payload.as_ptr(), &mut err);
+        assert!(handle.is_null());
+        assert!(!err.is_null());
+        let err_message = unsafe { CStr::from_ptr(err) }
+            .to_str()
+            .expect("utf-8 error message")
+            .to_string();
+        rrq_string_free(err);
+        assert!(err_message.contains("invalid producer config"));
+    }
+
+    #[test]
+    fn producer_new_rejects_null_config_pointer() {
+        let mut err: *mut c_char = ptr::null_mut();
+        let handle = rrq_producer_new(ptr::null(), &mut err);
+        assert!(handle.is_null());
+        assert!(!err.is_null());
+        let err_message = unsafe { CStr::from_ptr(err) }
+            .to_str()
+            .expect("utf-8 error message")
+            .to_string();
+        rrq_string_free(err);
+        assert!(err_message.contains("received null pointer"));
+    }
+
+    #[test]
+    fn producer_enqueue_rejects_null_handle() {
+        let mut err: *mut c_char = ptr::null_mut();
+        let payload = CString::new(r#"{"function_name":"task"}"#).expect("payload");
+        let response = rrq_producer_enqueue(ptr::null_mut(), payload.as_ptr(), &mut err);
+        assert!(response.is_null());
+        assert!(!err.is_null());
+        let err_message = unsafe { CStr::from_ptr(err) }
+            .to_str()
+            .expect("utf-8 error message")
+            .to_string();
+        rrq_string_free(err);
+        assert!(err_message.contains("producer handle is null"));
+    }
+
+    #[test]
+    fn producer_get_job_status_rejects_null_handle() {
+        let mut err: *mut c_char = ptr::null_mut();
+        let payload = CString::new(r#"{"job_id":"job-1"}"#).expect("payload");
+        let response = rrq_producer_get_job_status(ptr::null_mut(), payload.as_ptr(), &mut err);
+        assert!(response.is_null());
+        assert!(!err.is_null());
+        let err_message = unsafe { CStr::from_ptr(err) }
+            .to_str()
+            .expect("utf-8 error message")
+            .to_string();
+        rrq_string_free(err);
+        assert!(err_message.contains("producer handle is null"));
     }
 }

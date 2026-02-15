@@ -61,7 +61,7 @@ import { RunnerRuntime, Registry } from "rrq-ts";
 
 const registry = new Registry();
 
-registry.register("send_email", async (request, signal) => {
+registry.register("send_email", async (request) => {
   const { to, template } = request.params;
 
   // Your email sending logic here
@@ -113,9 +113,24 @@ interface EnqueueOptions {
   maxRetries?: number;                // Max retry attempts
   jobTimeoutSeconds?: number;         // Execution timeout
   resultTtlSeconds?: number;          // How long to keep results
+  enqueueTime?: Date;                 // Explicit enqueue timestamp
   deferUntil?: Date;                  // Schedule for specific time
   deferBySeconds?: number;            // Delay execution
   traceContext?: Record<string, string>;  // Distributed tracing
+}
+```
+
+### Producer Config
+
+```typescript
+interface ProducerConfig {
+  redisDsn: string;
+  queueName?: string;
+  maxRetries?: number;
+  jobTimeoutSeconds?: number;
+  resultTtlSeconds?: number;
+  idempotencyTtlSeconds?: number;
+  correlationMappings?: Record<string, string>; // e.g. { tenant_id: "params.tenant.id" }
 }
 ```
 
@@ -171,6 +186,13 @@ type Handler = (
 ) => Promise<ExecutionOutcome | unknown> | ExecutionOutcome | unknown;
 ```
 
+### Cancellation Behavior
+
+- Handlers receive an `AbortSignal`.
+- Runner `cancel` requests and deadline timeouts abort that signal.
+- Pass the signal to downstream APIs (`fetch`, database clients, etc.) so in-flight work stops promptly.
+- Keep handlers idempotent and retry-safe for libraries that do not support cancellation.
+
 ### Execution Request
 
 ```typescript
@@ -187,6 +209,7 @@ interface ExecutionRequest {
     enqueue_time: string;
     deadline?: string | null;
     trace_context?: Record<string, string> | null;
+    correlation_context?: Record<string, string> | null;
     worker_id?: string | null;
   };
 }

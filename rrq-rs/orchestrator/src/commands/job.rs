@@ -354,6 +354,7 @@ mod tests {
             dlq_name: Some(dlq_name.to_string()),
             worker_id: Some("worker-1".to_string()),
             trace_context: None,
+            correlation_context: None,
         }
     }
 

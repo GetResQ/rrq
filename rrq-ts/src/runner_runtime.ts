@@ -48,6 +48,7 @@ export interface ExecutionContext {
   queue_name: string;
   deadline?: string | null;
   trace_context?: Record<string, string> | null;
+  correlation_context?: Record<string, string> | null;
   worker_id?: string | null;
 }
 
@@ -100,14 +101,15 @@ export class Registry {
     this.handlers.set(name, handler);
   }
 
-  async execute(request: ExecutionRequest, signal: AbortSignal): Promise<ExecutionOutcome> {
+  async execute(request: ExecutionRequest, signal?: AbortSignal): Promise<ExecutionOutcome> {
     const handler = this.handlers.get(request.function_name);
     if (!handler) {
       return errorOutcome(request, "handler_not_found", "Handler not found");
     }
 
     try {
-      const result = await handler(request, signal);
+      const executionSignal = signal ?? new AbortController().signal;
+      const result = await handler(request, executionSignal);
       if (isExecutionOutcome(result)) {
         const jobId = result.job_id && result.job_id.length > 0 ? result.job_id : request.job_id;
         const requestId =

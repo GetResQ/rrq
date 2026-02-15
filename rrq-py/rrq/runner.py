@@ -26,6 +26,7 @@ class ExecutionContext(BaseModel):
     queue_name: str
     deadline: datetime | None = None
     trace_context: dict[str, str] | None = None
+    correlation_context: dict[str, str] | None = None
     worker_id: str | None = None
 
 

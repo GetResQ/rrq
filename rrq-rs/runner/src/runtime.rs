@@ -520,6 +520,7 @@ mod tests {
                 queue_name: "default".to_string(),
                 deadline: None,
                 trace_context: None,
+                correlation_context: None,
                 worker_id: None,
             },
         }
@@ -627,6 +628,7 @@ mod tests {
                 queue_name: "default".to_string(),
                 deadline: None,
                 trace_context: None,
+                correlation_context: None,
                 worker_id: None,
             },
         };

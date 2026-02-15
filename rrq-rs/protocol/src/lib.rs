@@ -20,6 +20,8 @@ pub struct ExecutionContext {
     pub deadline: Option<DateTime<Utc>>,
     #[serde(default)]
     pub trace_context: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub correlation_context: Option<HashMap<String, String>>,
     pub worker_id: Option<String>,
 }
 
@@ -287,6 +289,7 @@ mod tests {
                 queue_name: "default".to_string(),
                 deadline: None,
                 trace_context: None,
+                correlation_context: None,
                 worker_id: None,
             },
         };

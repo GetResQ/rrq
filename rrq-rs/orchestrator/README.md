@@ -121,6 +121,8 @@ default_runner_name = "python"
 default_job_timeout_seconds = 300
 default_max_retries = 3
 heartbeat_interval_seconds = 60
+runner_shutdown_term_grace_seconds = 5.0
+runner_enable_inflight_cancel_hints = false
 
 [rrq.runners.python]
 type = "socket"
@@ -132,6 +134,12 @@ cwd = "/app"            # Working directory (optional)
 
 [rrq.runners.python.env]
 PYTHONPATH = "/app"     # Environment variables (optional)
+
+# Cancellation behavior:
+# - Pending jobs: deterministic cancellation (`rrq job cancel`)
+# - In-flight jobs: shutdown/timeout enforcement is process lifecycle based
+#   (Rust orchestrator handles TERM -> grace -> KILL on Unix)
+# - Cancel hints to runners are optional and disabled by default
 
 # Cron jobs
 [[rrq.cron_jobs]]

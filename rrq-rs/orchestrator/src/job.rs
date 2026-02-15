@@ -55,6 +55,8 @@ pub struct Job {
 
     #[serde(default)]
     pub trace_context: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    pub correlation_context: Option<std::collections::HashMap<String, String>>,
 }
 
 impl Job {

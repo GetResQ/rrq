@@ -12,6 +12,7 @@ from .producer_ffi import (
     JobStatusResponseModel,
     RustProducer,
     RustProducerError,
+    get_producer_constants,
 )
 
 
@@ -21,6 +22,15 @@ def _normalize_datetime(value: datetime) -> str:
     else:
         value = value.astimezone(timezone.utc)
     return value.isoformat()
+
+
+def _normalize_queue_name(value: str) -> str:
+    if not value.strip():
+        raise ValueError("queue_name cannot be blank")
+    prefix = get_producer_constants().queue_key_prefix
+    if value.startswith(prefix):
+        return value
+    return f"{prefix}{value}"
 
 
 def _to_job_result(payload: JobResultModel) -> JobResult:
@@ -47,7 +57,11 @@ class RRQClient:
         if config is not None and config_path is not None:
             raise ValueError("Provide either config or config_path, not both.")
         if config is not None:
-            self._producer = RustProducer.from_config(config)
+            normalized_config = dict(config)
+            queue_name = normalized_config.get("queue_name")
+            if isinstance(queue_name, str):
+                normalized_config["queue_name"] = _normalize_queue_name(queue_name)
+            self._producer = RustProducer.from_config(normalized_config)
         else:
             self._producer = RustProducer.from_toml(config_path)
 
@@ -65,6 +79,9 @@ class RRQClient:
         defer_until = options.get("defer_until")
         if isinstance(defer_until, datetime):
             options["defer_until"] = _normalize_datetime(defer_until)
+        queue_name = options.get("queue_name")
+        if isinstance(queue_name, str):
+            options["queue_name"] = _normalize_queue_name(queue_name)
 
         request = {
             "function_name": function_name,

@@ -163,6 +163,11 @@ def _otel_set_common_attributes(
         span.set_attribute("messaging.operation", "process")
         if request.context.worker_id:
             span.set_attribute("rrq.worker_id", request.context.worker_id)
+        if request.context.correlation_context:
+            for key, value in request.context.correlation_context.items():
+                if not key or not value:
+                    continue
+                span.set_attribute(key, value)
         if request.context.deadline:
             deadline = request.context.deadline
             if deadline.tzinfo is None:
