@@ -256,7 +256,7 @@ Key settings:
 redis_dsn = "redis://localhost:6379/0"
 default_runner_name = "python"
 default_job_timeout_seconds = 300  # 5 minutes
-default_max_retries = 3
+default_max_retries = 5
 
 [rrq.runners.python]
 type = "socket"

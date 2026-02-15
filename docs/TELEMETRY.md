@@ -121,6 +121,45 @@ runner), endpoint resolution uses this precedence per signal
 Special case:
 - If `OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT` is explicitly set to an empty value, that signal is disabled and does not fall back to `OTEL_EXPORTER_OTLP_ENDPOINT`.
 
+## Correlation Context
+
+RRQ can automatically extract values from job parameters and attach them as
+span attributes on telemetry spans. This lets you filter and group traces by
+application-specific dimensions (for example, tenant ID or user ID) without
+manually injecting them into `trace_context`.
+
+### Configuration
+
+Add a `[rrq.correlation_mappings]` table to `rrq.toml`:
+
+```toml
+[rrq.correlation_mappings]
+tenant_id = "params.tenant.id"
+user_id   = "user_id"
+```
+
+Each key is the span attribute name; the value is a dot-separated path into the
+job's `params` object. The `params.` prefix is optional — `"tenant.id"` and
+`"params.tenant.id"` are equivalent.
+
+Correlation context is extracted at enqueue time (producer) and at dispatch time
+(orchestrator), then applied as attributes on the `rrq.job` and `rrq.runner`
+spans.
+
+### Precedence
+
+If a key already exists in the job's `trace_context`, that value takes
+precedence over the params lookup. This lets you override correlation values
+from the calling service when needed.
+
+### Limits
+
+- Max **16** correlation keys per job.
+- Key names: max **64** characters.
+- Values: truncated to **256** characters.
+- Only scalar values (strings, numbers, booleans) are extracted; objects and
+  arrays are skipped.
+
 ## Metrics (OTel)
 
 When OTLP metrics export is enabled, RRQ emits counters/histograms for queue

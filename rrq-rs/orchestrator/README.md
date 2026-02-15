@@ -85,31 +85,33 @@ rrq worker run --config rrq.toml --burst
 
 ```bash
 rrq queue list --config rrq.toml
+rrq queue stats --config rrq.toml
 rrq queue inspect default --config rrq.toml
-rrq queue pause default --config rrq.toml
-rrq queue resume default --config rrq.toml
 ```
 
 ### Jobs
 
 ```bash
-rrq job get <job-id> --config rrq.toml
+rrq job show <job-id> --config rrq.toml
+rrq job list --config rrq.toml
 rrq job cancel <job-id> --config rrq.toml
-rrq job retry <job-id> --config rrq.toml
+rrq job replay <job-id> --config rrq.toml
+rrq job trace <job-id> --config rrq.toml
 ```
 
 ### Dead Letter Queue
 
 ```bash
 rrq dlq list --config rrq.toml
-rrq dlq retry-all --config rrq.toml
-rrq dlq purge --config rrq.toml
+rrq dlq stats --config rrq.toml
+rrq dlq inspect <job-id> --config rrq.toml
+rrq dlq requeue --all --config rrq.toml
 ```
 
 ### Health
 
 ```bash
-rrq health --config rrq.toml
+rrq check --config rrq.toml
 ```
 
 ## Configuration Reference
@@ -119,7 +121,7 @@ rrq health --config rrq.toml
 redis_dsn = "redis://localhost:6379/0"    # Required
 default_runner_name = "python"
 default_job_timeout_seconds = 300
-default_max_retries = 3
+default_max_retries = 5
 heartbeat_interval_seconds = 60
 runner_shutdown_term_grace_seconds = 5.0
 runner_enable_inflight_cancel_hints = false

@@ -47,6 +47,9 @@ only the fields they need (for example, `redis_dsn` and default queue settings).
 | `base_retry_delay_seconds` | float | `5.0` | — | Initial retry delay for backoff. |
 | `max_retry_delay_seconds` | float | `3600` | — | Max retry delay. |
 | `worker_shutdown_grace_period_seconds` | float | `10.0` | — | Grace period before forced shutdown. |
+| `runner_shutdown_term_grace_seconds` | float | `5.0` | — | Seconds after SIGTERM before escalating to SIGKILL for runner processes. |
+| `runner_enable_inflight_cancel_hints` | bool | `false` | — | Send cancel protocol messages to runners for in-flight jobs. Best-effort; disabled by default. |
+| `correlation_mappings` | table | `{}` | — | Maps attribute names to dot-separated JSON paths in job params. See below. |
 | `expected_job_ttl` | int | `30` | — | Buffer used in internal lock timing. |
 
 Notes:
@@ -67,7 +70,7 @@ other).
 | `type` | string | `"socket"` | Only `socket` is supported. |
 | `cmd` | array of strings | required | Command to start the runner. |
 | `pool_size` | int | CPU count | Forced to `1` in watch mode. |
-| `max_in_flight` | int | `1` | Max concurrent requests per runner process. |
+| `max_in_flight` | int | `1` | Max concurrent requests per runner process. Must be `<= 64`. |
 | `env` | table | — | Extra environment variables for the runner process. |
 | `cwd` | string | — | Working directory for the runner process. |
 | `tcp_socket` | string | required | Localhost TCP socket in `host:port` or `[host]:port` form. |
@@ -97,6 +100,31 @@ Resolution order:
 1) `runner#handler` prefix in the job's function name
 2) `[rrq.runner_routes]` entry for the queue
 3) `default_runner_name`
+
+## [rrq.correlation_mappings]
+
+Optional table that maps attribute names to dot-separated JSON paths in job
+`params`. Matched values are extracted at enqueue time (producer) and dispatch
+time (orchestrator) and attached as correlation context on telemetry spans.
+
+```toml
+[rrq.correlation_mappings]
+tenant_id = "params.tenant.id"
+user_id   = "user_id"
+```
+
+Path resolution:
+- Paths may start with `params.` or omit it (both `"params.tenant.id"` and
+  `"tenant.id"` resolve against the job params object).
+- Only scalar values (strings, numbers, booleans) are extracted; objects and
+  arrays are skipped.
+- If a key already exists in the job's `trace_context`, that value takes
+  precedence over the params lookup.
+
+Limits:
+- Max 16 correlation keys per job.
+- Key names: max 64 characters.
+- Values: truncated to 256 characters.
 
 ## [[rrq.cron_jobs]]
 

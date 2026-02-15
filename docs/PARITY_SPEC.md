@@ -23,6 +23,7 @@ All bindings must accept the same producer configuration values:
 - `job_timeout_seconds`
 - `result_ttl_seconds`
 - `idempotency_ttl_seconds`
+- `correlation_mappings`
 
 Bindings must also support loading configuration from `rrq.toml` via the shared
 Rust config loader (rrq-config). The default resolution is:
