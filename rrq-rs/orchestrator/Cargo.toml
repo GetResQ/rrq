@@ -1,6 +1,6 @@
 [package]
 name = "rrq"
-version = "0.10.1"
+version = "0.10.2"
 edition = "2024"
 build = "build.rs"
 license = "Apache-2.0"
@@ -42,8 +42,8 @@ opentelemetry_sdk = { version = "0.31.0", default-features = false, features = [
 opentelemetry-appender-tracing = "0.31.1"
 tracing-opentelemetry = "0.32.1"
 
-rrq-protocol = { version = "0.10.1", path = "../protocol" }
-rrq-config = { version = "0.10.1", path = "../config" }
+rrq-protocol = { version = "0.10.2", path = "../protocol" }
+rrq-config = { version = "0.10.2", path = "../config" }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30.1", default-features = false, features = ["signal", "process"] }
@@ -51,7 +51,7 @@ nix = { version = "0.30.1", default-features = false, features = ["signal", "pro
 [dev-dependencies]
 serde_json = "1.0.149"
 tokio = { version = "1.49.0", features = ["io-std", "io-util", "macros", "rt-multi-thread"] }
-rrq-producer = { version = "0.10.1", path = "../producer" }
+rrq-producer = { version = "0.10.2", path = "../producer" }
 
 [build-dependencies]
 full_moon = { version = "2.1.1", default-features = false }
