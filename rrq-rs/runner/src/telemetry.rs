@@ -166,13 +166,14 @@ pub mod otel {
         }
     }
 
-    fn runner_label() -> &'static str {
-        RUNNER_LABEL
-            .get_or_init(|| match std::env::var("OTEL_SERVICE_NAME") {
-                Ok(value) if !value.is_empty() => value,
-                _ => std::env::var("SERVICE_NAME").unwrap_or_else(|_| "rrq-runner".to_string()),
-            })
-            .as_str()
+    fn runner_label() -> String {
+        if let Some(value) = RUNNER_LABEL.get() {
+            return value.clone();
+        }
+        match std::env::var("OTEL_SERVICE_NAME") {
+            Ok(value) if !value.is_empty() => value,
+            _ => std::env::var("SERVICE_NAME").unwrap_or_else(|_| "rrq-runner".to_string()),
+        }
     }
 
     fn metrics_endpoint_configured() -> bool {
@@ -206,20 +207,18 @@ pub mod otel {
         let Some(metrics) = runner_metrics() else {
             return;
         };
-        metrics.runner_inflight.add(
-            delta,
-            &[KeyValue::new("runner", runner_label().to_string())],
-        );
+        metrics
+            .runner_inflight
+            .add(delta, &[KeyValue::new("runner", runner_label())]);
     }
 
     pub fn record_runner_channel_pressure(pressure: usize) {
         let Some(metrics) = runner_metrics() else {
             return;
         };
-        metrics.runner_channel_pressure.record(
-            pressure as f64,
-            &[KeyValue::new("runner", runner_label().to_string())],
-        );
+        metrics
+            .runner_channel_pressure
+            .record(pressure as f64, &[KeyValue::new("runner", runner_label())]);
     }
 
     pub fn record_deadline_expired() {
@@ -228,7 +227,7 @@ pub mod otel {
         };
         metrics
             .deadline_expired_total
-            .add(1, &[KeyValue::new("runner", runner_label().to_string())]);
+            .add(1, &[KeyValue::new("runner", runner_label())]);
     }
 
     pub fn record_cancellation(scope: &str) {
@@ -238,7 +237,7 @@ pub mod otel {
         metrics.cancellations_total.add(
             1,
             &[
-                KeyValue::new("runner", runner_label().to_string()),
+                KeyValue::new("runner", runner_label()),
                 KeyValue::new("scope", scope.to_string()),
             ],
         );
@@ -259,7 +258,7 @@ pub mod otel {
             OutcomeStatus::Error => "error",
         };
         let attrs = [
-            KeyValue::new("runner", runner_label().to_string()),
+            KeyValue::new("runner", runner_label()),
             KeyValue::new("outcome", outcome.to_string()),
             KeyValue::new("function", function_name.to_string()),
         ];
@@ -542,8 +541,8 @@ pub mod otel {
                 .expect("test mutex poisoned")
         }
 
-        #[test]
-        fn early_metric_emission_does_not_prebind_metrics_cache() {
+        #[tokio::test]
+        async fn early_metric_emission_does_not_prebind_metrics_cache() {
             let _guard = test_lock();
             assert!(
                 METER_PROVIDER.get().is_none(),
@@ -552,6 +551,18 @@ pub mod otel {
             assert!(
                 RUNNER_METRICS.get().is_none(),
                 "test requires empty runner metrics cache"
+            );
+            assert!(
+                RUNNER_LABEL.get().is_none(),
+                "test requires empty runner label cache"
+            );
+
+            // Regression: ensure helper reads do not lock the configured runner label before
+            // init_metrics_provider() gets a chance to set it.
+            let _pre_init = runner_label();
+            assert!(
+                RUNNER_LABEL.get().is_none(),
+                "runner_label must not lock runner label before telemetry init"
             );
 
             // Emit before metrics provider init to model startup ordering where
@@ -564,6 +575,10 @@ pub mod otel {
             assert!(
                 METRICS_ENDPOINT_CONFIGURED.get().is_some(),
                 "metrics endpoint configuration should be cached after first emission"
+            );
+            assert!(
+                RUNNER_LABEL.get().is_none(),
+                "early metric emission must not lock runner label before telemetry init"
             );
 
             let otlp = OtlpEnvConfig {
@@ -588,6 +603,11 @@ pub mod otel {
             assert!(
                 RUNNER_METRICS.get().is_some(),
                 "runner metrics cache should initialize after provider setup"
+            );
+            assert_eq!(
+                RUNNER_LABEL.get().map(String::as_str),
+                Some("rrq-runner-test"),
+                "metrics init should set runner label to configured service name"
             );
         }
     }

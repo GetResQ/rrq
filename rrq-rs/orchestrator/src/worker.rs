@@ -1390,15 +1390,30 @@ async fn cleanup_running(
     running_jobs: Arc<Mutex<HashMap<String, RunningJobInfo>>>,
     running_aborts: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
 ) -> Result<()> {
-    job_store.remove_active_job(worker_id, job_id).await?;
-    job_store
-        .release_job_lock_if_owner(job_id, worker_id)
-        .await?;
-    let mut running = running_jobs.lock().await;
-    running.remove(job_id);
-    let mut aborts = running_aborts.lock().await;
-    aborts.remove(job_id);
-    Ok(())
+    let remove_active_result = job_store.remove_active_job(worker_id, job_id).await;
+    let release_lock_result = job_store.release_job_lock_if_owner(job_id, worker_id).await;
+
+    {
+        let mut running = running_jobs.lock().await;
+        running.remove(job_id);
+    }
+    {
+        let mut aborts = running_aborts.lock().await;
+        aborts.remove(job_id);
+    }
+
+    if let Err(err) = remove_active_result {
+        if let Err(lock_err) = release_lock_result {
+            tracing::warn!(
+                "rrq.job_id" = %job_id,
+                error = %lock_err,
+                "failed to release job lock while cleaning up after active-job removal failure"
+            );
+        }
+        return Err(err);
+    }
+
+    release_lock_result.map(|_| ())
 }
 
 async fn handle_execution_outcome(
@@ -2206,6 +2221,83 @@ mod tests {
         let (exec, handler) = split_runner_name("plain");
         assert_eq!(exec, None);
         assert_eq!(handler, "plain");
+    }
+
+    #[tokio::test]
+    async fn cleanup_running_clears_in_memory_state_when_lock_release_fails() {
+        let mut ctx = RedisTestContext::new().await.unwrap();
+        let worker_id = "worker-1";
+        let job_id = format!("job-{}", Uuid::new_v4());
+        let queue_name = normalize_queue_name(&ctx.settings.default_queue_name);
+        let lock_key = format!("{LOCK_KEY_PREFIX}{job_id}");
+
+        ctx.store
+            .track_active_job(worker_id, &job_id, Utc::now())
+            .await
+            .unwrap();
+
+        let running_jobs = Arc::new(Mutex::new(HashMap::new()));
+        {
+            let mut running = running_jobs.lock().await;
+            running.insert(
+                job_id.clone(),
+                RunningJobInfo {
+                    queue_name,
+                    runner_name: Some("test".to_string()),
+                    request_id: Some("req-1".to_string()),
+                },
+            );
+        }
+        let running_task = tokio::spawn(async {});
+        let abort_handle = running_task.abort_handle();
+        running_task.abort();
+        let running_aborts = Arc::new(Mutex::new(HashMap::new()));
+        {
+            let mut aborts = running_aborts.lock().await;
+            aborts.insert(job_id.clone(), abort_handle);
+        }
+
+        let redis = redis::Client::open(ctx.settings.redis_dsn.as_str()).unwrap();
+        let mut conn = redis.get_multiplexed_async_connection().await.unwrap();
+        conn.lpush::<_, _, ()>(&lock_key, "wrongtype-owner")
+            .await
+            .unwrap();
+
+        let cleanup_err = cleanup_running(
+            &job_id,
+            &mut ctx.store,
+            worker_id,
+            running_jobs.clone(),
+            running_aborts.clone(),
+        )
+        .await
+        .expect_err("cleanup should fail when lock key has wrong type");
+        assert!(
+            cleanup_err
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("wrongtype")
+        );
+
+        let running = running_jobs.lock().await;
+        assert!(
+            !running.contains_key(&job_id),
+            "running_jobs must be cleared even when lock release fails"
+        );
+        drop(running);
+
+        let aborts = running_aborts.lock().await;
+        assert!(
+            !aborts.contains_key(&job_id),
+            "running_aborts must be cleared even when lock release fails"
+        );
+        drop(aborts);
+
+        let active = ctx.store.get_active_job_ids(worker_id).await.unwrap();
+        assert!(
+            !active.contains(&job_id),
+            "redis active-jobs set should still be cleaned up"
+        );
     }
 
     #[tokio::test]
