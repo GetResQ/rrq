@@ -25,6 +25,8 @@ def _normalize_datetime(value: datetime) -> str:
 
 
 def _normalize_queue_name(value: str) -> str:
+    if not value.strip():
+        raise ValueError("queue_name cannot be blank")
     prefix = get_producer_constants().queue_key_prefix
     if value.startswith(prefix):
         return value

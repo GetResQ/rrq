@@ -167,6 +167,22 @@ async def test_enqueue_job_preserves_prefixed_queue_name(
 
 
 @pytest.mark.asyncio
+async def test_enqueue_job_rejects_blank_queue_name(rrq_client: RRQClient) -> None:
+    with pytest.raises(ValueError, match="queue_name cannot be blank"):
+        await rrq_client.enqueue("blank_queue_func", {"queue_name": "   "})
+
+
+def test_client_config_rejects_blank_queue_name(redis_url_for_client: str) -> None:
+    with pytest.raises(ValueError, match="queue_name cannot be blank"):
+        RRQClient(
+            config={
+                "redis_dsn": redis_url_for_client,
+                "queue_name": "   ",
+            }
+        )
+
+
+@pytest.mark.asyncio
 async def test_enqueue_with_user_specified_job_id(
     rrq_client: RRQClient, redis_for_client_tests: AsyncRedis
 ) -> None:
