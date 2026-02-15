@@ -13,6 +13,7 @@ use opentelemetry_otlp::{
     LogExporter, MetricExporter, SpanExporter, WithExportConfig, WithHttpConfig,
 };
 use opentelemetry_sdk::logs as sdklogs;
+use opentelemetry_sdk::logs::log_processor_with_async_runtime::BatchLogProcessor as AsyncBatchLogProcessor;
 use opentelemetry_sdk::metrics as sdkmetrics;
 use opentelemetry_sdk::metrics::periodic_reader_with_async_runtime::PeriodicReader as AsyncPeriodicReader;
 use opentelemetry_sdk::propagation::{BaggagePropagator, TraceContextPropagator};
@@ -392,7 +393,7 @@ fn init_otel_log_layer(
 
     let provider = sdklogs::SdkLoggerProvider::builder()
         .with_resource(build_resource(metadata))
-        .with_batch_exporter(exporter)
+        .with_log_processor(AsyncBatchLogProcessor::builder(exporter, runtime::Tokio).build())
         .build();
     let _ = OTEL_LOG_PROVIDER.set(provider);
     let Some(provider_ref) = OTEL_LOG_PROVIDER.get() else {

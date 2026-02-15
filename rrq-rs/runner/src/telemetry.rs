@@ -123,6 +123,9 @@ pub mod otel {
     use opentelemetry::{KeyValue, global};
     use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
     use opentelemetry_otlp::{WithExportConfig, WithHttpConfig};
+    use opentelemetry_sdk::metrics::periodic_reader_with_async_runtime::PeriodicReader as AsyncPeriodicReader;
+    use opentelemetry_sdk::runtime;
+    use opentelemetry_sdk::trace::span_processor_with_async_runtime::BatchSpanProcessor;
     use rrq_config::{OtlpEnvConfig, OtlpGlobalEndpointStyle, OtlpSignal, resolve_otlp_env};
     use tracing::Span;
     use tracing::field::Empty;
@@ -426,7 +429,7 @@ pub mod otel {
         };
         let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
             .with_resource(resource)
-            .with_batch_exporter(exporter)
+            .with_span_processor(BatchSpanProcessor::builder(exporter, runtime::Tokio).build())
             .build();
         let tracer = provider.tracer(service_name.to_string());
         let _ = TRACE_PROVIDER.set(provider.clone());
@@ -448,9 +451,10 @@ pub mod otel {
             .with_endpoint(endpoint.to_string())
             .with_headers(otlp.signal(OtlpSignal::Metrics).headers.clone())
             .build()?;
+        let reader = AsyncPeriodicReader::builder(exporter, runtime::Tokio).build();
         let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
             .with_resource(resource)
-            .with_periodic_exporter(exporter)
+            .with_reader(reader)
             .build();
         global::set_meter_provider(meter_provider.clone());
         let meter = global::meter("rrq.runner");
@@ -487,7 +491,13 @@ pub mod otel {
         };
         let provider = opentelemetry_sdk::logs::SdkLoggerProvider::builder()
             .with_resource(resource)
-            .with_batch_exporter(exporter)
+            .with_log_processor(
+                opentelemetry_sdk::logs::log_processor_with_async_runtime::BatchLogProcessor::builder(
+                    exporter,
+                    opentelemetry_sdk::runtime::Tokio,
+                )
+                .build(),
+            )
             .build();
         let _ = LOG_PROVIDER.set(provider);
         let Some(provider_ref) = LOG_PROVIDER.get() else {
