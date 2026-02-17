@@ -1541,17 +1541,13 @@ struct InFlightRequest {
 ///
 /// Returns a set of runner names that should be spawned. This includes:
 /// - Runners explicitly mapped to queues via `runner_routes`
-/// - The default runner (for queues without explicit routing)
+/// - The default runner only when at least one selected queue is not explicitly routed
 pub fn determine_needed_runners(
     settings: &RRQSettings,
     queues: Option<&[String]>,
 ) -> std::collections::HashSet<String> {
     let mut needed = std::collections::HashSet::new();
-
-    // Always need the default runner for unrouted queues
-    if !settings.default_runner_name.is_empty() {
-        needed.insert(settings.default_runner_name.clone());
-    }
+    let mut needs_default_runner = false;
 
     // Get the effective queues (CLI override or default)
     let effective_queues: Vec<String> = match queues {
@@ -1571,7 +1567,13 @@ pub fn determine_needed_runners(
         });
         if let Some(runner_name) = runner_name {
             needed.insert(runner_name.clone());
+        } else {
+            needs_default_runner = true;
         }
+    }
+
+    if needs_default_runner && !settings.default_runner_name.is_empty() {
+        needed.insert(settings.default_runner_name.clone());
     }
 
     needed
@@ -3722,11 +3724,10 @@ mod tests {
             .runner_routes
             .insert("mail-extract".to_string(), "mail_runner".to_string());
 
-        // When listening to mail-ingest queue, should need mail_runner + default
+        // When listening to a queue with explicit routing, only routed runner is required.
         let needed = super::determine_needed_runners(&settings, Some(&["mail-ingest".to_string()]));
-        assert!(needed.contains("python")); // default runner
         assert!(needed.contains("mail_runner")); // routed runner
-        assert_eq!(needed.len(), 2);
+        assert_eq!(needed.len(), 1);
     }
 
     #[test]
@@ -3740,11 +3741,24 @@ mod tests {
             .runner_routes
             .insert("my-queue".to_string(), "special_runner".to_string());
 
-        // When no queues provided, uses default_queue_name which is routed
+        // When no queues provided, uses default_queue_name. If it's routed, only routed
+        // runner is required.
         let needed = super::determine_needed_runners(&settings, None);
-        assert!(needed.contains("python")); // default runner
         assert!(needed.contains("special_runner")); // routed for default queue
-        assert_eq!(needed.len(), 2);
+        assert_eq!(needed.len(), 1);
+    }
+
+    #[test]
+    fn determine_needed_runners_includes_default_for_unrouted_queue() {
+        let settings = RRQSettings {
+            default_runner_name: "python".to_string(),
+            default_queue_name: "default".to_string(),
+            ..Default::default()
+        };
+
+        let needed = super::determine_needed_runners(&settings, Some(&["not-routed".to_string()]));
+        assert!(needed.contains("python"));
+        assert_eq!(needed.len(), 1);
     }
 
     #[test]
