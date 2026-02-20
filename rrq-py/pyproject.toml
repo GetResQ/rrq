@@ -4,36 +4,33 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rrq"
-version = "0.10.3"
+version = "0.10.4"
 authors = [{ name = "Mazdak Rezvani", email = "mazdak@me.com" }]
 description = "RRQ is a library for creating reliable job queues using Rust, Redis. with language-agnostic producers and workers."
 readme = "README.md"
 requires-python = ">=3.11"
 classifiers = [
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
-    "Topic :: System :: Distributed Computing",
-    "Topic :: System :: Monitoring",
-    "Topic :: Software Development :: Libraries :: Python Modules",
-    "Topic :: System :: Distributed Computing",
-    "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: System :: Distributed Computing",
+  "Topic :: System :: Monitoring",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: System :: Distributed Computing",
+  "Intended Audience :: Developers",
 ]
-dependencies = [
-    "redis[hiredis]>=4.2.0",
-    "pydantic>=2.11.4",
-]
+dependencies = ["redis[hiredis]>=4.2.0", "pydantic>=2.11.4"]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.3.5",
-    "pytest-asyncio>=1.0.0",
-    "pytest-cov>=6.0.0",
-    "python-dotenv>=1.2.1",
-    "ruff==0.14.9",
-    "ty==0.0.1-alpha.26",
+  "pytest>=8.3.5",
+  "pytest-asyncio>=1.0.0",
+  "pytest-cov>=6.0.0",
+  "python-dotenv>=1.2.1",
+  "ruff==0.14.9",
+  "ty==0.0.1-alpha.26",
 ]
 
 [project.urls]
@@ -66,7 +63,4 @@ before-build = "python {package}/scripts/build_rust_binary.py"
 environment = { CARGO_TERM_COLOR = "always" }
 
 [dependency-groups]
-dev = [
-    "cibuildwheel>=3.3.1",
-    "hatchling>=1.28.0",
-]
+dev = ["cibuildwheel>=3.3.1", "hatchling>=1.28.0"]

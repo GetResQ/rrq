@@ -1,12 +1,6 @@
 [workspace]
 resolver = "2"
-members = [
-    "config",
-    "runner",
-    "orchestrator",
-    "producer",
-    "protocol",
-]
+members = ["config", "runner", "orchestrator", "producer", "protocol"]
 
 [profile.release]
 overflow-checks = true

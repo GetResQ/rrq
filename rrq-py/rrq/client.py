@@ -12,6 +12,7 @@ from .producer_ffi import (
     JobStatusResponseModel,
     RustProducer,
     RustProducerError,
+    WaitForCompletionResponseModel,
     get_producer_constants,
 )
 
@@ -164,5 +165,26 @@ class RRQClient:
             raise ValueError(str(exc)) from exc
 
         if not response.found or response.job is None:
+            return None
+        return _to_job_result(response.job)
+
+    async def wait_for_completion(
+        self,
+        job_id: str,
+        *,
+        timeout_seconds: float = 30.0,
+        block_interval_seconds: float = 0.25,
+    ) -> JobResult | None:
+        try:
+            response: WaitForCompletionResponseModel = await asyncio.to_thread(
+                self._producer.wait_for_completion_with_options,
+                job_id=job_id,
+                timeout_seconds=timeout_seconds,
+                block_interval_seconds=block_interval_seconds,
+            )
+        except RustProducerError as exc:
+            raise ValueError(str(exc)) from exc
+
+        if not response.completed or response.job is None:
             return None
         return _to_job_result(response.job)

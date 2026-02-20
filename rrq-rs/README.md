@@ -7,6 +7,7 @@ This is the Rust implementation of RRQ (Reliable Redis Queue), providing the orc
 RRQ is a distributed job queue that separates concerns cleanly: a Rust orchestrator handles all the complex distributed systems logic (scheduling, retries, locking, timeouts) while job handlers run in isolated processes using any language.
 
 **Key benefits:**
+
 - **Redis-backed** - Atomic operations, predictable semantics, no separate database
 - **Language-agnostic workers** - Write handlers in Python, TypeScript, or Rust
 - **Production-ready** - Retries, DLQ, timeouts, cron, distributed tracing out of the box
@@ -14,13 +15,13 @@ RRQ is a distributed job queue that separates concerns cleanly: a Rust orchestra
 
 ## Crates
 
-| Crate | Description | crates.io |
-|-------|-------------|-----------|
-| [`rrq`](./orchestrator) | CLI orchestrator - schedules jobs, manages runners, handles retries | [![Crates.io](https://img.shields.io/crates/v/rrq.svg)](https://crates.io/crates/rrq) |
-| [`rrq-producer`](./producer) | Client library for enqueuing jobs | [![Crates.io](https://img.shields.io/crates/v/rrq-producer.svg)](https://crates.io/crates/rrq-producer) |
-| [`rrq-runner`](./runner) | Runtime for building job handlers in Rust | [![Crates.io](https://img.shields.io/crates/v/rrq-runner.svg)](https://crates.io/crates/rrq-runner) |
-| [`rrq-protocol`](./protocol) | Wire protocol types for orchestrator-runner communication | [![Crates.io](https://img.shields.io/crates/v/rrq-protocol.svg)](https://crates.io/crates/rrq-protocol) |
-| [`rrq-config`](./config) | Configuration loader and settings types | [![Crates.io](https://img.shields.io/crates/v/rrq-config.svg)](https://crates.io/crates/rrq-config) |
+| Crate                        | Description                                                         | crates.io                                                                                               |
+| ---------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| [`rrq`](./orchestrator)      | CLI orchestrator - schedules jobs, manages runners, handles retries | [![Crates.io](https://img.shields.io/crates/v/rrq.svg)](https://crates.io/crates/rrq)                   |
+| [`rrq-producer`](./producer) | Client library for enqueuing jobs                                   | [![Crates.io](https://img.shields.io/crates/v/rrq-producer.svg)](https://crates.io/crates/rrq-producer) |
+| [`rrq-runner`](./runner)     | Runtime for building job handlers in Rust                           | [![Crates.io](https://img.shields.io/crates/v/rrq-runner.svg)](https://crates.io/crates/rrq-runner)     |
+| [`rrq-protocol`](./protocol) | Wire protocol types for orchestrator-runner communication           | [![Crates.io](https://img.shields.io/crates/v/rrq-protocol.svg)](https://crates.io/crates/rrq-protocol) |
+| [`rrq-config`](./config)     | Configuration loader and settings types                             | [![Crates.io](https://img.shields.io/crates/v/rrq-config.svg)](https://crates.io/crates/rrq-config)     |
 
 ## Quick Start
 
@@ -92,9 +93,9 @@ cargo run --example socket_runner -- --tcp-socket 127.0.0.1:9000
 
 ## Related Packages
 
-| Package | Language | Purpose |
-|---------|----------|---------|
-| [rrq](https://pypi.org/project/rrq/) | Python | Producer client + runner |
+| Package                                        | Language   | Purpose                  |
+| ---------------------------------------------- | ---------- | ------------------------ |
+| [rrq](https://pypi.org/project/rrq/)           | Python     | Producer client + runner |
 | [rrq-ts](https://www.npmjs.com/package/rrq-ts) | TypeScript | Producer client + runner |
 
 ## License

@@ -12,6 +12,7 @@ cargo build -p rrq-producer --release
 ```
 
 Output files:
+
 - Linux: `librrq_producer.so`
 - macOS: `librrq_producer.dylib`
 - Windows: `rrq_producer.dll`

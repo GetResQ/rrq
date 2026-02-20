@@ -1,6 +1,6 @@
 [package]
 name = "rrq-runner"
-version = "0.10.3"
+version = "0.10.4"
 edition = "2024"
 license = "Apache-2.0"
 description = "RRQ runner runtime for Rust."
@@ -13,28 +13,59 @@ categories = ["asynchronous"]
 
 [dependencies]
 async-trait = "0.1.89"
-rrq-protocol = { version = "0.10.3", path = "../protocol" }
-rrq-config = { version = "0.10.3", path = "../config" }
+rrq-protocol = { version = "0.10.4", path = "../protocol" }
+rrq-config = { version = "0.10.4", path = "../config" }
 chrono = "0.4.43"
 serde_json = "1.0.149"
-tokio = { version = "1.49.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.49.0", features = [
+  "fs",
+  "io-util",
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "sync",
+  "time",
+] }
 tracing = "0.1.44"
 
-opentelemetry = { version = "0.31.0", optional = true, default-features = false, features = ["trace", "metrics", "logs"] }
-opentelemetry-otlp = { version = "0.31.0", optional = true, default-features = false, features = ["http-proto", "reqwest-client", "reqwest-rustls-webpki-roots", "trace", "metrics", "logs"] }
-opentelemetry_sdk = { version = "0.31.0", optional = true, default-features = false, features = ["rt-tokio", "trace", "metrics", "logs", "experimental_trace_batch_span_processor_with_async_runtime", "experimental_metrics_periodicreader_with_async_runtime", "experimental_logs_batch_log_processor_with_async_runtime"] }
+opentelemetry = { version = "0.31.0", optional = true, default-features = false, features = [
+  "trace",
+  "metrics",
+  "logs",
+] }
+opentelemetry-otlp = { version = "0.31.0", optional = true, default-features = false, features = [
+  "http-proto",
+  "reqwest-client",
+  "reqwest-rustls-webpki-roots",
+  "trace",
+  "metrics",
+  "logs",
+] }
+opentelemetry_sdk = { version = "0.31.0", optional = true, default-features = false, features = [
+  "rt-tokio",
+  "trace",
+  "metrics",
+  "logs",
+  "experimental_trace_batch_span_processor_with_async_runtime",
+  "experimental_metrics_periodicreader_with_async_runtime",
+  "experimental_logs_batch_log_processor_with_async_runtime",
+] }
 opentelemetry-appender-tracing = { version = "0.31.1", optional = true }
 tracing-opentelemetry = { version = "0.32.1", optional = true }
-tracing-subscriber = { version = "0.3.22", optional = true, features = ["env-filter", "fmt", "registry"] }
+tracing-subscriber = { version = "0.3.22", optional = true, features = [
+  "env-filter",
+  "fmt",
+  "registry",
+] }
 
 [features]
 otel = [
-    "opentelemetry",
-    "opentelemetry-otlp",
-    "opentelemetry_sdk",
-    "opentelemetry-appender-tracing",
-    "tracing-opentelemetry",
-    "tracing-subscriber",
+  "opentelemetry",
+  "opentelemetry-otlp",
+  "opentelemetry_sdk",
+  "opentelemetry-appender-tracing",
+  "tracing-opentelemetry",
+  "tracing-subscriber",
 ]
 
 [lints]

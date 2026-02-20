@@ -1,6 +1,12 @@
 import { z } from "zod";
 
-import { JobResult, JobStatusResponse, RustProducer, RustProducerError } from "./producer_ffi.js";
+import {
+  JobResult,
+  JobStatusResponse,
+  RustProducer,
+  RustProducerError,
+  WaitForCompletionResponse,
+} from "./producer_ffi.js";
 
 export interface ProducerConfig {
   redisDsn: string;
@@ -35,6 +41,11 @@ export interface RateLimitOptions extends EnqueueOptions {
 export interface DebounceOptions extends EnqueueOptions {
   debounceKey: string;
   debounceSeconds: number;
+}
+
+export interface WaitForCompletionOptions {
+  timeoutSeconds?: number;
+  blockIntervalSeconds?: number;
 }
 
 interface ProducerResponse {
@@ -77,6 +88,28 @@ const ProducerResponseSchema = z
     job_id: z.string().nullable().optional(),
   })
   .strict();
+
+const WaitForCompletionRequestSchema = z
+  .object({
+    job_id: z.string().min(1),
+    timeout_seconds: z.number().positive(),
+    block_interval_seconds: z.number().nonnegative(),
+  })
+  .strict();
+
+const WaitForCompletionResponseSchema = z
+  .object({
+    completed: z.boolean(),
+    job: z
+      .object({
+        status: z.string(),
+        result: z.unknown().nullable().optional(),
+        last_error: z.string().nullable().optional(),
+      })
+      .nullable()
+      .optional(),
+  })
+  .passthrough();
 
 export class RRQClient {
   private producer: RustProducer;
@@ -141,6 +174,40 @@ export class RRQClient {
       return null;
     }
     return response.job;
+  }
+
+  async waitForCompletion(
+    jobId: string,
+    options: WaitForCompletionOptions = {},
+  ): Promise<JobResult | null> {
+    const timeoutSeconds = options.timeoutSeconds ?? 30;
+    const blockIntervalSeconds = options.blockIntervalSeconds ?? 0.25;
+    const request: Record<string, unknown> = {
+      job_id: jobId,
+      timeout_seconds: timeoutSeconds,
+      block_interval_seconds: blockIntervalSeconds,
+    };
+
+    try {
+      WaitForCompletionRequestSchema.parse(request);
+      const response = (await this.producer.waitForCompletion(
+        request,
+      )) as WaitForCompletionResponse;
+      const parsed = WaitForCompletionResponseSchema.safeParse(response);
+      if (!parsed.success) {
+        throw new RustProducerError(parsed.error.message);
+      }
+      const payload = parsed.data;
+      if (!payload.completed || !payload.job) {
+        return null;
+      }
+      return payload.job;
+    } catch (error) {
+      if (error instanceof RustProducerError) {
+        throw error;
+      }
+      throw new RustProducerError(String(error));
+    }
   }
 
   private async callProducer(

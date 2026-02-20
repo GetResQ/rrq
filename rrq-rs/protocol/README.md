@@ -13,6 +13,7 @@ RRQ (Reliable Redis Queue) is a distributed job queue with a Rust orchestrator a
 ## When to Use This Crate
 
 Use `rrq-protocol` if you're:
+
 - Building a custom runner in a new language
 - Extending the RRQ protocol
 - Debugging orchestrator-runner communication
@@ -107,22 +108,22 @@ let frame: Vec<u8> = encode_frame(&message)?;
 
 ## Outcome Types
 
-| Type | Description |
-|------|-------------|
-| `success` | Job completed |
-| `failure` | Job failed (may retry) |
+| Type                | Description             |
+| ------------------- | ----------------------- |
+| `success`           | Job completed           |
+| `failure`           | Job failed (may retry)  |
 | `handler_not_found` | No handler for function |
-| `timeout` | Exceeded deadline |
-| `cancelled` | Job cancelled |
-| `retry_after` | Retry after delay |
+| `timeout`           | Exceeded deadline       |
+| `cancelled`         | Job cancelled           |
+| `retry_after`       | Retry after delay       |
 
 ## Related Crates
 
-| Crate | Purpose |
-|-------|---------|
-| [`rrq`](https://crates.io/crates/rrq) | Orchestrator |
-| [`rrq-runner`](https://crates.io/crates/rrq-runner) | Runner runtime |
-| [`rrq-producer`](https://crates.io/crates/rrq-producer) | Job producer |
+| Crate                                                   | Purpose        |
+| ------------------------------------------------------- | -------------- |
+| [`rrq`](https://crates.io/crates/rrq)                   | Orchestrator   |
+| [`rrq-runner`](https://crates.io/crates/rrq-runner)     | Runner runtime |
+| [`rrq-producer`](https://crates.io/crates/rrq-producer) | Job producer   |
 
 ## License
 

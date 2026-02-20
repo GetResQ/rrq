@@ -119,11 +119,11 @@ impl ProducerHandle for MockProducer {
 
 ## Related Crates
 
-| Crate | Purpose |
-|-------|---------|
-| [`rrq`](https://crates.io/crates/rrq) | Orchestrator (runs workers) |
-| [`rrq-runner`](https://crates.io/crates/rrq-runner) | Build Rust job handlers |
-| [`rrq-protocol`](https://crates.io/crates/rrq-protocol) | Wire protocol types |
+| Crate                                                   | Purpose                     |
+| ------------------------------------------------------- | --------------------------- |
+| [`rrq`](https://crates.io/crates/rrq)                   | Orchestrator (runs workers) |
+| [`rrq-runner`](https://crates.io/crates/rrq-runner)     | Build Rust job handlers     |
+| [`rrq-protocol`](https://crates.io/crates/rrq-protocol) | Wire protocol types         |
 
 ## License
 

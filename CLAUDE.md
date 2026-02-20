@@ -5,6 +5,7 @@ Rust-first distributed Redis job queue, with Python and TypeScript bindings.
 See @rrq-py/tests/CLAUDE.md for Python-specific testing guidelines.
 
 ## Commands
+
 ```bash
 # Rust core (primary)
 cd rrq-rs
@@ -25,6 +26,7 @@ uv add <package>
 ```
 
 ## Repo-Wide Testing
+
 ```bash
 # Rust
 cd rrq-rs
@@ -47,6 +49,7 @@ sh scripts/with-producer-lib.sh -- uv run --project rrq-py python examples/integ
 ```
 
 Notes:
+
 - `examples/integration_test.py` expects Redis running and an RRQ CLI binary
   available (PATH or `rrq-py/rrq/bin/rrq`).
 - Use a dedicated Redis DB (`--redis-dsn redis://localhost:6379/15`) if any
@@ -54,6 +57,7 @@ Notes:
 - The `with-producer-lib.sh` wrapper builds and exports the producer FFI lib.
 
 ## Code Style
+
 - Rust (`rrq-rs`): idiomatic Rust patterns, run `cargo fmt` and `clippy`.
 - TypeScript (`rrq-ts`): keep strict typing and run `bun run lint`.
 - Python (`rrq-py`): Python 3.11+, double quotes, 88 char lines.
@@ -64,12 +68,15 @@ Notes:
 - Python: no blocking I/O in async contexts.
 
 ## Code References
+
 Use VS Code clickable format:
+
 - `rrq-rs/orchestrator/src/worker.rs:120`
 - `rrq-py/rrq/queue.py:45`
 - `rrq-ts/src/producer.ts:88`
 
 ## Rules
+
 - Never commit broken tests
 - Use `uv` for Python operations in `rrq-py`
 - Follow existing patterns in codebase

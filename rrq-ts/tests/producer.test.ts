@@ -5,15 +5,23 @@ import { RustProducer, RustProducerError } from "../src/producer_ffi.js";
 
 class StubProducer {
   lastRequest: Record<string, unknown> | null = null;
+  lastWaitRequest: Record<string, unknown> | null = null;
   response: Record<string, unknown>;
+  waitResponse: Record<string, unknown>;
 
-  constructor(response: Record<string, unknown>) {
+  constructor(response: Record<string, unknown>, waitResponse: Record<string, unknown> = {}) {
     this.response = response;
+    this.waitResponse = waitResponse;
   }
 
   async enqueue(request: Record<string, unknown>): Promise<Record<string, unknown>> {
     this.lastRequest = request;
     return this.response;
+  }
+
+  async waitForCompletion(request: Record<string, unknown>): Promise<Record<string, unknown>> {
+    this.lastWaitRequest = request;
+    return this.waitResponse;
   }
 
   close(): void {}
@@ -134,5 +142,57 @@ describe("RRQClient producer requests", () => {
 
     const options = (stub.lastRequest?.options as any) ?? {};
     expect(options.unique_ttl_seconds).toBeUndefined();
+  });
+
+  it("waitForCompletion sends timeout and block interval options", async () => {
+    const stub = new StubProducer(
+      { job_id: "job-wait" },
+      {
+        completed: true,
+        job: {
+          status: "COMPLETED",
+          result: { ok: true },
+        },
+      },
+    );
+    const client = new RRQClient({ producer: stub as unknown as RustProducer });
+
+    const result = await client.waitForCompletion("job-wait", {
+      timeoutSeconds: 5,
+      blockIntervalSeconds: 0.2,
+    });
+
+    expect(stub.lastWaitRequest).toEqual({
+      job_id: "job-wait",
+      timeout_seconds: 5,
+      block_interval_seconds: 0.2,
+    });
+    expect(result?.status).toBe("COMPLETED");
+    expect(result?.result).toEqual({ ok: true });
+  });
+
+  it("waitForCompletion returns null when response is not completed", async () => {
+    const stub = new StubProducer({ job_id: "job-timeout" }, { completed: false, job: null });
+    const client = new RRQClient({ producer: stub as unknown as RustProducer });
+
+    const result = await client.waitForCompletion("job-timeout", {
+      timeoutSeconds: 0.2,
+      blockIntervalSeconds: 0.05,
+    });
+
+    expect(result).toBeNull();
+  });
+
+  it("waitForCompletion uses default timeout settings when omitted", async () => {
+    const stub = new StubProducer({ job_id: "job-default-wait" }, { completed: false, job: null });
+    const client = new RRQClient({ producer: stub as unknown as RustProducer });
+
+    await client.waitForCompletion("job-default-wait");
+
+    expect(stub.lastWaitRequest).toEqual({
+      job_id: "job-default-wait",
+      timeout_seconds: 30,
+      block_interval_seconds: 0.25,
+    });
   });
 });

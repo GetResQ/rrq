@@ -135,6 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 Configure via:
+
 - `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` - Traces endpoint (highest precedence)
 - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` - Metrics endpoint (highest precedence)
 - `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` - Logs endpoint (highest precedence)
@@ -143,6 +144,7 @@ Configure via:
 - `OTEL_SERVICE_NAME` - Service name
 
 Endpoint resolution rules:
+
 - Signal-specific endpoint vars take precedence over `OTEL_EXPORTER_OTLP_ENDPOINT`
 - If a signal-specific endpoint is unset, RRQ falls back to `OTEL_EXPORTER_OTLP_ENDPOINT` and appends `/v1/{traces|metrics|logs}`
 - If a signal-specific endpoint is explicitly set to an empty value, that signal is disabled (no fallback)
@@ -162,10 +164,10 @@ max_in_flight = 10
 
 ## Related Crates
 
-| Crate | Purpose |
-|-------|---------|
-| [`rrq`](https://crates.io/crates/rrq) | Orchestrator |
-| [`rrq-producer`](https://crates.io/crates/rrq-producer) | Enqueue jobs |
+| Crate                                                   | Purpose       |
+| ------------------------------------------------------- | ------------- |
+| [`rrq`](https://crates.io/crates/rrq)                   | Orchestrator  |
+| [`rrq-producer`](https://crates.io/crates/rrq-producer) | Enqueue jobs  |
 | [`rrq-protocol`](https://crates.io/crates/rrq-protocol) | Wire protocol |
 
 ## License

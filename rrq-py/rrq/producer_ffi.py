@@ -118,6 +118,21 @@ class JobStatusResponseModel(BaseModel):
     job: JobResultModel | None = None
 
 
+class WaitForCompletionRequestModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str = Field(min_length=1)
+    timeout_seconds: float = Field(gt=0)
+    block_interval_seconds: float = Field(ge=0)
+
+
+class WaitForCompletionResponseModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    completed: bool
+    job: JobResultModel | None = None
+
+
 class ProducerConstantsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -183,6 +198,13 @@ def _configure_library(lib: ctypes.CDLL) -> None:
         ctypes.POINTER(ctypes.c_char_p),
     ]
     lib.rrq_producer_get_job_status.restype = ctypes.c_void_p
+    if hasattr(lib, "rrq_producer_wait_for_completion"):
+        lib.rrq_producer_wait_for_completion.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.POINTER(ctypes.c_char_p),
+        ]
+        lib.rrq_producer_wait_for_completion.restype = ctypes.c_void_p
     lib.rrq_string_free.argtypes = [ctypes.c_void_p]
     lib.rrq_string_free.restype = None
 
@@ -326,22 +348,81 @@ class RustProducer:
         except ValidationError as exc:
             raise RustProducerError(f"Invalid response from producer: {exc}") from exc
 
-    def get_job_status(self, job_id: str) -> JobStatusResponseModel:
+    def _job_status_call(
+        self,
+        *,
+        job_id: str,
+        ffi_method_name: str,
+        operation_name: str,
+    ) -> JobStatusResponseModel:
         request = JobStatusRequestModel(job_id=job_id)
         payload = request.model_dump_json().encode("utf-8")
         err = ctypes.c_char_p()
-        result_ptr = _get_library().rrq_producer_get_job_status(
-            self._handle, payload, ctypes.byref(err)
-        )
+        lib = _get_library()
+        ffi_method = getattr(lib, ffi_method_name, None)
+        if ffi_method is None:
+            raise RustProducerError(
+                f"Loaded RRQ producer library does not export {ffi_method_name}"
+            )
+        result_ptr = ffi_method(self._handle, payload, ctypes.byref(err))
         if not result_ptr:
             _take_error(err)
-            raise RustProducerError("Failed to get job status")
+            raise RustProducerError(f"Failed to {operation_name}")
         try:
             result_json = ctypes.string_at(result_ptr).decode("utf-8", errors="replace")
         finally:
-            _get_library().rrq_string_free(result_ptr)
+            lib.rrq_string_free(result_ptr)
         try:
             return JobStatusResponseModel.model_validate_json(result_json)
+        except json.JSONDecodeError as exc:
+            raise RustProducerError(f"Invalid response from producer: {exc}") from exc
+        except ValidationError as exc:
+            raise RustProducerError(f"Invalid response from producer: {exc}") from exc
+
+    def get_job_status(self, job_id: str) -> JobStatusResponseModel:
+        return self._job_status_call(
+            job_id=job_id,
+            ffi_method_name="rrq_producer_get_job_status",
+            operation_name="get job status",
+        )
+
+    def wait_for_completion(self, job_id: str) -> WaitForCompletionResponseModel:
+        return self.wait_for_completion_with_options(
+            job_id=job_id,
+            timeout_seconds=30.0,
+            block_interval_seconds=0.25,
+        )
+
+    def wait_for_completion_with_options(
+        self,
+        *,
+        job_id: str,
+        timeout_seconds: float,
+        block_interval_seconds: float,
+    ) -> WaitForCompletionResponseModel:
+        request = WaitForCompletionRequestModel(
+            job_id=job_id,
+            timeout_seconds=timeout_seconds,
+            block_interval_seconds=block_interval_seconds,
+        )
+        payload = request.model_dump_json().encode("utf-8")
+        err = ctypes.c_char_p()
+        lib = _get_library()
+        ffi_method = getattr(lib, "rrq_producer_wait_for_completion", None)
+        if ffi_method is None:
+            raise RustProducerError(
+                "Loaded RRQ producer library does not export rrq_producer_wait_for_completion"
+            )
+        result_ptr = ffi_method(self._handle, payload, ctypes.byref(err))
+        if not result_ptr:
+            _take_error(err)
+            raise RustProducerError("Failed to wait for completion")
+        try:
+            result_json = ctypes.string_at(result_ptr).decode("utf-8", errors="replace")
+        finally:
+            lib.rrq_string_free(result_ptr)
+        try:
+            return WaitForCompletionResponseModel.model_validate_json(result_json)
         except json.JSONDecodeError as exc:
             raise RustProducerError(f"Invalid response from producer: {exc}") from exc
         except ValidationError as exc:

@@ -8,16 +8,19 @@ transport is a localhost TCP socket with length-delimited JSON frames.
 > The orchestrator and runners must use the same protocol version.
 
 ## Design Goals
+
 - **Centralized scheduling** in the Rust orchestrator (timeouts, retries, DLQ).
 - **Language-agnostic runners** that only execute jobs and return outcomes.
 - **Stable wire format** for cross-language compatibility.
 
 ## Encoding
+
 - **JSON**
 - Timestamps are **RFC 3339** (UTC).
 - Field names are **snake_case**.
 
 ## Transport (v2)
+
 - The orchestrator starts the runner process and passes `--tcp-socket host:port`.
 - The runner **binds** a TCP socket on the provided **localhost-only** address
   and accepts connections.
@@ -31,11 +34,12 @@ transport is a localhost TCP socket with length-delimited JSON frames.
 ```json
 {
   "type": "request",
-  "payload": { "..." : "..." }
+  "payload": { "...": "..." }
 }
 ```
 
 Message types:
+
 - `request`: `payload` is an `ExecutionRequest`.
 - `response`: `payload` is an `ExecutionOutcome`.
 - `cancel`: `payload` is a `CancelRequest`.
@@ -49,26 +53,28 @@ Protocol logging is not supported; runners should emit logs to stdout/stderr
 as needed.
 
 ## ExecutionRequest (payload)
+
 ```json
 {
   "protocol_version": "2",
   "request_id": "uuid",
   "job_id": "uuid",
   "function_name": "my_handler",
-  "params": {"key": "value", "count": 42},
+  "params": { "key": "value", "count": 42 },
   "context": {
     "job_id": "uuid",
     "attempt": 1,
     "enqueue_time": "2025-01-01T12:00:00Z",
     "queue_name": "default",
     "deadline": "2025-01-01T12:05:00Z",
-    "trace_context": {"traceparent": "..."},
+    "trace_context": { "traceparent": "..." },
     "worker_id": "rrq_worker_123"
   }
 }
 ```
 
 ### Fields
+
 - `protocol_version` (string): Always `"2"` for v2.
 - `request_id` (string): Unique ID for this request/response pair.
 - `job_id` (string): Unique job ID.
@@ -85,6 +91,7 @@ as needed.
   - `worker_id` (string, optional)
 
 ### Tracing
+
 `trace_context` carries the producer's trace propagation headers. Runners can
 use it to continue traces in their own runtime. The Rust, Python, and
 TypeScript runner runtimes emit `rrq.runner` spans when OpenTelemetry is
@@ -99,19 +106,22 @@ For cross-language tracing, all runtimes must use the same propagation format
 and producers must attach `trace_context` on enqueue.
 
 ## ExecutionOutcome (payload)
+
 ```json
 {
   "job_id": "uuid",
   "request_id": "uuid",
   "status": "success",
-  "result": {"ok": true},
+  "result": { "ok": true },
   "error": null,
   "retry_after_seconds": null
 }
 ```
 
 ### status
+
 One of:
+
 - `success`: Execution completed. Orchestrator persists result.
 - `retry`: Runner requests retry. Orchestrator applies retry policy.
 - `timeout`: Runner timed itself out (orchestrator still enforces hard
@@ -119,13 +129,16 @@ One of:
 - `error`: Execution failed. Orchestrator applies retry policy.
 
 ### request_id
+
 The request ID this outcome corresponds to. Required so the orchestrator can
 correlate responses and guard against mismatched or out-of-order results.
 
 ### job_id
+
 The job ID this outcome corresponds to.
 
 ### error (optional)
+
 Structured error payload:
 
 ```json
@@ -138,13 +151,16 @@ Structured error payload:
 ```
 
 Reserved `type` values:
+
 - `handler_not_found`: Fatal; orchestrator moves job directly to DLQ.
 
 ### retry_after_seconds (optional)
+
 Used with `status = retry` to request a specific delay. Orchestrator may
 override per policy.
 
 ## CancelRequest (payload)
+
 ```json
 {
   "protocol_version": "2",
@@ -155,6 +171,7 @@ override per policy.
 ```
 
 ### Fields
+
 - `protocol_version` (string): Always `"2"` for v2.
 - `job_id` (string): Job ID to cancel.
 - `request_id` (string, optional): If present, cancel only the matching
@@ -163,6 +180,7 @@ override per policy.
   runners may ignore it.
 
 ## Scheduling Semantics
+
 - **Timeouts** are enforced by the orchestrator. Runners may return `timeout`
   if they implement their own local timeouts.
 - **Retries** are controlled by the orchestrator. Runners return `retry` to
@@ -174,6 +192,7 @@ override per policy.
   in-flight task for the job ID or no-op if nothing is running.
 
 ## Runner Selection
+
 RRQ may embed runner selection in the job function name using:
 
 ```
@@ -184,6 +203,7 @@ Example: `rust#send_email`. The orchestrator strips the prefix and sends only
 `handler` as `function_name` in the `ExecutionRequest`.
 
 ## Reference Implementations
+
 - Python: `rrq-py/rrq/runner_runtime.py` (see `examples/python/`)
 - Rust protocol types: `rrq-rs/protocol`
 - Rust runner: `rrq-rs/runner` (see

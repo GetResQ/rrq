@@ -97,6 +97,13 @@ struct JobStatusRequestPayload {
     job_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct WaitForCompletionRequestPayload {
+    job_id: String,
+    timeout_seconds: f64,
+    block_interval_seconds: Option<f64>,
+}
+
 #[derive(Debug, Serialize)]
 struct JobResultPayload {
     status: String,
@@ -107,6 +114,12 @@ struct JobResultPayload {
 #[derive(Debug, Serialize)]
 struct JobStatusResponsePayload {
     found: bool,
+    job: Option<JobResultPayload>,
+}
+
+#[derive(Debug, Serialize)]
+struct WaitForCompletionResponsePayload {
+    completed: bool,
     job: Option<JobResultPayload>,
 }
 
@@ -177,6 +190,11 @@ fn duration_millis_from_seconds(value: f64, label: &str, allow_zero: bool) -> Re
 
 fn parse_duration_seconds(value: f64, label: &str) -> Result<Duration, String> {
     let millis = duration_millis_from_seconds(value, label, false)?;
+    Ok(Duration::from_millis(millis as u64))
+}
+
+fn parse_duration_seconds_allow_zero(value: f64, label: &str) -> Result<Duration, String> {
+    let millis = duration_millis_from_seconds(value, label, true)?;
     Ok(Duration::from_millis(millis as u64))
 }
 
@@ -611,6 +629,57 @@ pub extern "C" fn rrq_producer_get_job_status(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn rrq_producer_wait_for_completion(
+    handle: *mut ProducerHandle,
+    request_json: *const c_char,
+    error_out: *mut *mut c_char,
+) -> *mut c_char {
+    with_unwind(error_out, || {
+        if handle.is_null() {
+            return Err("producer handle is null".to_string());
+        }
+
+        let payload = take_cstr(request_json)?;
+        let request: WaitForCompletionRequestPayload = serde_json::from_str(&payload)
+            .map_err(|err| format!("invalid wait for completion request: {err}"))?;
+        let timeout = parse_duration_seconds(request.timeout_seconds, "timeout_seconds")?;
+        let block_interval = request
+            .block_interval_seconds
+            .map(|value| parse_duration_seconds_allow_zero(value, "block_interval_seconds"))
+            .transpose()?
+            .unwrap_or_else(|| Duration::from_millis(250));
+
+        let producer_handle = unsafe { &*handle };
+        let producer = producer_handle.producer.clone();
+        let job_id = request.job_id;
+        let response = block_on_runtime(&producer_handle.runtime, async move {
+            producer
+                .wait_for_completion(&job_id, timeout, block_interval)
+                .await
+        })?;
+
+        let payload = match response {
+            Ok(Some(result)) => WaitForCompletionResponsePayload {
+                completed: true,
+                job: Some(job_result_payload(result)),
+            },
+            Ok(None) => WaitForCompletionResponsePayload {
+                completed: false,
+                job: None,
+            },
+            Err(err) => {
+                return Err(err.to_string());
+            }
+        };
+
+        let json = serde_json::to_string(&payload).map_err(|err| err.to_string())?;
+        let cstr = CString::new(json).map_err(|err| err.to_string())?;
+        Ok(cstr.into_raw())
+    })
+    .unwrap_or(ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn rrq_string_free(ptr: *mut c_char) {
     let _ = panic::catch_unwind(AssertUnwindSafe(|| {
         if ptr.is_null() {
@@ -743,5 +812,40 @@ mod tests {
             .to_string();
         rrq_string_free(err);
         assert!(err_message.contains("producer handle is null"));
+    }
+
+    #[test]
+    fn producer_wait_for_completion_rejects_null_handle() {
+        let mut err: *mut c_char = ptr::null_mut();
+        let payload = CString::new(
+            r#"{"job_id":"job-1","timeout_seconds":1.0,"block_interval_seconds":0.1}"#,
+        )
+        .expect("payload");
+        let response =
+            rrq_producer_wait_for_completion(ptr::null_mut(), payload.as_ptr(), &mut err);
+        assert!(response.is_null());
+        assert!(!err.is_null());
+        let err_message = unsafe { CStr::from_ptr(err) }
+            .to_str()
+            .expect("utf-8 error message")
+            .to_string();
+        rrq_string_free(err);
+        assert!(err_message.contains("producer handle is null"));
+    }
+
+    #[test]
+    fn producer_wait_for_completion_rejects_invalid_request() {
+        let mut err: *mut c_char = ptr::null_mut();
+        let payload = CString::new("{invalid-json").expect("payload");
+        let handle = std::ptr::NonNull::<ProducerHandle>::dangling().as_ptr();
+        let response = rrq_producer_wait_for_completion(handle, payload.as_ptr(), &mut err);
+        assert!(response.is_null());
+        assert!(!err.is_null());
+        let err_message = unsafe { CStr::from_ptr(err) }
+            .to_str()
+            .expect("utf-8 error message")
+            .to_string();
+        rrq_string_free(err);
+        assert!(err_message.contains("invalid wait for completion request"));
     }
 }

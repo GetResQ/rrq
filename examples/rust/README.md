@@ -10,6 +10,7 @@ cargo run
 This example uses the published `rrq-producer` crate from crates.io.
 
 Env vars:
+
 - `RRQ_REDIS_DSN` (default: `redis://localhost:6379/3`)
 - `RRQ_QUEUE` (default: `default`)
 - `RRQ_FUNCTION` (default: `quick_task`)

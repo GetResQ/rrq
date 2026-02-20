@@ -3,16 +3,19 @@ description: RRQ Testing Guidelines
 globs:
 alwaysApply: true
 ---
+
 # RRQ Testing Guidelines
 
 ## Testing Philosophy
+
 - **100% test pass rate is mandatory** - No exceptions
 - Tests should be deterministic and reliable
-- Mock external dependencies whenever possible 
+- Mock external dependencies whenever possible
 - Test behavior, not implementation
 - Write tests that serve as documentation
 
 ## Testing Commands
+
 ```bash
 # Backend Testing
 uv run pytest                          # Full test suite with coverage
@@ -28,6 +31,7 @@ uv run pytest tests/unit/test_file.py::TestClass::test_function
 ### Backend Testing Best Practices
 
 #### Async Testing
+
 ```python
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -46,6 +50,7 @@ async def test_async_function(admin_user):
 ``
 
 #### Cleanup Pattern
+
 ```python
 @pytest.fixture
 async def test_setup(app):
@@ -61,6 +66,7 @@ async def test_setup(app):
 ## Self-Review Before Test Submission
 
 ### Backend Tests
+
 - [ ] All tests pass with `--warnings-as-errors`
 - [ ] No hardcoded values or flaky time dependencies
 - [ ] Proper async/await usage
@@ -70,10 +76,10 @@ async def test_setup(app):
 - [ ] Edge cases are covered
 - [ ] Error scenarios are tested
 
-
 ## Common Testing Pitfalls
 
 ### Async Issues
+
 ```python
 # WRONG - Will cause RuntimeWarning
 mock.method = MagicMock(return_value=value)
@@ -83,6 +89,7 @@ mock.method = AsyncMock(return_value=value)
 ```
 
 ### Time-based Tests
+
 ```python
 # WRONG - Flaky
 await asyncio.sleep(1)
@@ -96,18 +103,21 @@ async with timeout(5):
 ```
 
 ## Test Data Management
+
 - Use fixtures for reusable test data
 - Keep test data minimal but realistic
 - Use factories for dynamic data generation
 - Store large test files in `tests/data/`
 
 ## Performance Testing
+
 - Mock heavy operations (AI calls, media processing)
 - Use `pytest-benchmark` for performance-critical code
 - Set reasonable timeouts for async operations
 - Profile tests that take >1 second
 
 ## Important Reminders
+
 - NEVER skip tests to make the suite pass
 - Fix the root cause, not the symptom
 - Tests are documentation - keep them readable

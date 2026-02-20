@@ -6,17 +6,21 @@ uses `--config` / `RRQ_CONFIG`.
 ## Worker Management
 
 ### `rrq worker run`
+
 Run a worker process.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 - `--queue` Queue(s) to poll (repeatable)
 - `--burst` Process available jobs then exit
 
 ### `rrq worker watch`
+
 Watch a directory and restart the worker on file changes.
 
 Options:
+
 - `--path` Directory to watch (defaults to `[rrq.watch].path` or `.`)
 - `--config` Path to `rrq.toml` (optional)
 - `--queue` Queue(s) to poll (repeatable)
@@ -25,6 +29,7 @@ Options:
 - `--no-gitignore` Disable `.gitignore` and `.git/info/exclude` filtering
 
 Notes:
+
 - Watch mode forces runner pool sizes and `max_in_flight` to 1.
 - A change that matches `--pattern` and does not match `--ignore-pattern`
   triggers a worker restart.
@@ -39,13 +44,16 @@ Notes:
 ## Runner
 
 ### `rrq runner python`
+
 Spawn the Python runner runtime (`rrq-runner`).
 
 Options:
+
 - `--settings` PythonRunnerSettings object path (required)
 - `--tcp-socket` Localhost TCP socket in `host:port` form (required)
 
 Notes:
+
 - The orchestrator launches runners with `--tcp-socket` and manages port
   assignment for runner pools.
 - TCP sockets must bind to localhost.
@@ -53,32 +61,40 @@ Notes:
 ## Health
 
 ### `rrq check`
+
 Check worker health keys in Redis.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 
 ## Queue Commands
 
 ### `rrq queue list`
+
 List queues and pending counts.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 - `--show-empty` Include empty queues
 
 ### `rrq queue stats`
+
 Show pending/active/completed/failed counts and DLQ totals.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 - `--queue` Restrict to specific queue(s) (repeatable)
 - `--max-scan` Max job hashes to scan for status breakdowns (0 = full scan)
 
 ### `rrq queue inspect <queue>`
+
 Show queued jobs with scheduling info.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 - `--limit` Max rows (default: 20)
 - `--offset` Offset (default: 0)
@@ -86,16 +102,20 @@ Options:
 ## Job Commands
 
 ### `rrq job show <job_id>`
+
 Show job details.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 - `--raw` Print raw JSON
 
 ### `rrq job list`
+
 List jobs with filters.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 - `--status` Filter by status
 - `--queue` Filter by queue
@@ -103,30 +123,38 @@ Options:
 - `--limit` Max rows (default: 20)
 
 ### `rrq job replay <job_id>`
+
 Re-enqueue with original params.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 - `--queue` Override target queue
 
 ### `rrq job cancel <job_id>`
+
 Cancel a pending job.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 
 ### `rrq job trace <job_id>`
+
 Show a job timeline.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 
 ## DLQ Commands
 
 ### `rrq dlq list`
+
 List failed jobs with filtering.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 - `--dlq-name` DLQ name (defaults to settings)
 - `--queue` Filter by original queue
@@ -137,23 +165,29 @@ Options:
 - `--batch-size` Batch size for job hash fetches
 
 ### `rrq dlq stats`
+
 Show DLQ statistics.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 - `--dlq-name` DLQ name (defaults to settings)
 
 ### `rrq dlq inspect <job_id>`
+
 Inspect a single DLQ job.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 - `--raw` Print raw JSON
 
 ### `rrq dlq requeue`
+
 Requeue DLQ jobs.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 - `--dlq-name` DLQ name
 - `--target-queue` Target queue
@@ -167,9 +201,11 @@ Options:
 ## Debug Commands
 
 ### `rrq debug generate-jobs`
+
 Generate synthetic jobs.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 - `--count` Number of jobs (default: 100)
 - `--queue` Queue(s) (repeatable)
@@ -178,17 +214,21 @@ Options:
 - `--batch-size` Batch size
 
 ### `rrq debug generate-workers`
+
 Generate synthetic worker heartbeats.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 - `--count` Worker count
 - `--duration` Duration in seconds
 
 ### `rrq debug submit <function>`
+
 Submit a one-off job.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 - `--args` JSON args array (deprecated; stored under `params.args`)
 - `--kwargs` JSON params object
@@ -196,17 +236,21 @@ Options:
 - `--delay` Delay in seconds
 
 ### `rrq debug clear`
+
 Delete keys by pattern.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 - `--confirm` Skip confirmation
 - `--pattern` Redis key pattern (default: `test_*`)
 
 ### `rrq debug stress-test`
+
 Submit jobs at a fixed rate.
 
 Options:
+
 - `--config` Path to `rrq.toml` (optional)
 - `--jobs-per-second` Rate
 - `--duration` Duration in seconds

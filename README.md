@@ -54,13 +54,13 @@ Most job queues make you choose: either fight with complex distributed systems c
 
 ## Packages
 
-| Package | Language | Purpose | Install |
-|---------|----------|---------|---------|
-| [rrq (crates.io)](https://crates.io/crates/rrq) | Rust | Orchestrator CLI (core) | `cargo install rrq` |
-| [rrq-producer](https://crates.io/crates/rrq-producer) | Rust | Native producer library | `rrq-producer = "0.9"` |
-| [rrq-runner](https://crates.io/crates/rrq-runner) | Rust | Native runner runtime | `rrq-runner = "0.9"` |
-| [rrq (PyPI)](https://pypi.org/project/rrq/) | Python | Producer + runner binding | `pip install rrq` |
-| [rrq-ts](https://www.npmjs.com/package/rrq-ts) | TypeScript | Producer + runner binding | `npm install rrq-ts` |
+| Package                                               | Language   | Purpose                   | Install                |
+| ----------------------------------------------------- | ---------- | ------------------------- | ---------------------- |
+| [rrq (crates.io)](https://crates.io/crates/rrq)       | Rust       | Orchestrator CLI (core)   | `cargo install rrq`    |
+| [rrq-producer](https://crates.io/crates/rrq-producer) | Rust       | Native producer library   | `rrq-producer = "0.9"` |
+| [rrq-runner](https://crates.io/crates/rrq-runner)     | Rust       | Native runner runtime     | `rrq-runner = "0.9"`   |
+| [rrq (PyPI)](https://pypi.org/project/rrq/)           | Python     | Producer + runner binding | `pip install rrq`      |
+| [rrq-ts](https://www.npmjs.com/package/rrq-ts)        | TypeScript | Producer + runner binding | `npm install rrq-ts`   |
 
 ## Quick Start (Rust Core)
 
@@ -154,7 +154,7 @@ registry.register("send_email", async (request) => ({
   job_id: request.job_id,
   request_id: request.request_id,
   status: "success",
-  result: { sent: true }
+  result: { sent: true },
 }));
 const runtime = new RunnerRuntime(registry);
 // RRQ launches runners with: --tcp-socket host:port

@@ -123,4 +123,37 @@ describe("RRQClient producer integration", () => {
     expect(status?.status).toBe("COMPLETED");
     expect(status?.result).toEqual(payload);
   });
+
+  it("returns terminal job status when already completed", async () => {
+    const jobId = await client.enqueue("handler", {
+      params: { n: 2 },
+    });
+    const jobKey = `${CONSTANTS.job_key_prefix}${jobId}`;
+    const payload = { done: true };
+
+    await redis.hSet(jobKey, {
+      status: "COMPLETED",
+      result: JSON.stringify(payload),
+    });
+
+    const status = await client.waitForCompletion(jobId, {
+      timeoutSeconds: 2,
+      blockIntervalSeconds: 0.1,
+    });
+
+    expect(status).not.toBeNull();
+    expect(status?.status).toBe("COMPLETED");
+    expect(status?.result).toEqual(payload);
+  });
+
+  it("returns null when waitForCompletion times out", async () => {
+    const jobId = await client.enqueue("handler");
+
+    const status = await client.waitForCompletion(jobId, {
+      timeoutSeconds: 0.2,
+      blockIntervalSeconds: 0.05,
+    });
+
+    expect(status).toBeNull();
+  });
 });

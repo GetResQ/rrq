@@ -13,6 +13,7 @@ RRQ (Reliable Redis Queue) is a distributed job queue with a Rust orchestrator. 
 ## When to Use This Crate
 
 Use `rrq-config` if you're:
+
 - Building custom tooling that reads `rrq.toml`
 - Extending the RRQ configuration format
 - Embedding RRQ components with programmatic config
@@ -79,9 +80,9 @@ schedule = "0 0 * * * *"
 
 ## Related Crates
 
-| Crate | Purpose |
-|-------|---------|
-| [`rrq`](https://crates.io/crates/rrq) | Orchestrator |
+| Crate                                                   | Purpose      |
+| ------------------------------------------------------- | ------------ |
+| [`rrq`](https://crates.io/crates/rrq)                   | Orchestrator |
 | [`rrq-producer`](https://crates.io/crates/rrq-producer) | Job producer |
 
 ## License

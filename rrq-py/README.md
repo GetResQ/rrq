@@ -268,13 +268,13 @@ max_in_flight = 10      # Concurrent jobs per runner
 
 ## Related Packages
 
-| Package | Language | Purpose |
-|---------|----------|---------|
-| [rrq](https://pypi.org/project/rrq/) | Python | Producer client + runner (this package) |
-| [rrq-ts](https://www.npmjs.com/package/rrq-ts) | TypeScript | Producer client + runner |
-| [rrq](https://crates.io/crates/rrq) | Rust | Orchestrator binary |
-| [rrq-producer](https://crates.io/crates/rrq-producer) | Rust | Native producer client |
-| [rrq-runner](https://crates.io/crates/rrq-runner) | Rust | Native runner runtime |
+| Package                                               | Language   | Purpose                                 |
+| ----------------------------------------------------- | ---------- | --------------------------------------- |
+| [rrq](https://pypi.org/project/rrq/)                  | Python     | Producer client + runner (this package) |
+| [rrq-ts](https://www.npmjs.com/package/rrq-ts)        | TypeScript | Producer client + runner                |
+| [rrq](https://crates.io/crates/rrq)                   | Rust       | Orchestrator binary                     |
+| [rrq-producer](https://crates.io/crates/rrq-producer) | Rust       | Native producer client                  |
+| [rrq-runner](https://crates.io/crates/rrq-runner)     | Rust       | Native runner runtime                   |
 
 ## Requirements
 

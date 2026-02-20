@@ -189,25 +189,26 @@ pre_restart_cwd = "."
 
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `RRQ_CONFIG` | Path to configuration file |
-| `RRQ_REDIS_DSN` | Redis connection (overrides config) |
-| `RUST_LOG` | Log filter/level (e.g. `info`, `debug`) |
+| Variable          | Description                                     |
+| ----------------- | ----------------------------------------------- |
+| `RRQ_CONFIG`      | Path to configuration file                      |
+| `RRQ_REDIS_DSN`   | Redis connection (overrides config)             |
+| `RUST_LOG`        | Log filter/level (e.g. `info`, `debug`)         |
 | `RUST_LOG_FORMAT` | Log output format: `json` (default) or `pretty` |
 
 ## Related Crates
 
-| Crate | Purpose |
-|-------|---------|
-| [`rrq-producer`](https://crates.io/crates/rrq-producer) | Enqueue jobs from Rust |
-| [`rrq-runner`](https://crates.io/crates/rrq-runner) | Build Rust job handlers |
-| [`rrq-protocol`](https://crates.io/crates/rrq-protocol) | Wire protocol types |
-| [`rrq-config`](https://crates.io/crates/rrq-config) | Configuration types |
+| Crate                                                   | Purpose                 |
+| ------------------------------------------------------- | ----------------------- |
+| [`rrq-producer`](https://crates.io/crates/rrq-producer) | Enqueue jobs from Rust  |
+| [`rrq-runner`](https://crates.io/crates/rrq-runner)     | Build Rust job handlers |
+| [`rrq-protocol`](https://crates.io/crates/rrq-protocol) | Wire protocol types     |
+| [`rrq-config`](https://crates.io/crates/rrq-config)     | Configuration types     |
 
 ## Cross-Language Compatibility
 
 The orchestrator works seamlessly with:
+
 - Python workers via [rrq](https://pypi.org/project/rrq/)
 - TypeScript workers via [rrq-ts](https://www.npmjs.com/package/rrq-ts)
 - Rust workers via [rrq-runner](https://crates.io/crates/rrq-runner)

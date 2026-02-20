@@ -10,7 +10,12 @@ from redis.asyncio import Redis as AsyncRedis
 
 from rrq.client import RRQClient
 from rrq.job import JobStatus
-from rrq.producer_ffi import get_producer_constants
+from rrq.producer_ffi import (
+    JobResultModel,
+    RustProducerError,
+    WaitForCompletionResponseModel,
+    get_producer_constants,
+)
 
 _CONSTANTS = get_producer_constants()
 JOB_KEY_PREFIX = _CONSTANTS.job_key_prefix
@@ -314,6 +319,78 @@ async def test_get_job_status_returns_failure(
     assert result is not None
     assert result.status == JobStatus.FAILED
     assert result.last_error == "boom"
+
+
+@pytest.mark.asyncio
+async def test_wait_for_completion_returns_result(
+    rrq_client: RRQClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fake_wait(
+        *, job_id: str, timeout_seconds: float, block_interval_seconds: float
+    ) -> WaitForCompletionResponseModel:
+        assert job_id == "job-wait-1"
+        assert timeout_seconds == 30.0
+        assert block_interval_seconds == 0.25
+        return WaitForCompletionResponseModel(
+            completed=True,
+            job=JobResultModel(
+                status="COMPLETED",
+                result={"ok": True},
+            ),
+        )
+
+    monkeypatch.setattr(
+        rrq_client._producer, "wait_for_completion_with_options", _fake_wait
+    )
+
+    result = await rrq_client.wait_for_completion("job-wait-1")
+
+    assert result is not None
+    assert result.status == JobStatus.COMPLETED
+    assert result.result == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_wait_for_completion_returns_none(
+    rrq_client: RRQClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fake_wait(
+        *, job_id: str, timeout_seconds: float, block_interval_seconds: float
+    ) -> WaitForCompletionResponseModel:
+        assert job_id == "job-wait-2"
+        assert timeout_seconds == 12.0
+        assert block_interval_seconds == 0.5
+        return WaitForCompletionResponseModel(completed=False, job=None)
+
+    monkeypatch.setattr(
+        rrq_client._producer, "wait_for_completion_with_options", _fake_wait
+    )
+
+    result = await rrq_client.wait_for_completion(
+        "job-wait-2", timeout_seconds=12.0, block_interval_seconds=0.5
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_wait_for_completion_maps_rust_error(
+    rrq_client: RRQClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fake_wait(
+        *, job_id: str, timeout_seconds: float, block_interval_seconds: float
+    ) -> WaitForCompletionResponseModel:
+        assert job_id == "job-wait-3"
+        assert timeout_seconds == 30.0
+        assert block_interval_seconds == 0.25
+        raise RustProducerError("wait failed")
+
+    monkeypatch.setattr(
+        rrq_client._producer, "wait_for_completion_with_options", _fake_wait
+    )
+
+    with pytest.raises(ValueError, match="wait failed"):
+        await rrq_client.wait_for_completion("job-wait-3")
 
 
 def test_client_producer_config_uses_explicit_overrides(monkeypatch) -> None:

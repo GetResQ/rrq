@@ -23,24 +23,45 @@ type BunLibrary = {
     rrq_producer_config_from_toml: (path: number, errorOut: number) => number;
     rrq_producer_enqueue: (handle: number, request: unknown, errorOut: number) => number;
     rrq_producer_get_job_status: (handle: number, request: unknown, errorOut: number) => number;
+    rrq_producer_wait_for_completion: (
+      handle: number,
+      request: unknown,
+      errorOut: number,
+    ) => number;
     rrq_string_free: (ptr: number) => void;
   };
   CString: new (input: string | number) => { toString(): string };
   ptr: (value: ArrayBufferView) => number;
 };
 
+type NodeAsyncFunction<TArgs extends unknown[], TResult> = ((...args: TArgs) => TResult) & {
+  async?: (...args: [...TArgs, (err: unknown, result: TResult) => void]) => void;
+};
+
 type NodeLibrary = {
-  rrq_producer_new: (config: string, errorOut: Array<unknown>) => unknown;
-  rrq_producer_new_from_toml: (path: string | null, errorOut: Array<unknown>) => unknown;
+  rrq_producer_new: NodeAsyncFunction<[config: string, errorOut: Array<unknown>], unknown>;
+  rrq_producer_new_from_toml: NodeAsyncFunction<
+    [path: string | null, errorOut: Array<unknown>],
+    unknown
+  >;
   rrq_producer_free: (handle: unknown) => void;
-  rrq_producer_constants: (errorOut: Array<unknown>) => unknown;
-  rrq_producer_config_from_toml: (path: string | null, errorOut: Array<unknown>) => unknown;
-  rrq_producer_enqueue: (handle: unknown, request: string, errorOut: Array<unknown>) => unknown;
-  rrq_producer_get_job_status: (
-    handle: unknown,
-    request: string,
-    errorOut: Array<unknown>,
-  ) => unknown;
+  rrq_producer_constants: NodeAsyncFunction<[errorOut: Array<unknown>], unknown>;
+  rrq_producer_config_from_toml: NodeAsyncFunction<
+    [path: string | null, errorOut: Array<unknown>],
+    unknown
+  >;
+  rrq_producer_enqueue: NodeAsyncFunction<
+    [handle: unknown, request: string, errorOut: Array<unknown>],
+    unknown
+  >;
+  rrq_producer_get_job_status: NodeAsyncFunction<
+    [handle: unknown, request: string, errorOut: Array<unknown>],
+    unknown
+  >;
+  rrq_producer_wait_for_completion: NodeAsyncFunction<
+    [handle: unknown, request: string, errorOut: Array<unknown>],
+    unknown
+  >;
   rrq_string_free: (ptr: unknown) => void;
   decode: (ptr: unknown, type: string) => string;
 };
@@ -125,6 +146,9 @@ function loadNodeLibrary(): NodeLibrary {
   const rrq_producer_get_job_status = lib.func(
     "void * rrq_producer_get_job_status(void *handle, const char *request_json, _Out_ void **error_out)",
   );
+  const rrq_producer_wait_for_completion = lib.func(
+    "void * rrq_producer_wait_for_completion(void *handle, const char *request_json, _Out_ void **error_out)",
+  );
   const rrq_string_free = lib.func("void rrq_string_free(void *ptr)");
 
   return {
@@ -135,6 +159,7 @@ function loadNodeLibrary(): NodeLibrary {
     rrq_producer_config_from_toml,
     rrq_producer_enqueue,
     rrq_producer_get_job_status,
+    rrq_producer_wait_for_completion,
     rrq_string_free,
     decode: koffi.decode,
   };
@@ -177,6 +202,10 @@ function loadBunLibrary(): BunLibrary {
       returns: FFIType.ptr,
     },
     rrq_producer_get_job_status: {
+      args: [FFIType.ptr, FFIType.cstring, FFIType.ptr],
+      returns: FFIType.ptr,
+    },
+    rrq_producer_wait_for_completion: {
       args: [FFIType.ptr, FFIType.cstring, FFIType.ptr],
       returns: FFIType.ptr,
     },
@@ -292,6 +321,12 @@ export interface JobStatusResponse {
   job?: JobResult | null;
 }
 
+export interface WaitForCompletionResponse {
+  completed?: boolean;
+  found?: boolean;
+  job?: JobResult | null;
+}
+
 export function loadProducerSettings(configPath?: string): ProducerSettings {
   if (isBunRuntime()) {
     const lib = getBunLibrary();
@@ -342,11 +377,34 @@ export function loadProducerSettings(configPath?: string): ProducerSettings {
 
 export class RustProducer {
   private handle: unknown | number | null;
+  private pendingCloseHandle: unknown | null = null;
+  private inFlightNodeWaitCalls = 0;
   private backend: "node" | "bun";
 
   private constructor(handle: unknown | number, backend: "node" | "bun") {
     this.handle = handle;
     this.backend = backend;
+  }
+
+  private static callNodeFunctionAsync<TArgs extends unknown[], TResult>(
+    fn: NodeAsyncFunction<TArgs, TResult>,
+    ...args: TArgs
+  ): Promise<TResult> {
+    if (typeof fn.async === "function") {
+      return new Promise((resolve, reject) => {
+        fn.async!(
+          ...args,
+          (err: unknown, result: TResult) => {
+            if (err) {
+              reject(err);
+              return;
+            }
+            resolve(result);
+          },
+        );
+      });
+    }
+    return Promise.resolve().then(() => fn(...args));
   }
 
   static fromConfig(config: Record<string, unknown>): RustProducer {
@@ -416,6 +474,11 @@ export class RustProducer {
     }
 
     if (this.handle) {
+      if (this.inFlightNodeWaitCalls > 0) {
+        this.pendingCloseHandle = this.handle;
+        this.handle = null;
+        return;
+      }
       const lib = getLibrary();
       lib.rrq_producer_free(this.handle);
       this.handle = null;
@@ -558,5 +621,89 @@ export class RustProducer {
         reject(new RustProducerError(`Invalid response from producer: ${String(err)}`));
       }
     });
+  }
+
+  waitForCompletion(request: Record<string, unknown>): Promise<WaitForCompletionResponse> {
+    if (this.backend === "bun") {
+      if (typeof this.handle !== "number" || this.handle === 0) {
+        return Promise.reject(new RustProducerError("Producer handle is closed"));
+      }
+      const lib = getBunLibrary();
+      const payload = encodeCString(JSON.stringify(request));
+      const errOut = bunAllocErrorOut();
+      let resultPtr: number;
+      try {
+        resultPtr = lib.symbols.rrq_producer_wait_for_completion(
+          this.handle,
+          lib.ptr(payload),
+          lib.ptr(errOut),
+        );
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      if (!resultPtr) {
+        const message = bunTakeError(lib, errOut);
+        return Promise.reject(new RustProducerError(message ?? "Failed to wait for completion"));
+      }
+      let json: string;
+      try {
+        json = new lib.CString(resultPtr).toString();
+      } finally {
+        lib.symbols.rrq_string_free(resultPtr);
+      }
+      try {
+        return Promise.resolve(JSON.parse(json) as WaitForCompletionResponse);
+      } catch (error) {
+        return Promise.reject(
+          new RustProducerError(`Invalid response from producer: ${String(error)}`),
+        );
+      }
+    }
+
+    if (!this.handle) {
+      return Promise.reject(new RustProducerError("Producer handle is closed"));
+    }
+    const lib = getLibrary();
+    const payload = JSON.stringify(request);
+    const handle = this.handle;
+
+    return (async () => {
+      this.inFlightNodeWaitCalls += 1;
+      try {
+        const errOut: Array<unknown> = [null];
+        const resultPtr = await RustProducer.callNodeFunctionAsync(
+          lib.rrq_producer_wait_for_completion,
+          handle,
+          payload,
+          errOut,
+        );
+        if (!resultPtr) {
+          const errPtr = errOut[0];
+          const message = errPtr ? lib.decode(errPtr, "char *") : null;
+          if (errPtr) {
+            lib.rrq_string_free(errPtr);
+          }
+          throw new RustProducerError(message ?? "Failed to wait for completion");
+        }
+        let json: string;
+        try {
+          json = lib.decode(resultPtr, "char *");
+        } finally {
+          lib.rrq_string_free(resultPtr);
+        }
+        return JSON.parse(json) as WaitForCompletionResponse;
+      } catch (err) {
+        if (err instanceof RustProducerError) {
+          throw err;
+        }
+        throw new RustProducerError(`Invalid response from producer: ${String(err)}`);
+      } finally {
+        this.inFlightNodeWaitCalls -= 1;
+        if (this.inFlightNodeWaitCalls === 0 && this.pendingCloseHandle) {
+          lib.rrq_producer_free(this.pendingCloseHandle);
+          this.pendingCloseHandle = null;
+        }
+      }
+    })();
   }
 }

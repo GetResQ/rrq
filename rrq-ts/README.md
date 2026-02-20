@@ -41,13 +41,13 @@ bun add rrq-ts
 import { RRQClient } from "rrq-ts";
 
 const client = new RRQClient({
-  config: { redisDsn: "redis://localhost:6379/0" }
+  config: { redisDsn: "redis://localhost:6379/0" },
 });
 
 const jobId = await client.enqueue("send_email", {
   params: { to: "user@example.com", template: "welcome" },
   queueName: "emails",
-  maxRetries: 5
+  maxRetries: 5,
 });
 
 console.log(`Enqueued job: ${jobId}`);
@@ -107,16 +107,16 @@ rrq worker run --config rrq.toml
 
 ```typescript
 interface EnqueueOptions {
-  params?: Record<string, unknown>;  // Job parameters
-  queueName?: string;                 // Target queue (default: "default")
-  jobId?: string;                     // Custom job ID
-  maxRetries?: number;                // Max retry attempts
-  jobTimeoutSeconds?: number;         // Execution timeout
-  resultTtlSeconds?: number;          // How long to keep results
-  enqueueTime?: Date;                 // Explicit enqueue timestamp
-  deferUntil?: Date;                  // Schedule for specific time
-  deferBySeconds?: number;            // Delay execution
-  traceContext?: Record<string, string>;  // Distributed tracing
+  params?: Record<string, unknown>; // Job parameters
+  queueName?: string; // Target queue (default: "default")
+  jobId?: string; // Custom job ID
+  maxRetries?: number; // Max retry attempts
+  jobTimeoutSeconds?: number; // Execution timeout
+  resultTtlSeconds?: number; // How long to keep results
+  enqueueTime?: Date; // Explicit enqueue timestamp
+  deferUntil?: Date; // Schedule for specific time
+  deferBySeconds?: number; // Delay execution
+  traceContext?: Record<string, string>; // Distributed tracing
 }
 ```
 
@@ -139,8 +139,8 @@ interface ProducerConfig {
 ```typescript
 const jobId = await client.enqueueWithUniqueKey(
   "process_order",
-  "order-123",  // unique key
-  { params: { orderId: "123" } }
+  "order-123", // unique key
+  { params: { orderId: "123" } },
 );
 ```
 
@@ -150,7 +150,7 @@ const jobId = await client.enqueueWithUniqueKey(
 const jobId = await client.enqueueWithRateLimit("sync_user", {
   params: { userId: "456" },
   rateLimitKey: "user-456",
-  rateLimitSeconds: 60
+  rateLimitSeconds: 60,
 });
 
 if (jobId === null) {
@@ -164,7 +164,7 @@ if (jobId === null) {
 await client.enqueueWithDebounce("save_document", {
   params: { docId: "789" },
   debounceKey: "doc-789",
-  debounceSeconds: 5
+  debounceSeconds: 5,
 });
 ```
 
@@ -182,7 +182,7 @@ console.log(status);
 ```typescript
 type Handler = (
   request: ExecutionRequest,
-  signal: AbortSignal
+  signal: AbortSignal,
 ) => Promise<ExecutionOutcome | unknown> | ExecutionOutcome | unknown;
 ```
 
@@ -271,13 +271,13 @@ cargo build -p rrq-producer --release
 
 ## Related Packages
 
-| Package | Language | Purpose |
-|---------|----------|---------|
-| [rrq-ts](https://www.npmjs.com/package/rrq-ts) | TypeScript | Producer + runner (this package) |
-| [rrq](https://pypi.org/project/rrq/) | Python | Producer + runner |
-| [rrq](https://crates.io/crates/rrq) | Rust | Orchestrator binary |
-| [rrq-producer](https://crates.io/crates/rrq-producer) | Rust | Native producer |
-| [rrq-runner](https://crates.io/crates/rrq-runner) | Rust | Native runner |
+| Package                                               | Language   | Purpose                          |
+| ----------------------------------------------------- | ---------- | -------------------------------- |
+| [rrq-ts](https://www.npmjs.com/package/rrq-ts)        | TypeScript | Producer + runner (this package) |
+| [rrq](https://pypi.org/project/rrq/)                  | Python     | Producer + runner                |
+| [rrq](https://crates.io/crates/rrq)                   | Rust       | Orchestrator binary              |
+| [rrq-producer](https://crates.io/crates/rrq-producer) | Rust       | Native producer                  |
+| [rrq-runner](https://crates.io/crates/rrq-runner)     | Rust       | Native runner                    |
 
 ## Requirements
 

@@ -6,6 +6,7 @@ pub use rrq_config::defaults::{
 };
 
 pub const JOB_KEY_PREFIX: &str = "rrq:job:";
+pub const JOB_EVENTS_KEY_PREFIX: &str = "rrq:events:job:";
 pub const QUEUE_KEY_PREFIX: &str = "rrq:queue:";
 pub const DLQ_KEY_PREFIX: &str = "rrq:dlq:";
 pub const ACTIVE_JOBS_PREFIX: &str = "rrq:active:jobs:";
