@@ -1,3 +1,4 @@
+use crate::parent_guard;
 use crate::registry::Registry;
 use crate::telemetry::{NoopTelemetry, Telemetry};
 use crate::types::{ExecutionError, ExecutionOutcome};
@@ -73,6 +74,7 @@ pub struct RunnerRuntime {
 
 impl RunnerRuntime {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        parent_guard::install_parent_lifecycle_guard()?;
         Ok(Self {
             runtime: tokio::runtime::Runtime::new()?,
         })

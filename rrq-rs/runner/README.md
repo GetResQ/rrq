@@ -162,6 +162,17 @@ pool_size = 4
 max_in_flight = 10
 ```
 
+## Process Lifecycle Safety
+
+`rrq-runner` installs a parent-lifecycle guard automatically when `RunnerRuntime::new()` starts.
+
+- On Unix (Linux/macOS), a watchdog thread monitors the parent PID.
+- If the parent changes (for example, the worker process is terminated unexpectedly), the runner exits immediately.
+- On Linux, `rrq-runner` also configures `PR_SET_PDEATHSIG(SIGKILL)` for kernel-assisted parent-death handling.
+
+This protection applies to binaries built on `rrq-runner`. It does not cover non-`rrq-runner`
+commands such as custom Python or shell runners.
+
 ## Related Crates
 
 | Crate                                                   | Purpose       |
