@@ -17,6 +17,14 @@ pub enum RunnerType {
     Socket,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerManagementMode {
+    #[default]
+    Managed,
+    External,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct RunnerConfig {
@@ -74,6 +82,7 @@ pub struct RRQSettings {
     pub capture_runner_output: bool,
     pub default_unique_job_lock_ttl_seconds: i64,
     pub default_runner_name: String,
+    pub runner_management_mode: RunnerManagementMode,
     pub runners: HashMap<String, RunnerConfig>,
     pub runner_routes: HashMap<String, String>,
     pub worker_health_check_interval_seconds: f64,
@@ -104,6 +113,7 @@ impl Default for RRQSettings {
             capture_runner_output: false,
             default_unique_job_lock_ttl_seconds: DEFAULT_UNIQUE_JOB_LOCK_TTL_SECONDS,
             default_runner_name: "python".to_string(),
+            runner_management_mode: RunnerManagementMode::Managed,
             runners: HashMap::new(),
             runner_routes: HashMap::new(),
             worker_health_check_interval_seconds: 60.0,

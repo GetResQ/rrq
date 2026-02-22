@@ -14,13 +14,14 @@ use rrq::runner::{
     resolve_runner_pool_sizes,
 };
 use rrq::worker::RRQWorker;
-use rrq::{load_toml_settings, resolve_config_source};
+use rrq::{RunnerManagementMode, load_toml_settings_with_runner_mode, resolve_config_source};
 
 pub(crate) async fn run_worker(
     config: Option<String>,
     queues: Vec<String>,
     burst: bool,
     watch_mode: bool,
+    runner_mode: Option<RunnerManagementMode>,
 ) -> Result<()> {
     let (resolved, source) = resolve_config_source(config.as_deref());
     if let Some(path) = resolved.as_deref() {
@@ -28,7 +29,7 @@ pub(crate) async fn run_worker(
     } else {
         println!("missing RRQ config (provide --config or RRQ_CONFIG).");
     }
-    let settings = load_toml_settings(config.as_deref())?;
+    let settings = load_toml_settings_with_runner_mode(config.as_deref(), runner_mode)?;
 
     // Determine which runners are needed based on the queues being listened to
     let queues_slice = if queues.is_empty() {
@@ -264,8 +265,9 @@ pub(crate) async fn run_worker_watch(
     include_patterns: Vec<String>,
     ignore_patterns: Vec<String>,
     no_gitignore: bool,
+    runner_mode: Option<RunnerManagementMode>,
 ) -> Result<()> {
-    let initial_settings = load_toml_settings(config.as_deref())?;
+    let initial_settings = load_toml_settings_with_runner_mode(config.as_deref(), runner_mode)?;
     let watch_settings = initial_settings.watch.clone();
     let watch_path = path
         .or(watch_settings.path.clone())
@@ -352,7 +354,7 @@ pub(crate) async fn run_worker_watch(
         }
         let settings = match cached_settings.take() {
             Some(settings) => settings,
-            None => load_toml_settings(config.as_deref())?,
+            None => load_toml_settings_with_runner_mode(config.as_deref(), runner_mode)?,
         };
 
         // If configured, run build steps (or other commands) before starting/restarting the worker.
@@ -805,6 +807,36 @@ sys.exit(1 if n == 1 else 0)
         Ok(path)
     }
 
+    async fn write_external_worker_config_without_cmd(
+        settings: &rrq::RRQSettings,
+    ) -> Result<PathBuf> {
+        let path = std::env::temp_dir().join(format!("rrq-worker-{}.toml", Uuid::new_v4()));
+        let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+        let payload = format!(
+            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_runner_name = \"python\"\nrunner_management_mode = \"external\"\n\n[rrq.runners.python]\ntcp_socket = \"127.0.0.1:{}\"\npool_size = 3\nmax_in_flight = 1\n",
+            settings.redis_dsn, settings.default_queue_name, settings.default_dlq_name, port,
+        );
+        tokio_fs::write(&path, payload).await?;
+        Ok(path)
+    }
+
+    async fn write_external_worker_config_all_queues_routed_without_default(
+        settings: &rrq::RRQSettings,
+    ) -> Result<PathBuf> {
+        let path = std::env::temp_dir().join(format!("rrq-worker-{}.toml", Uuid::new_v4()));
+        let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+        let payload = format!(
+            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_runner_name = \"missing\"\nrunner_management_mode = \"external\"\n\n[rrq.routing]\n\"{}\" = \"python\"\n\n[rrq.runners.python]\ntcp_socket = \"127.0.0.1:{}\"\npool_size = 1\nmax_in_flight = 1\n",
+            settings.redis_dsn,
+            settings.default_queue_name,
+            settings.default_dlq_name,
+            settings.default_queue_name,
+            port,
+        );
+        tokio_fs::write(&path, payload).await?;
+        Ok(path)
+    }
+
     async fn write_worker_config_with_watch(
         settings: &rrq::RRQSettings,
         script_path: &Path,
@@ -838,12 +870,70 @@ sys.exit(1 if n == 1 else 0)
             Vec::new(),
             true,
             false,
+            Some(RunnerManagementMode::Managed),
         )
         .await?;
 
         let _ = tokio_fs::remove_file(&config_path).await;
         let _ = tokio_fs::remove_file(&script_path).await;
         let _ = tokio_fs::remove_dir_all(&temp_dir).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_worker_preserves_external_mode_from_config_without_override() -> Result<()> {
+        let ctx = RedisTestContext::new().await?;
+        let config_path = write_external_worker_config_without_cmd(&ctx.settings).await?;
+
+        run_worker(
+            Some(config_path.to_string_lossy().to_string()),
+            Vec::new(),
+            true,
+            false,
+            None,
+        )
+        .await?;
+
+        let _ = tokio_fs::remove_file(&config_path).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_worker_managed_override_requires_cmd() -> Result<()> {
+        let ctx = RedisTestContext::new().await?;
+        let config_path = write_external_worker_config_without_cmd(&ctx.settings).await?;
+
+        let err = run_worker(
+            Some(config_path.to_string_lossy().to_string()),
+            Vec::new(),
+            true,
+            false,
+            Some(RunnerManagementMode::Managed),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("cmd"));
+
+        let _ = tokio_fs::remove_file(&config_path).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_worker_all_queues_routed_does_not_require_default_runner() -> Result<()> {
+        let ctx = RedisTestContext::new().await?;
+        let config_path =
+            write_external_worker_config_all_queues_routed_without_default(&ctx.settings).await?;
+
+        run_worker(
+            Some(config_path.to_string_lossy().to_string()),
+            vec![ctx.settings.default_queue_name.clone()],
+            true,
+            false,
+            None,
+        )
+        .await?;
+
+        let _ = tokio_fs::remove_file(&config_path).await;
         Ok(())
     }
 
@@ -864,6 +954,7 @@ sys.exit(1 if n == 1 else 0)
             vec!["*.txt".to_string()],
             Vec::new(),
             true,
+            Some(RunnerManagementMode::Managed),
         ));
 
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -913,6 +1004,7 @@ sys.exit(1 if n == 1 else 0)
             vec!["*.txt".to_string()],
             Vec::new(),
             true,
+            Some(RunnerManagementMode::Managed),
         ));
 
         tokio::time::sleep(Duration::from_millis(200)).await;

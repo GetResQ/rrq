@@ -1879,6 +1879,136 @@ async fn calculate_backoff_respects_max_delay() {
 }
 
 #[tokio::test]
+async fn worker_new_allows_missing_default_runner_for_fully_routed_selected_queues() {
+    let mut ctx = RedisTestContext::new().await.unwrap();
+    ctx.settings.default_runner_name = "agent_main".to_string();
+    let aux_queue = normalize_queue_name("rrq:queue:agent:aux");
+    ctx.settings
+        .runner_routes
+        .insert(aux_queue.clone(), "agent_aux".to_string());
+
+    let runner = Arc::new(StaticRunner::new(
+        TestOutcome::Success(json!({"ok": true})),
+        Duration::from_millis(0),
+    ));
+    let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+    runners.insert("agent_aux".to_string(), runner);
+
+    let worker = RRQWorker::new(
+        ctx.settings.clone(),
+        Some(vec![aux_queue.clone()]),
+        Some("worker-1".to_string()),
+        runners,
+        true,
+        1,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(worker.queues, vec![aux_queue]);
+}
+
+#[tokio::test]
+async fn worker_new_rejects_missing_default_runner_for_unrouted_selected_queues() {
+    let mut ctx = RedisTestContext::new().await.unwrap();
+    ctx.settings.default_runner_name = "agent_main".to_string();
+    let aux_queue = normalize_queue_name("rrq:queue:agent:aux");
+
+    let runner = Arc::new(StaticRunner::new(
+        TestOutcome::Success(json!({"ok": true})),
+        Duration::from_millis(0),
+    ));
+    let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+    runners.insert("agent_aux".to_string(), runner);
+
+    let err = match RRQWorker::new(
+        ctx.settings.clone(),
+        Some(vec![aux_queue]),
+        Some("worker-1".to_string()),
+        runners,
+        true,
+        1,
+    )
+    .await
+    {
+        Ok(_) => panic!("worker creation should fail when default runner is required"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.to_string()
+            .contains("default runner 'agent_main' is not configured")
+    );
+}
+
+#[tokio::test]
+async fn worker_new_reports_missing_default_runner_before_empty_runner_map() {
+    let mut ctx = RedisTestContext::new().await.unwrap();
+    ctx.settings.default_runner_name = "agent_main".to_string();
+    let aux_queue = normalize_queue_name("rrq:queue:agent:aux");
+
+    let runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+
+    let err = match RRQWorker::new(
+        ctx.settings.clone(),
+        Some(vec![aux_queue]),
+        Some("worker-1".to_string()),
+        runners,
+        true,
+        1,
+    )
+    .await
+    {
+        Ok(_) => panic!("worker creation should fail when default runner is required"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.to_string()
+            .contains("default runner 'agent_main' is not configured")
+    );
+}
+
+#[tokio::test]
+async fn worker_new_rejects_missing_routed_runner_when_all_selected_queues_are_routed() {
+    let mut ctx = RedisTestContext::new().await.unwrap();
+    ctx.settings.default_runner_name = "agent_main".to_string();
+    let aux_queue = normalize_queue_name("rrq:queue:agent:aux");
+    let mail_queue = normalize_queue_name("rrq:queue:agent:mail");
+    ctx.settings
+        .runner_routes
+        .insert(aux_queue.clone(), "agent_aux".to_string());
+    ctx.settings
+        .runner_routes
+        .insert(mail_queue.clone(), "agent_mail_typo".to_string());
+
+    let runner = Arc::new(StaticRunner::new(
+        TestOutcome::Success(json!({"ok": true})),
+        Duration::from_millis(0),
+    ));
+    let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
+    runners.insert("agent_aux".to_string(), runner);
+
+    let err = match RRQWorker::new(
+        ctx.settings.clone(),
+        Some(vec![aux_queue, mail_queue.clone()]),
+        Some("worker-1".to_string()),
+        runners,
+        true,
+        1,
+    )
+    .await
+    {
+        Ok(_) => panic!("worker creation should fail for missing routed runner"),
+        Err(err) => err,
+    };
+
+    let message = err.to_string();
+    assert!(message.contains(mail_queue.as_str()));
+    assert!(message.contains("agent_mail_typo"));
+}
+
+#[tokio::test]
 async fn worker_new_rejects_non_positive_default_job_timeout() {
     let mut ctx = RedisTestContext::new().await.unwrap();
     ctx.settings.default_runner_name = "test".to_string();

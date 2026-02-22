@@ -4,13 +4,33 @@ use chrono::TimeZone;
 use nix::sys::signal::kill;
 #[cfg(unix)]
 use nix::unistd::Pid;
-use rrq_config::{RRQSettings, RunnerConfig, RunnerType};
+use rrq_config::{RRQSettings, RunnerConfig, RunnerManagementMode, RunnerType};
 use std::net::{IpAddr, Ipv4Addr, TcpListener as StdTcpListener};
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use tokio::net::TcpListener as TokioTcpListener;
 use tokio::process::Command;
 use tokio::time::sleep;
+
+fn process_is_terminated(guard: &mut SocketProcess) -> bool {
+    match guard.child.as_mut() {
+        Some(child) => child
+            .try_wait()
+            .expect("failed to poll child status")
+            .is_some(),
+        None => true,
+    }
+}
+
+fn process_is_running(guard: &mut SocketProcess) -> bool {
+    match guard.child.as_mut() {
+        Some(child) => child
+            .try_wait()
+            .expect("failed to poll child status")
+            .is_none(),
+        None => false,
+    }
+}
 
 #[tokio::test]
 async fn socket_framing_round_trip() {
@@ -196,7 +216,7 @@ fn build_test_pool(max_in_flight: usize) -> SocketRunnerPool {
         .expect("spawn sleep");
     let (spec, socket_addr) = allocate_tcp_spec();
     let process = SocketProcess {
-        child,
+        child: Some(child),
         socket: socket_addr,
         stdout_task: None,
         stderr_task: None,
@@ -339,7 +359,7 @@ async fn ensure_process_respawns_exited_child() {
         let (_spec, socket_addr) = allocate_tcp_spec();
         let child = Command::new("sleep").arg("60").spawn().unwrap();
         SocketProcess {
-            child,
+            child: Some(child),
             socket: socket_addr,
             stdout_task: None,
             stderr_task: None,
@@ -374,8 +394,10 @@ async fn ensure_process_respawns_exited_child() {
     let old_socket = { proc.lock().await.socket };
     {
         let mut guard = proc.lock().await;
-        let _ = guard.child.kill().await;
-        let _ = guard.child.wait().await;
+        if let Some(child) = guard.child.as_mut() {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
     }
     sleep(Duration::from_millis(50)).await;
     pool.ensure_process(&proc).await.unwrap();
@@ -416,6 +438,121 @@ async fn connect_socket_errors_when_child_exits() {
     );
 }
 
+#[tokio::test]
+async fn execute_with_process_external_mode_retries_until_socket_is_ready() {
+    let (spec, socket_addr) = allocate_tcp_spec();
+    let process = SocketProcess {
+        child: None,
+        socket: socket_addr,
+        stdout_task: None,
+        stderr_task: None,
+        permits: Arc::new(Semaphore::new(1)),
+        connection: None,
+    };
+    let runner = SocketRunner {
+        pool: Arc::new(SocketRunnerPool {
+            name: "external-test".to_string(),
+            cmd: Vec::new(),
+            pool_size: 1,
+            max_in_flight: 1,
+            env: None,
+            cwd: None,
+            tcp_socket: spec,
+            tcp_port_cursor: AtomicUsize::new(0),
+            processes: Mutex::new(vec![Arc::new(Mutex::new(process))]),
+            cursor: AtomicUsize::new(0),
+            availability: Arc::new(Notify::new()),
+            response_timeout: None,
+            connect_timeout: Duration::from_millis(800),
+            shutdown_term_grace: Duration::from_millis(50),
+            capture_output: true,
+            spawn_override: None,
+        }),
+        in_flight: Arc::new(Mutex::new(HashMap::new())),
+        send_cancel_hints: false,
+    };
+    let proc = {
+        let processes = runner.pool.processes.lock().await;
+        processes.first().cloned().unwrap()
+    };
+
+    let server = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let listener = TokioTcpListener::bind(socket_addr).await.unwrap();
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = match read_message(&mut stream).await.unwrap().unwrap() {
+            RunnerMessage::Request { payload } => payload,
+            _ => panic!("expected request payload"),
+        };
+        let response = ExecutionOutcome::success(
+            request.job_id,
+            request.request_id,
+            serde_json::json!({"ok": true}),
+        );
+        write_message(&mut stream, &RunnerMessage::Response { payload: response })
+            .await
+            .unwrap();
+    });
+
+    let outcome = runner
+        .execute_with_process(
+            &proc,
+            &build_execution_request("req-external", "job-external"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome.request_id.as_deref(), Some("req-external"));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn execute_with_process_external_mode_fails_after_backoff_timeout() {
+    let (spec, socket_addr) = allocate_tcp_spec();
+    let process = SocketProcess {
+        child: None,
+        socket: socket_addr,
+        stdout_task: None,
+        stderr_task: None,
+        permits: Arc::new(Semaphore::new(1)),
+        connection: None,
+    };
+    let runner = SocketRunner {
+        pool: Arc::new(SocketRunnerPool {
+            name: "external-timeout-test".to_string(),
+            cmd: Vec::new(),
+            pool_size: 1,
+            max_in_flight: 1,
+            env: None,
+            cwd: None,
+            tcp_socket: spec,
+            tcp_port_cursor: AtomicUsize::new(0),
+            processes: Mutex::new(vec![Arc::new(Mutex::new(process))]),
+            cursor: AtomicUsize::new(0),
+            availability: Arc::new(Notify::new()),
+            response_timeout: None,
+            connect_timeout: Duration::from_millis(200),
+            shutdown_term_grace: Duration::from_millis(50),
+            capture_output: true,
+            spawn_override: None,
+        }),
+        in_flight: Arc::new(Mutex::new(HashMap::new())),
+        send_cancel_hints: false,
+    };
+    let proc = {
+        let processes = runner.pool.processes.lock().await;
+        processes.first().cloned().unwrap()
+    };
+
+    let err = runner
+        .execute_with_process(
+            &proc,
+            &build_execution_request("req-timeout", "job-timeout"),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("external runner socket not ready"));
+}
+
 #[test]
 fn resolve_pool_sizes_and_max_in_flight_watch_mode() {
     let mut settings = RRQSettings::default();
@@ -439,6 +576,42 @@ fn resolve_pool_sizes_and_max_in_flight_watch_mode() {
     let max_in_flight = resolve_runner_max_in_flight(&settings, true).unwrap();
     assert_eq!(pool_sizes.get("python"), Some(&1));
     assert_eq!(max_in_flight.get("python"), Some(&1));
+}
+
+#[test]
+fn resolve_pool_sizes_external_mode_forces_single_process() {
+    let mut settings = RRQSettings {
+        runner_management_mode: RunnerManagementMode::External,
+        ..Default::default()
+    };
+    let mut runners = HashMap::new();
+    runners.insert(
+        "python".to_string(),
+        RunnerConfig {
+            runner_type: RunnerType::Socket,
+            cmd: None,
+            pool_size: Some(4),
+            max_in_flight: Some(2),
+            env: None,
+            cwd: None,
+            tcp_socket: Some("127.0.0.1:9000".to_string()),
+            response_timeout_seconds: None,
+        },
+    );
+    settings.runners = runners;
+
+    let pool_sizes = resolve_runner_pool_sizes(&settings, false, None).unwrap();
+    assert_eq!(pool_sizes.get("python"), Some(&1));
+}
+
+#[test]
+fn spawn_retry_delay_scales_and_caps() {
+    assert_eq!(spawn_retry_delay(1), Duration::from_millis(100));
+    assert_eq!(spawn_retry_delay(2), Duration::from_millis(200));
+    assert_eq!(spawn_retry_delay(3), Duration::from_millis(400));
+    assert_eq!(spawn_retry_delay(5), Duration::from_millis(1600));
+    assert_eq!(spawn_retry_delay(6), Duration::from_secs(2));
+    assert_eq!(spawn_retry_delay(20), Duration::from_secs(2));
 }
 
 #[test]
@@ -715,7 +888,7 @@ async fn execute_timeout_recycles_process_without_cancel_hints() {
         .spawn()
         .expect("spawn sleep");
     let process = SocketProcess {
-        child,
+        child: Some(child),
         socket: socket_addr,
         stdout_task: None,
         stderr_task: None,
@@ -771,11 +944,11 @@ async fn execute_timeout_recycles_process_without_cancel_hints() {
     };
     let mut exited = false;
     for _ in 0..20 {
-        let status = {
+        let terminated = {
             let mut guard = proc.lock().await;
-            guard.child.try_wait().unwrap()
+            process_is_terminated(&mut guard)
         };
-        if status.is_some() {
+        if terminated {
             exited = true;
             break;
         }
@@ -802,7 +975,7 @@ async fn execute_with_timeout_holds_permit_during_timeout_cleanup() {
     configure_runner_process_group(&mut command);
     let child = command.spawn().expect("spawn term-ignoring child");
     let process = SocketProcess {
-        child,
+        child: Some(child),
         socket: socket_addr,
         stdout_task: None,
         stderr_task: None,
@@ -880,7 +1053,7 @@ async fn execute_timeout_sends_cancel_hint_when_enabled() {
         .spawn()
         .expect("spawn sleep");
     let process = SocketProcess {
-        child,
+        child: Some(child),
         socket: socket_addr,
         stdout_task: None,
         stderr_task: None,
@@ -934,7 +1107,7 @@ async fn handle_timeout_terminates_socket_process_without_cancel_hint() {
         .spawn()
         .expect("spawn sleep");
     let process = SocketProcess {
-        child,
+        child: Some(child),
         socket: socket_addr,
         stdout_task: None,
         stderr_task: None,
@@ -991,11 +1164,11 @@ async fn handle_timeout_terminates_socket_process_without_cancel_hint() {
     };
     let mut exited = false;
     for _ in 0..20 {
-        let status = {
+        let terminated = {
             let mut guard = proc.lock().await;
-            guard.child.try_wait().unwrap()
+            process_is_terminated(&mut guard)
         };
-        if status.is_some() {
+        if terminated {
             exited = true;
             break;
         }
@@ -1049,12 +1222,12 @@ async fn finalize_execute_result_terminates_shared_process_when_cancel_unavailab
     assert!(in_flight.contains_key("req-other"));
     drop(in_flight);
 
-    let status = {
+    let terminated = {
         let mut guard = proc.lock().await;
-        guard.child.try_wait().unwrap()
+        process_is_terminated(&mut guard)
     };
     assert!(
-        status.is_some(),
+        terminated,
         "shared process should be terminated when targeted cancel is unavailable"
     );
 
@@ -1082,7 +1255,7 @@ async fn finalize_execute_result_keeps_shared_process_when_cancel_succeeds() {
         .spawn()
         .expect("spawn sleep");
     let process = SocketProcess {
-        child,
+        child: Some(child),
         socket: socket_addr,
         stdout_task: None,
         stderr_task: None,
@@ -1148,12 +1321,12 @@ async fn finalize_execute_result_keeps_shared_process_when_cancel_succeeds() {
     assert!(in_flight.contains_key("req-other"));
     drop(in_flight);
 
-    let status = {
+    let running = {
         let mut guard = proc.lock().await;
-        guard.child.try_wait().unwrap()
+        process_is_running(&mut guard)
     };
     assert!(
-        status.is_none(),
+        running,
         "shared process should remain alive when targeted cancel succeeds"
     );
 
@@ -1177,12 +1350,12 @@ async fn cleanup_worker_timeout_skips_termination_when_request_not_in_flight() {
         .cleanup_worker_timeout_with_permit_held(&request, false)
         .await;
 
-    let status = {
+    let running = {
         let mut guard = proc.lock().await;
-        guard.child.try_wait().unwrap()
+        process_is_running(&mut guard)
     };
     assert!(
-        status.is_none(),
+        running,
         "process should remain alive when timed-out request was never in-flight"
     );
     drop(permit);
@@ -1227,12 +1400,12 @@ async fn cleanup_worker_timeout_terminates_shared_process_when_cancel_unavailabl
     assert!(in_flight.contains_key("req-other"));
     drop(in_flight);
 
-    let status = {
+    let terminated = {
         let mut guard = proc.lock().await;
-        guard.child.try_wait().unwrap()
+        process_is_terminated(&mut guard)
     };
     assert!(
-        status.is_some(),
+        terminated,
         "shared process should be terminated when targeted cancel is unavailable"
     );
     drop(permit);
@@ -1259,7 +1432,7 @@ async fn cleanup_worker_timeout_keeps_shared_process_when_cancel_succeeds() {
         .spawn()
         .expect("spawn sleep");
     let process = SocketProcess {
-        child,
+        child: Some(child),
         socket: socket_addr,
         stdout_task: None,
         stderr_task: None,
@@ -1319,12 +1492,12 @@ async fn cleanup_worker_timeout_keeps_shared_process_when_cancel_succeeds() {
     assert!(in_flight.contains_key("req-other"));
     drop(in_flight);
 
-    let status = {
+    let running = {
         let mut guard = proc.lock().await;
-        guard.child.try_wait().unwrap()
+        process_is_running(&mut guard)
     };
     assert!(
-        status.is_none(),
+        running,
         "shared process should remain alive when targeted cancel succeeds"
     );
 
@@ -1403,11 +1576,11 @@ async fn cleanup_worker_timeout_removes_timed_out_request_from_shared_pending_ma
 
     let mut exited = false;
     for _ in 0..20 {
-        let status = {
+        let terminated = {
             let mut guard = proc.lock().await;
-            guard.child.try_wait().unwrap()
+            process_is_terminated(&mut guard)
         };
-        if status.is_some() {
+        if terminated {
             exited = true;
             break;
         }
@@ -1443,7 +1616,7 @@ async fn execute_with_process_times_out_on_unknown_request_id() {
 
     let child = Command::new("sleep").arg("60").spawn().unwrap();
     let process = SocketProcess {
-        child,
+        child: Some(child),
         socket: socket_addr,
         stdout_task: None,
         stderr_task: None,
@@ -1504,8 +1677,10 @@ async fn execute_with_process_times_out_on_unknown_request_id() {
 
     server.await.unwrap();
     let mut guard = proc.lock().await;
-    let _ = guard.child.kill().await;
-    let _ = guard.child.wait().await;
+    if let Some(child) = guard.child.as_mut() {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
 }
 
 #[tokio::test]
@@ -1538,7 +1713,7 @@ async fn execute_with_process_reuses_persistent_connection() {
 
     let child = Command::new("sleep").arg("60").spawn().unwrap();
     let process = SocketProcess {
-        child,
+        child: Some(child),
         socket: socket_addr,
         stdout_task: None,
         stderr_task: None,
@@ -1566,8 +1741,10 @@ async fn execute_with_process_reuses_persistent_connection() {
 
     server.await.unwrap();
     let mut guard = proc.lock().await;
-    let _ = guard.child.kill().await;
-    let _ = guard.child.wait().await;
+    if let Some(child) = guard.child.as_mut() {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
 }
 
 #[tokio::test]
@@ -1594,7 +1771,7 @@ async fn execute_with_process_reconnects_after_connection_close() {
 
     let child = Command::new("sleep").arg("60").spawn().unwrap();
     let process = SocketProcess {
-        child,
+        child: Some(child),
         socket: socket_addr,
         stdout_task: None,
         stderr_task: None,
@@ -1625,8 +1802,10 @@ async fn execute_with_process_reconnects_after_connection_close() {
 
     server.await.unwrap();
     let mut guard = proc.lock().await;
-    let _ = guard.child.kill().await;
-    let _ = guard.child.wait().await;
+    if let Some(child) = guard.child.as_mut() {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
 }
 
 #[tokio::test]
@@ -1899,7 +2078,7 @@ async fn respawn_preserves_socket_target() {
         let (_spec, socket_addr) = allocate_tcp_spec();
         let child = Command::new("sleep").arg("60").spawn().unwrap();
         SocketProcess {
-            child,
+            child: Some(child),
             socket: socket_addr,
             stdout_task: None,
             stderr_task: None,
@@ -1940,8 +2119,10 @@ async fn respawn_preserves_socket_target() {
     // Kill process
     {
         let mut guard = proc.lock().await;
-        let _ = guard.child.kill().await;
-        let _ = guard.child.wait().await;
+        if let Some(child) = guard.child.as_mut() {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
     }
     sleep(Duration::from_millis(50)).await;
 
@@ -2070,4 +2251,101 @@ fn determine_needed_runners_deduplicates() {
     );
     assert!(needed.contains("shared"));
     assert_eq!(needed.len(), 1); // Only one runner, deduplicated
+}
+
+#[tokio::test]
+async fn build_runners_external_mode_allows_missing_cmd() {
+    let mut settings = RRQSettings {
+        default_runner_name: "external_runner".to_string(),
+        default_queue_name: "default".to_string(),
+        runner_management_mode: RunnerManagementMode::External,
+        ..Default::default()
+    };
+    settings.runners.insert(
+        "external_runner".to_string(),
+        RunnerConfig {
+            runner_type: RunnerType::Socket,
+            cmd: None,
+            pool_size: Some(1),
+            max_in_flight: Some(1),
+            env: None,
+            cwd: None,
+            tcp_socket: Some("127.0.0.1:19000".to_string()),
+            response_timeout_seconds: None,
+        },
+    );
+
+    let runners = build_runners_from_settings_filtered(&settings, None, None, None)
+        .await
+        .expect("external mode should build runners without cmd");
+    assert!(runners.contains_key("external_runner"));
+}
+
+#[tokio::test]
+async fn build_runners_external_mode_forces_single_socket_target() {
+    let mut settings = RRQSettings {
+        default_runner_name: "external_runner".to_string(),
+        default_queue_name: "default".to_string(),
+        runner_management_mode: RunnerManagementMode::External,
+        ..Default::default()
+    };
+    settings.runners.insert(
+        "external_runner".to_string(),
+        RunnerConfig {
+            runner_type: RunnerType::Socket,
+            cmd: None,
+            pool_size: Some(4),
+            max_in_flight: Some(1),
+            env: None,
+            cwd: None,
+            tcp_socket: Some("127.0.0.1:65535".to_string()),
+            response_timeout_seconds: None,
+        },
+    );
+    let mut pool_sizes = HashMap::new();
+    pool_sizes.insert("external_runner".to_string(), 4);
+    let mut max_in_flight = HashMap::new();
+    max_in_flight.insert("external_runner".to_string(), 1);
+
+    let runners = build_runners_from_settings_filtered(
+        &settings,
+        Some(&pool_sizes),
+        Some(&max_in_flight),
+        None,
+    )
+    .await
+    .expect("external mode should clamp pool size to one socket target");
+    assert!(runners.contains_key("external_runner"));
+}
+
+#[tokio::test]
+async fn build_runners_managed_mode_requires_cmd() {
+    let mut settings = RRQSettings {
+        default_runner_name: "managed_runner".to_string(),
+        default_queue_name: "default".to_string(),
+        runner_management_mode: RunnerManagementMode::Managed,
+        ..Default::default()
+    };
+    settings.runners.insert(
+        "managed_runner".to_string(),
+        RunnerConfig {
+            runner_type: RunnerType::Socket,
+            cmd: None,
+            pool_size: Some(1),
+            max_in_flight: Some(1),
+            env: None,
+            cwd: None,
+            tcp_socket: Some("127.0.0.1:19001".to_string()),
+            response_timeout_seconds: None,
+        },
+    );
+
+    let err = match build_runners_from_settings_filtered(&settings, None, None, None).await {
+        Ok(_) => panic!("managed mode should reject missing cmd"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains("cmd must not be empty for runner 'managed_runner'")
+    );
 }

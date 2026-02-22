@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use rrq::telemetry;
 mod cli_utils;
 mod commands;
@@ -18,6 +18,21 @@ use commands::{
     dlq_stats, job_cancel, job_list, job_replay, job_show, job_trace, queue_inspect, queue_list,
     queue_stats, run_worker, run_worker_watch, runner_python,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum RunnerModeArg {
+    Managed,
+    External,
+}
+
+impl From<RunnerModeArg> for rrq::RunnerManagementMode {
+    fn from(value: RunnerModeArg) -> Self {
+        match value {
+            RunnerModeArg::Managed => rrq::RunnerManagementMode::Managed,
+            RunnerModeArg::External => rrq::RunnerManagementMode::External,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "rrq")]
@@ -70,6 +85,8 @@ enum WorkerCommand {
         queue: Vec<String>,
         #[arg(long, default_value_t = false)]
         burst: bool,
+        #[arg(long, value_enum)]
+        runner_mode: Option<RunnerModeArg>,
     },
     Watch {
         #[arg(long)]
@@ -84,6 +101,8 @@ enum WorkerCommand {
         ignore_pattern: Vec<String>,
         #[arg(long, default_value_t = false)]
         no_gitignore: bool,
+        #[arg(long, value_enum)]
+        runner_mode: Option<RunnerModeArg>,
     },
 }
 
@@ -283,8 +302,9 @@ async fn dispatch_command(command: Commands) -> Result<()> {
                 config,
                 queue,
                 burst,
+                runner_mode,
             } => {
-                run_worker(config, queue, burst, false).await?;
+                run_worker(config, queue, burst, false, runner_mode.map(Into::into)).await?;
             }
             WorkerCommand::Watch {
                 config,
@@ -293,9 +313,18 @@ async fn dispatch_command(command: Commands) -> Result<()> {
                 pattern,
                 ignore_pattern,
                 no_gitignore,
+                runner_mode,
             } => {
-                run_worker_watch(config, queue, path, pattern, ignore_pattern, no_gitignore)
-                    .await?;
+                run_worker_watch(
+                    config,
+                    queue,
+                    path,
+                    pattern,
+                    ignore_pattern,
+                    no_gitignore,
+                    runner_mode.map(Into::into),
+                )
+                .await?;
             }
         },
         Commands::Check { config } => {
@@ -815,6 +844,7 @@ while True:
                 config: config.clone(),
                 queue: Vec::new(),
                 burst: true,
+                runner_mode: None,
             },
         })
         .await?;

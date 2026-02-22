@@ -12,8 +12,8 @@ mod test_support;
 pub use client::{EnqueueOptions, RRQClient};
 pub use job::{Job, JobStatus};
 pub use rrq_config::{
-    CronJob, RRQSettings, RunnerConfig, RunnerType, WatchSettings, load_toml_settings,
-    resolve_config_source,
+    CronJob, RRQSettings, RunnerConfig, RunnerManagementMode, RunnerType, WatchSettings,
+    load_toml_settings, load_toml_settings_with_runner_mode, resolve_config_source,
 };
 pub use runner::{Runner, SocketRunner};
 pub use store::JobStore;

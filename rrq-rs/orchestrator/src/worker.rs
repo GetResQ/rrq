@@ -69,15 +69,43 @@ impl RRQWorker {
             .map(|(queue_name, runner_name)| (normalize_queue_name(&queue_name), runner_name))
             .collect();
 
-        if runners.is_empty() {
-            return Err(anyhow::anyhow!("RRQWorker requires at least one runner"));
+        let mut queues = queues
+            .unwrap_or_else(|| vec![settings.default_queue_name.clone()])
+            .into_iter()
+            .map(|queue_name| normalize_queue_name(&queue_name))
+            .collect::<Vec<_>>();
+        queues.sort();
+        queues.dedup();
+        if queues.is_empty() {
+            return Err(anyhow::anyhow!(
+                "worker must be configured with at least one queue"
+            ));
         }
+
         let default_runner_name = settings.default_runner_name.clone();
-        if !runners.contains_key(&default_runner_name) {
+        let default_runner_required = queues
+            .iter()
+            .any(|queue_name| resolve_routed_runner(&settings.runner_routes, queue_name).is_none());
+        if default_runner_required && !runners.contains_key(&default_runner_name) {
             return Err(anyhow::anyhow!(
                 "default runner '{}' is not configured",
                 default_runner_name
             ));
+        }
+        for queue_name in &queues {
+            if let Some(routed_runner_name) =
+                resolve_routed_runner(&settings.runner_routes, queue_name)
+                && !runners.contains_key(&routed_runner_name)
+            {
+                return Err(anyhow::anyhow!(
+                    "queue '{}' routes to runner '{}' but that runner is not configured",
+                    queue_name,
+                    routed_runner_name
+                ));
+            }
+        }
+        if runners.is_empty() {
+            return Err(anyhow::anyhow!("RRQWorker requires at least one runner"));
         }
         let worker_concurrency = if worker_concurrency == 0 {
             return Err(anyhow::anyhow!("worker_concurrency must be positive"));
@@ -88,18 +116,6 @@ impl RRQWorker {
         let provisional_claim_lock_timeout_ms = provisional_claim_lock_timeout_ms(&settings)?;
         let job_store = JobStore::new(settings.clone()).await?;
         let client = RRQClient::new(settings.clone(), job_store.clone());
-        let mut queues = queues.unwrap_or_else(|| vec![settings.default_queue_name.clone()]);
-        queues = queues
-            .into_iter()
-            .map(|queue_name| normalize_queue_name(&queue_name))
-            .collect();
-        queues.sort();
-        queues.dedup();
-        if queues.is_empty() {
-            return Err(anyhow::anyhow!(
-                "worker must be configured with at least one queue"
-            ));
-        }
         let worker_id = worker_id.unwrap_or_else(|| {
             let short_id = Uuid::new_v4().to_string();
             let suffix = &short_id[..6];

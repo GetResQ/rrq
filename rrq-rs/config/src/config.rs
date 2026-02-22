@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
 use crate::queue::normalize_queue_name;
-use crate::settings::RRQSettings;
+use crate::settings::{RRQSettings, RunnerManagementMode};
 use crate::tcp_socket::parse_tcp_socket;
 
 pub const DEFAULT_CONFIG_FILENAME: &str = "rrq.toml";
@@ -35,6 +35,13 @@ pub fn resolve_config_source(config_path: Option<&str>) -> (Option<String>, Stri
 }
 
 pub fn load_toml_settings(config_path: Option<&str>) -> Result<RRQSettings> {
+    load_toml_settings_with_runner_mode(config_path, None)
+}
+
+pub fn load_toml_settings_with_runner_mode(
+    config_path: Option<&str>,
+    runner_mode_override: Option<RunnerManagementMode>,
+) -> Result<RRQSettings> {
     dotenvy::dotenv().ok();
 
     let (path, _) = resolve_config_source(config_path);
@@ -53,10 +60,13 @@ pub fn load_toml_settings(config_path: Option<&str>) -> Result<RRQSettings> {
     let env_overrides = env_overrides();
     let merged = deep_merge(json_value, env_overrides);
 
-    let settings: RRQSettings = serde_json::from_value(merged.clone()).map_err(|err| {
+    let mut settings: RRQSettings = serde_json::from_value(merged.clone()).map_err(|err| {
         let hint = diagnose_config_error(&merged, &err);
         anyhow::anyhow!("invalid RRQ config: {err}{hint}")
     })?;
+    if let Some(mode) = runner_mode_override {
+        settings.runner_management_mode = mode;
+    }
     validate_runner_configs(&settings)?;
     Ok(settings)
 }
@@ -244,6 +254,7 @@ fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
     }
 
     let default_pool_size = num_cpus::get();
+    let external_mode = settings.runner_management_mode == RunnerManagementMode::External;
     for (name, config) in &settings.runners {
         // Validate pool_size if specified
         if let Some(pool_size) = config.pool_size
@@ -270,7 +281,7 @@ fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
             ));
         }
 
-        if config.cmd.is_none() {
+        if !external_mode && config.cmd.is_none() {
             return Err(anyhow::anyhow!(
                 "runner '{name}' is missing required field 'cmd' (e.g., [\"rrq-runner\", \"--settings\", \"myapp.settings\"])"
             ));
@@ -282,7 +293,11 @@ fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
                 .with_context(|| format!("runner '{name}' has invalid tcp_socket '{socket}'"))?;
 
             // Validate port range is sufficient for pool_size
-            let pool_size = config.pool_size.unwrap_or(default_pool_size);
+            let pool_size = if external_mode {
+                1
+            } else {
+                config.pool_size.unwrap_or(default_pool_size)
+            };
             let port_span = u32::try_from(pool_size.saturating_sub(1)).map_err(|_| {
                 anyhow::anyhow!("runner '{name}' pool_size is too large: {pool_size}")
             })?;
@@ -296,24 +311,6 @@ fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
                 ));
             }
         }
-    }
-
-    // Check that default_runner_name references a configured runner
-    if !settings.default_runner_name.is_empty()
-        && !settings.runners.contains_key(&settings.default_runner_name)
-    {
-        let available: Vec<_> = settings.runners.keys().collect();
-        if available.is_empty() {
-            return Err(anyhow::anyhow!(
-                "default_runner_name is '{}' but no runners are configured",
-                settings.default_runner_name
-            ));
-        }
-        return Err(anyhow::anyhow!(
-            "default_runner_name '{}' does not match any configured runner. Available runners: {:?}",
-            settings.default_runner_name,
-            available
-        ));
     }
 
     Ok(())
@@ -431,6 +428,69 @@ mod tests {
     }
 
     #[test]
+    fn validate_runner_configs_allows_missing_cmd_in_external_mode() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        runner_management_mode = "external"
+        [rrq.runners.python]
+        tcp_socket = "127.0.0.1:9000"
+        "#;
+        fs::write(&path, config).unwrap();
+        let settings = load_toml_settings(Some(path.to_str().unwrap())).unwrap();
+        assert_eq!(
+            settings.runner_management_mode,
+            RunnerManagementMode::External
+        );
+        assert!(settings.runners.contains_key("python"));
+    }
+
+    #[test]
+    fn load_toml_settings_with_runner_mode_allows_external_override_missing_cmd() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        [rrq.runners.python]
+        tcp_socket = "127.0.0.1:9000"
+        "#;
+        fs::write(&path, config).unwrap();
+        let settings = load_toml_settings_with_runner_mode(
+            Some(path.to_str().unwrap()),
+            Some(RunnerManagementMode::External),
+        )
+        .unwrap();
+        assert_eq!(
+            settings.runner_management_mode,
+            RunnerManagementMode::External
+        );
+        assert!(settings.runners.contains_key("python"));
+    }
+
+    #[test]
+    fn load_toml_settings_with_runner_mode_managed_override_requires_cmd() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        runner_management_mode = "external"
+        [rrq.runners.python]
+        tcp_socket = "127.0.0.1:9000"
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings_with_runner_mode(
+            Some(path.to_str().unwrap()),
+            Some(RunnerManagementMode::Managed),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("cmd"));
+    }
+
+    #[test]
     fn validate_runner_configs_rejects_non_loopback() {
         let _lock = env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -483,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_runner_configs_rejects_mismatched_default_runner() {
+    fn validate_runner_configs_allows_mismatched_default_runner() {
         let _lock = env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rrq.toml");
@@ -495,9 +555,9 @@ mod tests {
         tcp_socket = "127.0.0.1:9000"
         "#;
         fs::write(&path, config).unwrap();
-        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
-        assert!(err.to_string().contains("node"));
-        assert!(err.to_string().contains("python"));
+        let settings = load_toml_settings(Some(path.to_str().unwrap())).unwrap();
+        assert_eq!(settings.default_runner_name, "node");
+        assert!(settings.runners.contains_key("python"));
     }
 
     #[test]

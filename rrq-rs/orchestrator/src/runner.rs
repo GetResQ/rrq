@@ -18,7 +18,8 @@ use nix::sys::signal::{Signal, kill, killpg};
 #[cfg(unix)]
 use nix::unistd::Pid;
 use rrq_config::{
-    QUEUE_KEY_PREFIX, RRQSettings, TcpSocketSpec, normalize_queue_name, parse_tcp_socket,
+    QUEUE_KEY_PREFIX, RRQSettings, RunnerManagementMode, TcpSocketSpec, normalize_queue_name,
+    parse_tcp_socket,
 };
 use rrq_protocol::{
     CancelRequest, ExecutionOutcome, ExecutionRequest, FRAME_HEADER_LEN, PROTOCOL_VERSION,
@@ -37,6 +38,8 @@ const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 const MAX_IN_FLIGHT_PER_CONNECTION_LIMIT: usize = 64;
 const REUSE_SOCKET_MAX_ATTEMPTS: usize = 5;
 const REUSE_SOCKET_RETRY_DELAY: Duration = Duration::from_millis(50);
+const SPAWN_RETRY_BASE_DELAY: Duration = Duration::from_millis(100);
+const SPAWN_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy)]
 enum RunnerLogStream {
@@ -155,6 +158,14 @@ fn validate_max_in_flight_limit(max_in_flight: usize, runner_name: &str) -> Resu
 
 fn is_response_timeout_error(err: &anyhow::Error) -> bool {
     err.to_string().contains("runner response timeout")
+}
+
+fn spawn_retry_delay(attempt: usize) -> Duration {
+    let exp = attempt.saturating_sub(1).min(10);
+    let factor = 1u32 << exp;
+    SPAWN_RETRY_BASE_DELAY
+        .saturating_mul(factor)
+        .min(SPAWN_RETRY_MAX_DELAY)
 }
 
 #[cfg(unix)]
@@ -363,7 +374,7 @@ struct PersistentProcessConnection {
 }
 
 struct SocketProcess {
-    child: Child,
+    child: Option<Child>,
     socket: RunnerSocketTarget,
     stdout_task: Option<JoinHandle<()>>,
     stderr_task: Option<JoinHandle<()>>,
@@ -621,6 +632,10 @@ async fn close_pending_with_error(
 }
 
 impl SocketRunnerPool {
+    fn is_external_mode(&self) -> bool {
+        self.cmd.is_empty()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         name: impl Into<String>,
@@ -640,10 +655,6 @@ impl SocketRunnerPool {
             return Err(anyhow::anyhow!("pool_size must be positive"));
         }
         validate_max_in_flight_limit(max_in_flight, &name)?;
-        if cmd.is_empty() {
-            return Err(anyhow::anyhow!("cmd must not be empty"));
-        }
-
         let tcp_socket = tcp_socket.ok_or_else(|| {
             anyhow::anyhow!("runner tcp_socket is required (unix sockets are not supported)")
         })?;
@@ -686,6 +697,20 @@ impl SocketRunnerPool {
         if !processes.is_empty() {
             return Ok(());
         }
+        if self.is_external_mode() {
+            for _ in 0..self.pool_size {
+                let socket = self.next_tcp_socket()?;
+                processes.push(Arc::new(Mutex::new(SocketProcess {
+                    child: None,
+                    socket,
+                    stdout_task: None,
+                    stderr_task: None,
+                    permits: Arc::new(Semaphore::new(self.max_in_flight)),
+                    connection: None,
+                })));
+            }
+            return Ok(());
+        }
         for _ in 0..self.pool_size {
             match self.spawn_process(None).await {
                 Ok(proc) => processes.push(Arc::new(Mutex::new(proc))),
@@ -719,6 +744,11 @@ impl SocketRunnerPool {
         &self,
         reuse_socket: Option<RunnerSocketTarget>,
     ) -> Result<SocketProcess> {
+        if self.is_external_mode() {
+            return Err(anyhow::anyhow!(
+                "cannot spawn process when runner_management_mode=external"
+            ));
+        }
         #[cfg(test)]
         if let Some(spawn_override) = &self.spawn_override {
             return Ok((spawn_override)());
@@ -742,9 +772,20 @@ impl SocketRunnerPool {
                 if attempts >= max_attempts {
                     return Err(err);
                 }
-                if reuse_socket.is_some() {
-                    tokio::time::sleep(REUSE_SOCKET_RETRY_DELAY).await;
-                }
+                let retry_delay = if reuse_socket.is_some() {
+                    REUSE_SOCKET_RETRY_DELAY
+                } else {
+                    spawn_retry_delay(attempts)
+                };
+                debug!(
+                    runner = %self.name,
+                    attempt = attempts,
+                    max_attempts,
+                    delay_ms = retry_delay.as_millis() as u64,
+                    error = %err,
+                    "runner socket unavailable; backing off before spawn retry"
+                );
+                tokio::time::sleep(retry_delay).await;
                 continue;
             }
 
@@ -800,7 +841,7 @@ impl SocketRunnerPool {
             match self.connect_socket(&socket, &mut child).await {
                 Ok(()) => {
                     return Ok(SocketProcess {
-                        child,
+                        child: Some(child),
                         socket,
                         stdout_task,
                         stderr_task,
@@ -825,6 +866,16 @@ impl SocketRunnerPool {
                     if reuse_socket.is_some() || attempts >= max_attempts {
                         return Err(err);
                     }
+                    let retry_delay = spawn_retry_delay(attempts);
+                    debug!(
+                        runner = %self.name,
+                        attempt = attempts,
+                        max_attempts,
+                        delay_ms = retry_delay.as_millis() as u64,
+                        error = %err,
+                        "runner spawn/connect failed; backing off before retry"
+                    );
+                    tokio::time::sleep(retry_delay).await;
                 }
             };
         }
@@ -968,12 +1019,18 @@ impl SocketRunnerPool {
     }
 
     async fn ensure_process(&self, proc: &Arc<Mutex<SocketProcess>>) -> Result<()> {
+        if self.is_external_mode() {
+            return Ok(());
+        }
         let needs_respawn = {
             let mut guard = proc.lock().await;
-            match guard.child.try_wait() {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
-                Err(_) => true,
+            match guard.child.as_mut() {
+                Some(child) => match child.try_wait() {
+                    Ok(Some(_)) => true,
+                    Ok(None) => false,
+                    Err(_) => true,
+                },
+                None => true,
             }
         };
         if needs_respawn {
@@ -983,6 +1040,12 @@ impl SocketRunnerPool {
     }
 
     async fn respawn(&self, proc: &Arc<Mutex<SocketProcess>>) -> Result<()> {
+        if self.is_external_mode() {
+            let mut guard = proc.lock().await;
+            guard.connection = None;
+            self.availability.notify_waiters();
+            return Ok(());
+        }
         let mut guard = proc.lock().await;
         // Capture the old socket target to reuse (prevents port exhaustion on TCP)
         let old_socket = guard.socket;
@@ -1009,12 +1072,10 @@ impl SocketRunnerPool {
             task.abort();
         }
         proc.connection = None;
-        terminate_child_process(
-            &mut proc.child,
-            self.shutdown_term_grace,
-            termination_reason,
-        )
-        .await;
+        if let Some(child) = proc.child.as_mut() {
+            terminate_child_process(child, self.shutdown_term_grace, termination_reason).await;
+        }
+        proc.child = None;
         Ok(())
     }
 
@@ -1099,6 +1160,47 @@ pub struct SocketRunner {
 }
 
 impl SocketRunner {
+    async fn connect_external_with_backoff(
+        &self,
+        socket: RunnerSocketTarget,
+        channel_capacity: usize,
+    ) -> Result<Arc<PersistentProcessConnection>> {
+        let started = Instant::now();
+        let deadline = started + self.pool.connect_timeout;
+        let mut attempt = 0usize;
+
+        loop {
+            attempt += 1;
+            match PersistentProcessConnection::connect(socket, channel_capacity).await {
+                Ok(connection) => {
+                    return Ok(Arc::new(connection));
+                }
+                Err(err) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(anyhow::anyhow!(
+                            "external runner socket not ready after {} attempts ({}ms): {}",
+                            attempt,
+                            started.elapsed().as_millis(),
+                            err
+                        ));
+                    }
+                    let remaining = deadline.saturating_duration_since(now);
+                    let delay = spawn_retry_delay(attempt).min(remaining);
+                    debug!(
+                        runner = %self.pool.name,
+                        socket = %socket,
+                        attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        error = %err,
+                        "external runner connect failed; backing off"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         name: impl Into<String>,
@@ -1153,8 +1255,12 @@ impl SocketRunner {
             }
 
             let channel_capacity = self.pool.max_in_flight.saturating_mul(2).max(64);
-            let connection =
-                Arc::new(PersistentProcessConnection::connect(socket, channel_capacity).await?);
+            let connection = if self.pool.is_external_mode() {
+                self.connect_external_with_backoff(socket, channel_capacity)
+                    .await?
+            } else {
+                Arc::new(PersistentProcessConnection::connect(socket, channel_capacity).await?)
+            };
 
             let mut guard = proc.lock().await;
             if guard.socket != socket {
@@ -1349,10 +1455,13 @@ impl SocketRunner {
             Err(err) => {
                 let exited = {
                     let mut guard = proc.lock().await;
-                    match guard.child.try_wait() {
-                        Ok(Some(_)) => true,
-                        Ok(None) => false,
-                        Err(_) => true,
+                    match guard.child.as_mut() {
+                        Some(child) => match child.try_wait() {
+                            Ok(Some(_)) => true,
+                            Ok(None) => false,
+                            Err(_) => true,
+                        },
+                        None => false,
                     }
                 };
                 if exited && !timed_out {
@@ -1586,12 +1695,21 @@ pub fn resolve_runner_pool_sizes(
 ) -> Result<HashMap<String, usize>> {
     let default_pool_size = default_pool_size.unwrap_or_else(num_cpus::get);
     let mut pool_sizes = HashMap::new();
+    let external_mode = settings.runner_management_mode == RunnerManagementMode::External;
     for (name, config) in &settings.runners {
-        let pool_size = if watch_mode {
+        let mut pool_size = if watch_mode {
             1
         } else {
             config.pool_size.unwrap_or(default_pool_size)
         };
+        if external_mode && pool_size != 1 {
+            info!(
+                runner = %name,
+                configured_pool_size = pool_size,
+                "runner_management_mode=external forces pool_size=1"
+            );
+            pool_size = 1;
+        }
         if pool_size == 0 {
             return Err(anyhow::anyhow!(
                 "pool_size must be positive for runner '{}'",
@@ -1649,6 +1767,7 @@ pub async fn build_runners_from_settings_filtered(
     let connect_timeout = connect_timeout_from_settings(settings.runner_connect_timeout_ms);
     let shutdown_term_grace =
         shutdown_term_grace_from_settings(settings.runner_shutdown_term_grace_seconds);
+    let external_mode = settings.runner_management_mode == RunnerManagementMode::External;
     let mut runners: HashMap<String, Arc<dyn Runner>> = HashMap::new();
     for (name, config) in &settings.runners {
         // Skip runners that are not needed (if filter is provided)
@@ -1660,15 +1779,37 @@ pub async fn build_runners_from_settings_filtered(
         }
 
         // cmd and tcp_socket are validated by the config crate
-        let pool_size = pool_sizes
+        let configured_pool_size = pool_sizes
             .get(name)
             .copied()
             .ok_or_else(|| anyhow::anyhow!("missing pool size for runner '{}'", name))?;
+        let pool_size = if external_mode {
+            if configured_pool_size != 1 {
+                info!(
+                    runner = %name,
+                    configured_pool_size,
+                    "runner_management_mode=external forces pool_size=1"
+                );
+            }
+            1
+        } else {
+            configured_pool_size
+        };
         let max_in_flight = max_in_flight
             .get(name)
             .copied()
             .ok_or_else(|| anyhow::anyhow!("missing max_in_flight for runner '{}'", name))?;
-        let cmd = config.cmd.clone().unwrap_or_default();
+        let cmd = if external_mode {
+            Vec::new()
+        } else {
+            config.cmd.clone().unwrap_or_default()
+        };
+        if !external_mode && cmd.is_empty() {
+            return Err(anyhow::anyhow!(
+                "cmd must not be empty for runner '{}'",
+                name
+            ));
+        }
         let runner = SocketRunner::new(
             name.clone(),
             cmd,
