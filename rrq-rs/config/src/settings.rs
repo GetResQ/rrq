@@ -35,7 +35,8 @@ pub struct RunnerConfig {
     pub max_in_flight: Option<usize>,
     pub env: Option<HashMap<String, String>>,
     pub cwd: Option<String>,
-    pub tcp_socket: Option<String>,
+    pub tcp_host: Option<String>,
+    pub tcp_port: Option<u16>,
     pub allowed_hosts: Option<Vec<String>>,
     pub response_timeout_seconds: Option<f64>,
 }

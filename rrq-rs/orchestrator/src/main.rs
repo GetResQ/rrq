@@ -610,7 +610,7 @@ while True:
         let path = std::env::temp_dir().join(format!("rrq-main-{}.toml", Uuid::new_v4()));
         let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let payload = format!(
-            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_runner_name = \"python\"\n\n[rrq.runners.python]\ncmd = [\"python3\", \"{}\"]\ntcp_socket = \"127.0.0.1:{}\"\npool_size = 1\nmax_in_flight = 1\n",
+            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_runner_name = \"python\"\n\n[rrq.runners.python]\ncmd = [\"python3\", \"{}\"]\ntcp_port = {}\npool_size = 1\nmax_in_flight = 1\n",
             settings.redis_dsn,
             settings.default_queue_name,
             settings.default_dlq_name,

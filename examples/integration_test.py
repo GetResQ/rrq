@@ -53,6 +53,13 @@ def _format_queue_key(queue_name: str) -> str:
     return f"{QUEUE_KEY_PREFIX}{queue_name}"
 
 
+def _split_tcp_socket(tcp_socket: str) -> tuple[str, int]:
+    host, sep, port_part = tcp_socket.rpartition(":")
+    if not sep or not host:
+        raise ValueError(f"Invalid tcp_socket format: {tcp_socket}")
+    return host, int(port_part)
+
+
 def _write_config(
     path: Path,
     *,
@@ -92,7 +99,10 @@ def _write_config(
             ]
         )
         if python_tcp_socket is not None:
-            lines.append(f'tcp_socket = "{python_tcp_socket}"')
+            host, port = _split_tcp_socket(python_tcp_socket)
+            lines.append(f"tcp_port = {port}")
+            if host not in {"127.0.0.1", "localhost", "::1"}:
+                lines.append(f'tcp_host = "{host}"')
         lines.append("")
 
     if rust_cmd is not None:
@@ -106,7 +116,10 @@ def _write_config(
             ]
         )
         if rust_tcp_socket is not None:
-            lines.append(f'tcp_socket = "{rust_tcp_socket}"')
+            host, port = _split_tcp_socket(rust_tcp_socket)
+            lines.append(f"tcp_port = {port}")
+            if host not in {"127.0.0.1", "localhost", "::1"}:
+                lines.append(f'tcp_host = "{host}"')
         lines.append("")
 
     if runner_routes:

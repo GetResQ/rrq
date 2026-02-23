@@ -157,7 +157,7 @@ Add your runner to `rrq.toml`:
 [rrq.runners.rust]
 type = "socket"
 cmd = ["./target/release/my-runner"]
-tcp_socket = "127.0.0.1:9000"
+tcp_port = 9000
 pool_size = 4
 max_in_flight = 10
 ```

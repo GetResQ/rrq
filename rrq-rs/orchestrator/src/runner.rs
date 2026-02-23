@@ -168,6 +168,34 @@ fn spawn_retry_delay(attempt: usize) -> Duration {
         .min(SPAWN_RETRY_MAX_DELAY)
 }
 
+fn runner_tcp_host_or_default(raw: Option<&str>) -> String {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(value) => value.to_string(),
+        None => "127.0.0.1".to_string(),
+    }
+}
+
+fn runner_tcp_socket_from_host_port(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') && !host.ends_with(']') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+fn normalize_managed_tcp_host(configured_host: Option<&str>, runner_name: &str) -> String {
+    let host = runner_tcp_host_or_default(configured_host);
+    if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+        info!(
+            runner = runner_name,
+            configured_host = %host,
+            normalized_host = "127.0.0.1",
+            "runner_management_mode=managed ignores tcp_host and binds loopback"
+        );
+    }
+    "127.0.0.1".to_string()
+}
+
 #[cfg(unix)]
 fn configure_runner_process_group(command: &mut Command) {
     command.process_group(0);
@@ -1784,7 +1812,7 @@ pub async fn build_runners_from_settings_filtered(
             continue;
         }
 
-        // cmd and tcp_socket are validated by the config crate
+        // cmd/tcp_host/tcp_port are validated by the config crate
         let configured_pool_size = pool_sizes
             .get(name)
             .copied()
@@ -1816,6 +1844,16 @@ pub async fn build_runners_from_settings_filtered(
                 name
             ));
         }
+        let port = config.tcp_port.ok_or_else(|| {
+            anyhow::anyhow!("runner '{name}' is missing required field 'tcp_port'")
+        })?;
+        let host = if external_mode {
+            runner_tcp_host_or_default(config.tcp_host.as_deref())
+        } else {
+            normalize_managed_tcp_host(config.tcp_host.as_deref(), name)
+        };
+        let tcp_socket = Some(runner_tcp_socket_from_host_port(&host, port));
+
         let runner = SocketRunner::new(
             name.clone(),
             cmd,
@@ -1823,7 +1861,7 @@ pub async fn build_runners_from_settings_filtered(
             max_in_flight,
             config.env.clone(),
             config.cwd.clone(),
-            config.tcp_socket.clone(),
+            tcp_socket,
             config.allowed_hosts.clone(),
             config.response_timeout_seconds,
             connect_timeout,

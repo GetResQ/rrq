@@ -567,7 +567,8 @@ fn resolve_pool_sizes_and_max_in_flight_watch_mode() {
             max_in_flight: Some(5),
             env: None,
             cwd: None,
-            tcp_socket: Some("127.0.0.1:9000".to_string()),
+            tcp_host: None,
+            tcp_port: Some(9000),
             allowed_hosts: None,
             response_timeout_seconds: None,
         },
@@ -596,7 +597,8 @@ fn resolve_pool_sizes_external_mode_forces_single_process() {
             max_in_flight: Some(2),
             env: None,
             cwd: None,
-            tcp_socket: Some("127.0.0.1:9000".to_string()),
+            tcp_host: None,
+            tcp_port: Some(9000),
             allowed_hosts: None,
             response_timeout_seconds: None,
         },
@@ -630,7 +632,8 @@ fn resolve_pool_sizes_and_max_in_flight_validate_zero() {
             max_in_flight: Some(0),
             env: None,
             cwd: None,
-            tcp_socket: Some("127.0.0.1:9000".to_string()),
+            tcp_host: None,
+            tcp_port: Some(9000),
             allowed_hosts: None,
             response_timeout_seconds: None,
         },
@@ -656,7 +659,8 @@ fn resolve_pool_sizes_and_max_in_flight_validate_protocol_limit() {
             max_in_flight: Some(MAX_IN_FLIGHT_PER_CONNECTION_LIMIT + 1),
             env: None,
             cwd: None,
-            tcp_socket: Some("127.0.0.1:9000".to_string()),
+            tcp_host: None,
+            tcp_port: Some(9000),
             allowed_hosts: None,
             response_timeout_seconds: None,
         },
@@ -696,6 +700,18 @@ fn shutdown_term_grace_from_settings_saturates_huge_values() {
     let duration = std::panic::catch_unwind(|| shutdown_term_grace_from_settings(1e100))
         .expect("shutdown grace conversion should not panic");
     assert_eq!(duration, Duration::MAX);
+}
+
+#[test]
+fn normalize_managed_tcp_host_forces_loopback() {
+    let normalized = normalize_managed_tcp_host(Some("docker-runner"), "python");
+    assert_eq!(normalized, "127.0.0.1");
+}
+
+#[test]
+fn runner_tcp_socket_from_host_port_formats_ipv6() {
+    let socket = runner_tcp_socket_from_host_port("::1", 8123);
+    assert_eq!(socket, "[::1]:8123");
 }
 
 #[tokio::test]
@@ -949,7 +965,7 @@ async fn execute_timeout_recycles_process_without_cancel_hints() {
         processes.first().cloned().unwrap()
     };
     let mut exited = false;
-    for _ in 0..20 {
+    for _ in 0..100 {
         let terminated = {
             let mut guard = proc.lock().await;
             process_is_terminated(&mut guard)
@@ -2276,7 +2292,8 @@ async fn build_runners_external_mode_allows_missing_cmd() {
             max_in_flight: Some(1),
             env: None,
             cwd: None,
-            tcp_socket: Some("127.0.0.1:19000".to_string()),
+            tcp_host: None,
+            tcp_port: Some(19000),
             allowed_hosts: None,
             response_timeout_seconds: None,
         },
@@ -2305,7 +2322,8 @@ async fn build_runners_external_mode_forces_single_socket_target() {
             max_in_flight: Some(1),
             env: None,
             cwd: None,
-            tcp_socket: Some("127.0.0.1:65535".to_string()),
+            tcp_host: None,
+            tcp_port: Some(65535),
             allowed_hosts: None,
             response_timeout_seconds: None,
         },
@@ -2343,7 +2361,8 @@ async fn build_runners_managed_mode_requires_cmd() {
             max_in_flight: Some(1),
             env: None,
             cwd: None,
-            tcp_socket: Some("127.0.0.1:19001".to_string()),
+            tcp_host: None,
+            tcp_port: Some(19001),
             allowed_hosts: None,
             response_timeout_seconds: None,
         },

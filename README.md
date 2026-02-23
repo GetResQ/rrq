@@ -96,7 +96,7 @@ default_runner_name = "python"
 [rrq.runners.python]
 type = "socket"
 cmd = ["rrq-runner", "--settings", "myapp.runner:settings"]
-tcp_socket = "127.0.0.1:9000"
+tcp_port = 9000
 ```
 
 ### 3. Write a handler

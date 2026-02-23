@@ -796,7 +796,7 @@ sys.exit(1 if n == 1 else 0)
         let path = std::env::temp_dir().join(format!("rrq-worker-{}.toml", Uuid::new_v4()));
         let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let payload = format!(
-            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_runner_name = \"python\"\n\n[rrq.runners.python]\ncmd = [\"python3\", \"{}\"]\ntcp_socket = \"127.0.0.1:{}\"\npool_size = 1\nmax_in_flight = 1\n",
+            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_runner_name = \"python\"\n\n[rrq.runners.python]\ncmd = [\"python3\", \"{}\"]\ntcp_port = {}\npool_size = 1\nmax_in_flight = 1\n",
             settings.redis_dsn,
             settings.default_queue_name,
             settings.default_dlq_name,
@@ -813,7 +813,7 @@ sys.exit(1 if n == 1 else 0)
         let path = std::env::temp_dir().join(format!("rrq-worker-{}.toml", Uuid::new_v4()));
         let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let payload = format!(
-            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_runner_name = \"python\"\nrunner_management_mode = \"external\"\n\n[rrq.runners.python]\ntcp_socket = \"127.0.0.1:{}\"\npool_size = 3\nmax_in_flight = 1\n",
+            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_runner_name = \"python\"\nrunner_management_mode = \"external\"\n\n[rrq.runners.python]\ntcp_port = {}\npool_size = 3\nmax_in_flight = 1\n",
             settings.redis_dsn, settings.default_queue_name, settings.default_dlq_name, port,
         );
         tokio_fs::write(&path, payload).await?;
@@ -826,7 +826,7 @@ sys.exit(1 if n == 1 else 0)
         let path = std::env::temp_dir().join(format!("rrq-worker-{}.toml", Uuid::new_v4()));
         let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let payload = format!(
-            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_runner_name = \"missing\"\nrunner_management_mode = \"external\"\n\n[rrq.routing]\n\"{}\" = \"python\"\n\n[rrq.runners.python]\ntcp_socket = \"127.0.0.1:{}\"\npool_size = 1\nmax_in_flight = 1\n",
+            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_runner_name = \"missing\"\nrunner_management_mode = \"external\"\n\n[rrq.routing]\n\"{}\" = \"python\"\n\n[rrq.runners.python]\ntcp_port = {}\npool_size = 1\nmax_in_flight = 1\n",
             settings.redis_dsn,
             settings.default_queue_name,
             settings.default_dlq_name,
@@ -845,7 +845,7 @@ sys.exit(1 if n == 1 else 0)
         let path = std::env::temp_dir().join(format!("rrq-worker-{}.toml", Uuid::new_v4()));
         let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let payload = format!(
-            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_runner_name = \"python\"\n\n[rrq.runners.python]\ncmd = [\"python3\", \"{}\"]\ntcp_socket = \"127.0.0.1:{}\"\npool_size = 1\nmax_in_flight = 1\n\n{}\n",
+            "[rrq]\nredis_dsn = \"{}\"\ndefault_queue_name = \"{}\"\ndefault_dlq_name = \"{}\"\ndefault_runner_name = \"python\"\n\n[rrq.runners.python]\ncmd = [\"python3\", \"{}\"]\ntcp_port = {}\npool_size = 1\nmax_in_flight = 1\n\n{}\n",
             settings.redis_dsn,
             settings.default_queue_name,
             settings.default_dlq_name,

@@ -56,8 +56,10 @@ Notes:
 
 - The orchestrator launches runners with `--tcp-socket` and manages port
   assignment for runner pools.
-- By default, RRQ validates loopback-only hosts. In config-driven worker mode,
-  non-loopback hosts can be explicitly allowlisted via `allowed_hosts`.
+- In managed mode, RRQ forces runner bind host to loopback (`127.0.0.1`) and
+  uses only the configured port.
+- In external mode, non-loopback hosts can be explicitly allowlisted via
+  `allowed_hosts`.
 
 ## Health
 

@@ -727,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "rrq-config"
-version = "0.10.4"
+version = "0.10.8"
 dependencies = [
  "anyhow",
  "chrono",
@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "rrq-producer"
-version = "0.10.4"
+version = "0.10.8"
 dependencies = [
  "anyhow",
  "async-trait",

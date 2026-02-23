@@ -153,6 +153,21 @@ fn deep_merge(base: Value, overlay: Value) -> Value {
     }
 }
 
+fn runner_tcp_host_or_default(raw: Option<&str>) -> String {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(value) => value.to_string(),
+        None => "127.0.0.1".to_string(),
+    }
+}
+
+fn runner_tcp_socket_for_validation(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') && !host.ends_with(']') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 fn diagnose_config_error(config: &Value, err: &serde_json::Error) -> String {
     let err_msg = err.to_string().to_lowercase();
 
@@ -167,7 +182,8 @@ fn diagnose_config_error(config: &Value, err: &serde_json::Error) -> String {
             "max_in_flight",
             "env",
             "cwd",
-            "tcp_socket",
+            "tcp_host",
+            "tcp_port",
             "allowed_hosts",
             "response_timeout_seconds",
         ];
@@ -276,9 +292,9 @@ fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
         }
 
         // Check for missing required fields
-        if config.tcp_socket.is_none() {
+        if config.tcp_port.is_none() {
             return Err(anyhow::anyhow!(
-                "runner '{name}' is missing required field 'tcp_socket' (e.g., \"127.0.0.1:9000\")"
+                "runner '{name}' is missing required field 'tcp_port' (e.g., 9000)"
             ));
         }
 
@@ -288,17 +304,22 @@ fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
             ));
         }
 
-        // Validate tcp_socket format, host, and port
-        if let Some(ref socket) = config.tcp_socket {
-            let spec = parse_tcp_socket_with_allowed_hosts(
-                socket,
-                config.allowed_hosts.as_deref().unwrap_or(&[]),
-            )
-            .with_context(|| format!("runner '{name}' has invalid tcp_socket '{socket}'"))?;
-            if !external_mode && !spec.host.is_loopback() {
+        // Validate tcp host/port and enforce allowlists in external mode
+        if let Some(port) = config.tcp_port {
+            if port == 0 {
                 return Err(anyhow::anyhow!(
-                    "runner '{name}' uses non-loopback tcp_socket host '{socket}', which requires runner_management_mode=\"external\""
+                    "runner '{name}' has invalid tcp_port: 0 - must be in 1..=65535"
                 ));
+            }
+
+            let host = runner_tcp_host_or_default(config.tcp_host.as_deref());
+            if external_mode {
+                let socket = runner_tcp_socket_for_validation(&host, port);
+                parse_tcp_socket_with_allowed_hosts(
+                    &socket,
+                    config.allowed_hosts.as_deref().unwrap_or(&[]),
+                )
+                .with_context(|| format!("runner '{name}' has invalid endpoint '{socket}'"))?;
             }
 
             // Validate port range is sufficient for pool_size
@@ -310,12 +331,12 @@ fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
             let port_span = u32::try_from(pool_size.saturating_sub(1)).map_err(|_| {
                 anyhow::anyhow!("runner '{name}' pool_size is too large: {pool_size}")
             })?;
-            let max_port = u32::from(spec.port) + port_span;
+            let max_port = u32::from(port) + port_span;
             if max_port > u32::from(u16::MAX) {
                 return Err(anyhow::anyhow!(
-                    "runner '{name}' tcp_socket port range insufficient for pool_size {pool_size} \
+                    "runner '{name}' tcp_port range insufficient for pool_size {pool_size} \
                     (port {} + {} would exceed 65535)",
-                    spec.port,
+                    port,
                     pool_size - 1
                 ));
             }
@@ -396,7 +417,7 @@ mod tests {
         default_runner_name = "python"
         [rrq.runners.python]
         cmd = ["rrq-runner", "--settings", "myapp.settings"]
-        tcp_socket = "127.0.0.1:9000"
+        tcp_port = 9000
         pool_size = 2
         max_in_flight = 10
         "#;
@@ -407,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_runner_configs_rejects_missing_tcp_socket() {
+    fn validate_runner_configs_rejects_missing_tcp_port() {
         let _lock = env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rrq.toml");
@@ -418,7 +439,7 @@ mod tests {
         "#;
         fs::write(&path, config).unwrap();
         let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
-        assert!(err.to_string().contains("tcp_socket"));
+        assert!(err.to_string().contains("tcp_port"));
     }
 
     #[test]
@@ -426,11 +447,11 @@ mod tests {
         let _lock = env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rrq.toml");
-        let config = r#"
+        let config = r"
         [rrq]
         [rrq.runners.python]
-        tcp_socket = "127.0.0.1:9000"
-        "#;
+        tcp_port = 9000
+        ";
         fs::write(&path, config).unwrap();
         let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
         assert!(err.to_string().contains("cmd"));
@@ -445,7 +466,7 @@ mod tests {
         [rrq]
         runner_management_mode = "external"
         [rrq.runners.python]
-        tcp_socket = "127.0.0.1:9000"
+        tcp_port = 9000
         "#;
         fs::write(&path, config).unwrap();
         let settings = load_toml_settings(Some(path.to_str().unwrap())).unwrap();
@@ -461,11 +482,11 @@ mod tests {
         let _lock = env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rrq.toml");
-        let config = r#"
+        let config = r"
         [rrq]
         [rrq.runners.python]
-        tcp_socket = "127.0.0.1:9000"
-        "#;
+        tcp_port = 9000
+        ";
         fs::write(&path, config).unwrap();
         let settings = load_toml_settings_with_runner_mode(
             Some(path.to_str().unwrap()),
@@ -488,7 +509,7 @@ mod tests {
         [rrq]
         runner_management_mode = "external"
         [rrq.runners.python]
-        tcp_socket = "127.0.0.1:9000"
+        tcp_port = 9000
         "#;
         fs::write(&path, config).unwrap();
         let err = load_toml_settings_with_runner_mode(
@@ -500,15 +521,16 @@ mod tests {
     }
 
     #[test]
-    fn validate_runner_configs_rejects_non_loopback() {
+    fn validate_runner_configs_rejects_non_loopback_in_external_without_allowlist() {
         let _lock = env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rrq.toml");
         let config = r#"
         [rrq]
+        runner_management_mode = "external"
         [rrq.runners.python]
-        cmd = ["rrq-runner"]
-        tcp_socket = "10.0.0.1:9000"
+        tcp_host = "10.0.0.1"
+        tcp_port = 9000
         "#;
         fs::write(&path, config).unwrap();
         let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
@@ -526,7 +548,8 @@ mod tests {
         [rrq]
         runner_management_mode = "external"
         [rrq.runners.python]
-        tcp_socket = "10.0.0.1:9000"
+        tcp_host = "10.0.0.1"
+        tcp_port = 9000
         allowed_hosts = ["10.0.0.1"]
         "#;
         fs::write(&path, config).unwrap();
@@ -535,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_runner_configs_rejects_non_loopback_allowlist_in_managed_mode() {
+    fn validate_runner_configs_allows_non_loopback_allowlist_in_managed_mode() {
         let _lock = env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rrq.toml");
@@ -543,15 +566,13 @@ mod tests {
         [rrq]
         [rrq.runners.python]
         cmd = ["rrq-runner"]
-        tcp_socket = "10.0.0.1:9000"
+        tcp_host = "10.0.0.1"
+        tcp_port = 9000
         allowed_hosts = ["10.0.0.1"]
         "#;
         fs::write(&path, config).unwrap();
-        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("runner_management_mode=\"external\"")
-        );
+        let settings = load_toml_settings(Some(path.to_str().unwrap())).unwrap();
+        assert!(settings.runners.contains_key("python"));
     }
 
     #[test]
@@ -563,7 +584,7 @@ mod tests {
         [rrq]
         [rrq.runners.python]
         cmd = ["rrq-runner"]
-        tcp_socket = "127.0.0.1:9000"
+        tcp_port = 9000
         pool_size = 0
         "#;
         fs::write(&path, config).unwrap();
@@ -580,7 +601,7 @@ mod tests {
         [rrq]
         [rrq.runners.python]
         cmd = ["rrq-runner"]
-        tcp_socket = "127.0.0.1:9000"
+        tcp_port = 9000
         max_in_flight = 0
         "#;
         fs::write(&path, config).unwrap();
@@ -598,7 +619,7 @@ mod tests {
         default_runner_name = "node"
         [rrq.runners.python]
         cmd = ["rrq-runner"]
-        tcp_socket = "127.0.0.1:9000"
+        tcp_port = 9000
         "#;
         fs::write(&path, config).unwrap();
         let settings = load_toml_settings(Some(path.to_str().unwrap())).unwrap();
@@ -615,7 +636,7 @@ mod tests {
         [rrq]
         [rrq.runners.python]
         cmd = ["rrq-runner"]
-        tcp_socket = "127.0.0.1:9000"
+        tcp_port = 9000
         pool_siz = 4
         "#;
         fs::write(&path, config).unwrap();
@@ -632,7 +653,7 @@ mod tests {
         [rrq]
         [rrq.runners.python]
         cmd = ["rrq-runner"]
-        tcp_socket = "127.0.0.1:65535"
+        tcp_port = 65535
         pool_size = 2
         "#;
         fs::write(&path, config).unwrap();
@@ -649,7 +670,7 @@ mod tests {
         [rrq]
         [rrq.runners.python]
         cmd = ["rrq-runner"]
-        tcp_socket = "127.0.0.1:65535"
+        tcp_port = 65535
         "#;
         fs::write(&path, config).unwrap();
         let result = load_toml_settings(Some(path.to_str().unwrap()));
@@ -672,7 +693,7 @@ mod tests {
         runner_shutdown_term_grace_seconds = -1
         [rrq.runners.python]
         cmd = ["rrq-runner"]
-        tcp_socket = "127.0.0.1:9000"
+        tcp_port = 9000
         "#;
         fs::write(&path, config).unwrap();
         let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
@@ -692,7 +713,7 @@ mod tests {
         runner_shutdown_term_grace_seconds = 1e100
         [rrq.runners.python]
         cmd = ["rrq-runner"]
-        tcp_socket = "127.0.0.1:9000"
+        tcp_port = 9000
         "#;
         fs::write(&path, config).unwrap();
         let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();

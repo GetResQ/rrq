@@ -32,5 +32,5 @@ Then point your worker config to the binary:
 [rrq.runners.rust]
 type = "socket"
 cmd = ["/path/to/socket_runner"]
-tcp_socket = "127.0.0.1:9000"
+tcp_port = 9000
 ```

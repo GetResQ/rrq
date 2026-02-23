@@ -83,7 +83,7 @@ default_runner_name = "python"
 [rrq.runners.python]
 type = "socket"
 cmd = ["rrq-runner", "--settings", "myapp.runner:settings"]
-tcp_socket = "127.0.0.1:9000"
+tcp_port = 9000
 ```
 
 ### 3. Write a job handler
@@ -261,7 +261,7 @@ default_max_retries = 5
 [rrq.runners.python]
 type = "socket"
 cmd = ["rrq-runner", "--settings", "myapp.runner:settings"]
-tcp_socket = "127.0.0.1:9000"
+tcp_port = 9000
 pool_size = 4           # Number of runner processes
 max_in_flight = 10      # Concurrent jobs per runner
 ```
