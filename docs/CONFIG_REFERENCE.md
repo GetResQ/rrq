@@ -63,8 +63,7 @@ Notes:
 
 ## [rrq.runners.<name>]
 
-Runner configuration for localhost TCP socket runtimes (Python, Rust, or
-other).
+Runner configuration for TCP socket runtimes (Python, Rust, or other).
 
 | Key                        | Type             | Default    | Notes                                                        |
 | -------------------------- | ---------------- | ---------- | ------------------------------------------------------------ |
@@ -74,16 +73,21 @@ other).
 | `max_in_flight`            | int              | `1`        | Max concurrent requests per runner process. Must be `<= 64`. |
 | `env`                      | table            | —          | Extra environment variables for the runner process.          |
 | `cwd`                      | string           | —          | Working directory for the runner process.                    |
-| `tcp_socket`               | string           | required   | Localhost TCP socket in `host:port` or `[host]:port` form.   |
+| `tcp_socket`               | string           | required   | TCP socket in `host:port` or `[host]:port` form.             |
+| `allowed_hosts`            | array of strings | —          | Explicit allowlist for non-loopback hosts/hostnames.         |
 | `response_timeout_seconds` | float            | —          | Max wait for a runner response.                              |
 
 Notes:
 
 - `cmd` must be present for runners; RRQ will start one process per
   pool slot and pass `--tcp-socket host:port` for each process.
-- `tcp_socket` must point to a localhost address. When `pool_size > 1`, RRQ
-  assigns one port per runner process starting at the configured port (for
-  example, `9000`, `9001`, ...).
+- By default, `tcp_socket` must point to loopback (`127.0.0.1`, `::1`, or
+  `localhost`).
+- To allow non-loopback endpoints (for example Docker hostnames or private
+  VPC addresses), add the exact host value to `allowed_hosts` and set
+  `runner_management_mode = "external"`.
+- When `pool_size > 1`, RRQ assigns one port per runner process starting at
+  the configured port (for example, `9000`, `9001`, ...).
 - `response_timeout_seconds` is separate from job timeouts. If it is hit, the
   runner process is discarded and the job is treated as failed.
 

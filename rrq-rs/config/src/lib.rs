@@ -19,4 +19,4 @@ pub use otlp::{
 pub use producer::{ProducerSettings, load_producer_settings};
 pub use queue::normalize_queue_name;
 pub use settings::{RRQSettings, RunnerConfig, RunnerManagementMode, RunnerType, WatchSettings};
-pub use tcp_socket::{TcpSocketSpec, parse_tcp_socket};
+pub use tcp_socket::{TcpSocketSpec, parse_tcp_socket, parse_tcp_socket_with_allowed_hosts};

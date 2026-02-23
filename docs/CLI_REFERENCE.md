@@ -50,13 +50,14 @@ Spawn the Python runner runtime (`rrq-runner`).
 Options:
 
 - `--settings` PythonRunnerSettings object path (required)
-- `--tcp-socket` Localhost TCP socket in `host:port` form (required)
+- `--tcp-socket` TCP socket in `host:port` form (required)
 
 Notes:
 
 - The orchestrator launches runners with `--tcp-socket` and manages port
   assignment for runner pools.
-- TCP sockets must bind to localhost.
+- By default, RRQ validates loopback-only hosts. In config-driven worker mode,
+  non-loopback hosts can be explicitly allowlisted via `allowed_hosts`.
 
 ## Health
 

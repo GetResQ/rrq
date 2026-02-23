@@ -22,8 +22,10 @@ transport is a localhost TCP socket with length-delimited JSON frames.
 ## Transport (v2)
 
 - The orchestrator starts the runner process and passes `--tcp-socket host:port`.
-- The runner **binds** a TCP socket on the provided **localhost-only** address
+- By default, the runner **binds** a TCP socket on a **loopback-only** address
   and accepts connections.
+- Non-loopback hosts can be enabled only via explicit configuration allowlists
+  (`allowed_hosts`), and should be protected by network controls.
 - When using TCP runners with a pool, RRQ assigns a distinct port per
   runner process.
 - Each connection is a stream of **length-delimited frames**:

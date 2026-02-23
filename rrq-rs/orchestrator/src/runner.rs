@@ -19,7 +19,7 @@ use nix::sys::signal::{Signal, kill, killpg};
 use nix::unistd::Pid;
 use rrq_config::{
     QUEUE_KEY_PREFIX, RRQSettings, RunnerManagementMode, TcpSocketSpec, normalize_queue_name,
-    parse_tcp_socket,
+    parse_tcp_socket_with_allowed_hosts,
 };
 use rrq_protocol::{
     CancelRequest, ExecutionOutcome, ExecutionRequest, FRAME_HEADER_LEN, PROTOCOL_VERSION,
@@ -645,6 +645,7 @@ impl SocketRunnerPool {
         env: Option<HashMap<String, String>>,
         cwd: Option<String>,
         tcp_socket: Option<String>,
+        allowed_hosts: Option<Vec<String>>,
         response_timeout: Option<Duration>,
         connect_timeout: Duration,
         shutdown_term_grace: Duration,
@@ -658,7 +659,10 @@ impl SocketRunnerPool {
         let tcp_socket = tcp_socket.ok_or_else(|| {
             anyhow::anyhow!("runner tcp_socket is required (unix sockets are not supported)")
         })?;
-        let tcp_socket = parse_tcp_socket(&tcp_socket)?;
+        let tcp_socket = parse_tcp_socket_with_allowed_hosts(
+            &tcp_socket,
+            allowed_hosts.as_deref().unwrap_or(&[]),
+        )?;
         let max_port = tcp_socket.port as u32 + (pool_size as u32).saturating_sub(1);
         if max_port > u16::MAX as u32 {
             return Err(anyhow::anyhow!(
@@ -793,7 +797,7 @@ impl SocketRunnerPool {
             if self.cmd.len() > 1 {
                 command.args(&self.cmd[1..]);
             }
-            // Standard runner contract: accept `--tcp-socket host:port` (localhost only).
+            // Standard runner contract: accept `--tcp-socket host:port`.
             command.arg("--tcp-socket").arg(socket.to_string());
             command.stdin(Stdio::null());
             if self.capture_output {
@@ -1210,6 +1214,7 @@ impl SocketRunner {
         env: Option<HashMap<String, String>>,
         cwd: Option<String>,
         tcp_socket: Option<String>,
+        allowed_hosts: Option<Vec<String>>,
         response_timeout_seconds: Option<f64>,
         connect_timeout: Duration,
         shutdown_term_grace: Duration,
@@ -1225,6 +1230,7 @@ impl SocketRunner {
             env,
             cwd,
             tcp_socket,
+            allowed_hosts,
             response_timeout,
             connect_timeout,
             shutdown_term_grace,
@@ -1818,6 +1824,7 @@ pub async fn build_runners_from_settings_filtered(
             config.env.clone(),
             config.cwd.clone(),
             config.tcp_socket.clone(),
+            config.allowed_hosts.clone(),
             config.response_timeout_seconds,
             connect_timeout,
             shutdown_term_grace,

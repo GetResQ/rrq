@@ -310,6 +310,7 @@ async fn pool_new_rejects_max_in_flight_above_protocol_limit() {
         None,
         Some("127.0.0.1:9000".to_string()),
         None,
+        None,
         Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
         Duration::from_millis(50),
         true,
@@ -567,6 +568,7 @@ fn resolve_pool_sizes_and_max_in_flight_watch_mode() {
             env: None,
             cwd: None,
             tcp_socket: Some("127.0.0.1:9000".to_string()),
+            allowed_hosts: None,
             response_timeout_seconds: None,
         },
     );
@@ -595,6 +597,7 @@ fn resolve_pool_sizes_external_mode_forces_single_process() {
             env: None,
             cwd: None,
             tcp_socket: Some("127.0.0.1:9000".to_string()),
+            allowed_hosts: None,
             response_timeout_seconds: None,
         },
     );
@@ -628,6 +631,7 @@ fn resolve_pool_sizes_and_max_in_flight_validate_zero() {
             env: None,
             cwd: None,
             tcp_socket: Some("127.0.0.1:9000".to_string()),
+            allowed_hosts: None,
             response_timeout_seconds: None,
         },
     );
@@ -653,6 +657,7 @@ fn resolve_pool_sizes_and_max_in_flight_validate_protocol_limit() {
             env: None,
             cwd: None,
             tcp_socket: Some("127.0.0.1:9000".to_string()),
+            allowed_hosts: None,
             response_timeout_seconds: None,
         },
     );
@@ -703,6 +708,7 @@ async fn tcp_socket_pool_range_rejects_overflow() {
         None,
         None,
         Some("127.0.0.1:65535".to_string()),
+        None,
         None,
         Duration::from_millis(DEFAULT_RUNNER_CONNECT_TIMEOUT_MS as u64),
         Duration::from_millis(50),
@@ -2271,6 +2277,7 @@ async fn build_runners_external_mode_allows_missing_cmd() {
             env: None,
             cwd: None,
             tcp_socket: Some("127.0.0.1:19000".to_string()),
+            allowed_hosts: None,
             response_timeout_seconds: None,
         },
     );
@@ -2299,6 +2306,7 @@ async fn build_runners_external_mode_forces_single_socket_target() {
             env: None,
             cwd: None,
             tcp_socket: Some("127.0.0.1:65535".to_string()),
+            allowed_hosts: None,
             response_timeout_seconds: None,
         },
     );
@@ -2336,6 +2344,7 @@ async fn build_runners_managed_mode_requires_cmd() {
             env: None,
             cwd: None,
             tcp_socket: Some("127.0.0.1:19001".to_string()),
+            allowed_hosts: None,
             response_timeout_seconds: None,
         },
     );

@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 
 use anyhow::{Context, Result};
 
@@ -24,6 +24,17 @@ impl TcpSocketSpec {
 /// - Host is localhost/loopback only (127.0.0.1, ::1, localhost)
 /// - Port is > 0 and <= 65535
 pub fn parse_tcp_socket(raw: &str) -> Result<TcpSocketSpec> {
+    parse_tcp_socket_with_allowed_hosts(raw, &[])
+}
+
+/// Parses and validates a tcp_socket string with an explicit non-loopback allowlist.
+///
+/// By default RRQ requires loopback hosts only. When `allowed_hosts` contains the
+/// tcp host exactly (case-insensitive), non-loopback hosts are allowed.
+pub fn parse_tcp_socket_with_allowed_hosts(
+    raw: &str,
+    allowed_hosts: &[String],
+) -> Result<TcpSocketSpec> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(anyhow::anyhow!("tcp_socket cannot be empty"));
@@ -53,18 +64,39 @@ pub fn parse_tcp_socket(raw: &str) -> Result<TcpSocketSpec> {
         return Err(anyhow::anyhow!("tcp_socket port must be > 0"));
     }
 
+    let is_allowed_host = allowed_hosts
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(host));
+
     let ip = if host == "localhost" {
         IpAddr::V4(Ipv4Addr::LOCALHOST)
     } else {
-        let parsed: IpAddr = host
-            .parse()
-            .with_context(|| format!("invalid tcp_socket host '{host}'"))?;
-        if !parsed.is_loopback() {
-            return Err(anyhow::anyhow!(
-                "tcp_socket host must be loopback (127.0.0.1, ::1, or localhost) for security - got '{host}'"
-            ));
+        match host.parse::<IpAddr>() {
+            Ok(parsed) => {
+                if !parsed.is_loopback() && !is_allowed_host {
+                    return Err(anyhow::anyhow!(
+                        "tcp_socket host must be loopback (127.0.0.1, ::1, or localhost) \
+for security, or explicitly listed in allowed_hosts - got '{host}'"
+                    ));
+                }
+                parsed
+            }
+            Err(_) => {
+                if !is_allowed_host {
+                    return Err(anyhow::anyhow!(
+                        "tcp_socket hostname '{host}' is not allowed; add it to allowed_hosts"
+                    ));
+                }
+                let resolved = (host, port)
+                    .to_socket_addrs()
+                    .with_context(|| format!("invalid tcp_socket host '{host}'"))?
+                    .next()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("invalid tcp_socket host '{host}' - no addresses resolved")
+                    })?;
+                resolved.ip()
+            }
         }
-        parsed
     };
 
     Ok(TcpSocketSpec { host: ip, port })
@@ -99,6 +131,20 @@ mod tests {
     fn parse_tcp_socket_rejects_non_loopback() {
         let err = parse_tcp_socket("10.0.0.1:1234").unwrap_err();
         assert!(err.to_string().contains("loopback"));
+    }
+
+    #[test]
+    fn parse_tcp_socket_allows_non_loopback_ip_when_allowlisted() {
+        let spec = parse_tcp_socket_with_allowed_hosts("10.0.0.1:1234", &["10.0.0.1".to_string()])
+            .unwrap();
+        assert_eq!(spec.host, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        assert_eq!(spec.port, 1234);
+    }
+
+    #[test]
+    fn parse_tcp_socket_rejects_hostname_without_allowlist() {
+        let err = parse_tcp_socket("docker-runner:9000").unwrap_err();
+        assert!(err.to_string().contains("allowed_hosts"));
     }
 
     #[test]

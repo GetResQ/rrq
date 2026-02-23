@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 
 use crate::queue::normalize_queue_name;
 use crate::settings::{RRQSettings, RunnerManagementMode};
-use crate::tcp_socket::parse_tcp_socket;
+use crate::tcp_socket::parse_tcp_socket_with_allowed_hosts;
 
 pub const DEFAULT_CONFIG_FILENAME: &str = "rrq.toml";
 pub const ENV_CONFIG_KEY: &str = "RRQ_CONFIG";
@@ -168,6 +168,7 @@ fn diagnose_config_error(config: &Value, err: &serde_json::Error) -> String {
             "env",
             "cwd",
             "tcp_socket",
+            "allowed_hosts",
             "response_timeout_seconds",
         ];
         for (name, runner) in runners {
@@ -289,8 +290,16 @@ fn validate_runner_configs(settings: &RRQSettings) -> Result<()> {
 
         // Validate tcp_socket format, host, and port
         if let Some(ref socket) = config.tcp_socket {
-            let spec = parse_tcp_socket(socket)
-                .with_context(|| format!("runner '{name}' has invalid tcp_socket '{socket}'"))?;
+            let spec = parse_tcp_socket_with_allowed_hosts(
+                socket,
+                config.allowed_hosts.as_deref().unwrap_or(&[]),
+            )
+            .with_context(|| format!("runner '{name}' has invalid tcp_socket '{socket}'"))?;
+            if !external_mode && !spec.host.is_loopback() {
+                return Err(anyhow::anyhow!(
+                    "runner '{name}' uses non-loopback tcp_socket host '{socket}', which requires runner_management_mode=\"external\""
+                ));
+            }
 
             // Validate port range is sufficient for pool_size
             let pool_size = if external_mode {
@@ -506,6 +515,43 @@ mod tests {
         // Error chain includes "loopback" in the cause
         let full_err = format!("{err:?}");
         assert!(full_err.contains("loopback"), "error was: {full_err}");
+    }
+
+    #[test]
+    fn validate_runner_configs_allows_non_loopback_when_allowlisted_in_external_mode() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        runner_management_mode = "external"
+        [rrq.runners.python]
+        tcp_socket = "10.0.0.1:9000"
+        allowed_hosts = ["10.0.0.1"]
+        "#;
+        fs::write(&path, config).unwrap();
+        let settings = load_toml_settings(Some(path.to_str().unwrap())).unwrap();
+        assert!(settings.runners.contains_key("python"));
+    }
+
+    #[test]
+    fn validate_runner_configs_rejects_non_loopback_allowlist_in_managed_mode() {
+        let _lock = env_lock().lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rrq.toml");
+        let config = r#"
+        [rrq]
+        [rrq.runners.python]
+        cmd = ["rrq-runner"]
+        tcp_socket = "10.0.0.1:9000"
+        allowed_hosts = ["10.0.0.1"]
+        "#;
+        fs::write(&path, config).unwrap();
+        let err = load_toml_settings(Some(path.to_str().unwrap())).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("runner_management_mode=\"external\"")
+        );
     }
 
     #[test]
