@@ -192,6 +192,7 @@ rrq/
 
 ## Documentation
 
+- [Architecture Diagrams](docs/ARCHITECTURE.md)
 - [Configuration Reference](docs/CONFIG_REFERENCE.md)
 - [CLI Reference](docs/CLI_REFERENCE.md)
 - [Runner Protocol](docs/RUNNER_PROTOCOL.md)
