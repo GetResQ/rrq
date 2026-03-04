@@ -180,6 +180,18 @@ pub fn init_tracing() {
     }
 }
 
+pub fn shutdown_tracing() {
+    if let Some(provider) = OTEL_LOG_PROVIDER.get() {
+        let _ = provider.shutdown();
+    }
+    if let Some(provider) = OTEL_METRIC_PROVIDER.get() {
+        let _ = provider.shutdown();
+    }
+    if let Some(provider) = OTEL_TRACE_PROVIDER.get() {
+        let _ = provider.shutdown();
+    }
+}
+
 fn default_env_filter() -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
 }
@@ -863,5 +875,11 @@ mod tests {
             extracted.get("correlation_id").map(String::as_str),
             Some("nested-id")
         );
+    }
+
+    #[test]
+    fn shutdown_tracing_is_safe_without_init() {
+        shutdown_tracing();
+        shutdown_tracing();
     }
 }

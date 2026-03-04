@@ -1,6 +1,6 @@
 {
   "name": "rrq-ts",
-  "version": "0.10.8",
+  "version": "0.11.0",
   "description": "RRQ TypeScript producer and runner runtime.",
   "license": "MIT",
   "author": "RRQ Contributors",

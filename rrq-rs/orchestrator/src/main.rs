@@ -503,7 +503,9 @@ async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     telemetry::init_tracing();
     let cli = Cli::parse();
-    dispatch_command(cli.command).await
+    let result = dispatch_command(cli.command).await;
+    telemetry::shutdown_tracing();
+    result
 }
 
 #[cfg(test)]
