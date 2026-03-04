@@ -361,7 +361,11 @@ fn init_otel_layer(
     let tracer = provider.tracer(metadata.service_name.clone());
     let _ = OTEL_TRACE_PROVIDER.set(provider);
 
-    let layer = tracing_opentelemetry::layer().with_tracer(tracer);
+    // Avoid TLS ContextGuard teardown panics on runtime worker shutdown.
+    // We rely on tracing spans for hierarchy and explicit propagation helpers.
+    let layer = tracing_opentelemetry::layer()
+        .with_tracer(tracer)
+        .with_context_activation(false);
     (Some(layer), None)
 }
 

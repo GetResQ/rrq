@@ -433,7 +433,11 @@ pub mod otel {
         let tracer = provider.tracer(service_name.to_string());
         let _ = TRACE_PROVIDER.set(provider.clone());
         opentelemetry::global::set_tracer_provider(provider);
-        let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+        // Avoid TLS ContextGuard teardown panics on runtime worker shutdown.
+        // We rely on tracing spans for hierarchy and explicit propagation helpers.
+        let otel_layer = tracing_opentelemetry::layer()
+            .with_tracer(tracer)
+            .with_context_activation(false);
         (Some(otel_layer), None)
     }
 
