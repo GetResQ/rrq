@@ -28,6 +28,37 @@ class StubProducer {
 }
 
 describe("RRQClient producer requests", () => {
+  it("enqueueWithUniqueKey forwards unique key and params", async () => {
+    const stub = new StubProducer({ job_id: "job-unique" });
+    const client = new RRQClient({ producer: stub as unknown as RustProducer });
+
+    const jobId = await client.enqueueWithUniqueKey("handler", "user-unique", {
+      params: { foo: "bar" },
+    });
+
+    expect(jobId).toBe("job-unique");
+    const options = (stub.lastRequest?.options as any) ?? {};
+    expect(options.unique_key).toBe("user-unique");
+    expect(stub.lastRequest?.params).toEqual({ foo: "bar" });
+  });
+
+  it("enqueueDeferred delegates to enqueue payload building", async () => {
+    const stub = new StubProducer({ job_id: "job-deferred" });
+    const client = new RRQClient({ producer: stub as unknown as RustProducer });
+
+    const jobId = await client.enqueueDeferred("handler", {
+      queueName: "default",
+      params: { deferred: true },
+      jobTimeoutSeconds: 30,
+    });
+
+    expect(jobId).toBe("job-deferred");
+    const options = (stub.lastRequest?.options as any) ?? {};
+    expect(options.queue_name).toBe("default");
+    expect(options.job_timeout_seconds).toBe(30);
+    expect(stub.lastRequest?.params).toEqual({ deferred: true });
+  });
+
   it("omits mode when uniqueKey is provided", async () => {
     const stub = new StubProducer({ job_id: "job-1" });
     const client = new RRQClient({ producer: stub as unknown as RustProducer });

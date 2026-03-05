@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { Registry, parseTcpSocket } from "../src/runner_runtime.js";
+import { Registry, RunnerRuntime, parseTcpSocket } from "../src/runner_runtime.js";
 
 const baseRequest = {
   protocol_version: "2",
@@ -86,5 +86,12 @@ describe("parseTcpSocket", () => {
   it("rejects invalid ports", () => {
     expect(() => parseTcpSocket("localhost:0")).toThrow("Invalid runner tcp_socket port");
     expect(() => parseTcpSocket("localhost:99999")).toThrow("Invalid runner tcp_socket port");
+  });
+});
+
+describe("RunnerRuntime", () => {
+  it("requires --tcp-socket when running from args", async () => {
+    const runtime = new RunnerRuntime(new Registry());
+    await expect(runtime.runFromArgs([])).rejects.toThrow("--tcp-socket must be provided");
   });
 });
