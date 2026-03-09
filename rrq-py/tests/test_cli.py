@@ -98,5 +98,6 @@ def test_main_exits_when_binary_is_missing(
     with pytest.raises(SystemExit) as exc_info:
         cli.main()
 
+    assert isinstance(exc_info.value, SystemExit)
     assert exc_info.value.code == 1
     assert "RRQ Rust binary not found" in capsys.readouterr().err

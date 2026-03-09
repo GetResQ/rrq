@@ -105,13 +105,17 @@ def fake_opentelemetry(
         return {"carrier": carrier}
 
     opentelemetry_module = ModuleType("opentelemetry")
-    opentelemetry_module.propagate = SimpleNamespace(extract=_extract)
-    opentelemetry_module.trace = SimpleNamespace(get_tracer=lambda _name: tracer)
+    setattr(opentelemetry_module, "propagate", SimpleNamespace(extract=_extract))
+    setattr(
+        opentelemetry_module,
+        "trace",
+        SimpleNamespace(get_tracer=lambda _name: tracer),
+    )
 
     trace_module = ModuleType("opentelemetry.trace")
-    trace_module.SpanKind = SimpleNamespace(CONSUMER="consumer")
-    trace_module.Status = _FakeStatus
-    trace_module.StatusCode = SimpleNamespace(ERROR="error")
+    setattr(trace_module, "SpanKind", SimpleNamespace(CONSUMER="consumer"))
+    setattr(trace_module, "Status", _FakeStatus)
+    setattr(trace_module, "StatusCode", SimpleNamespace(ERROR="error"))
 
     monkeypatch.setitem(sys.modules, "opentelemetry", opentelemetry_module)
     monkeypatch.setitem(sys.modules, "opentelemetry.trace", trace_module)
