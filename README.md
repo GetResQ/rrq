@@ -186,7 +186,7 @@ rrq/
 ## Requirements
 
 - Redis 5.0+
-- Rust toolchain (for RRQ core/orchestrator)
+- Rust 1.94.0 toolchain (for RRQ core/orchestrator)
 - Python 3.11+ (for Python SDK)
 - Node.js 20+ or Bun (for TypeScript SDK)
 

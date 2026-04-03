@@ -22,6 +22,8 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -73,6 +75,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.94.0
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
@@ -119,6 +122,8 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v1
@@ -156,6 +161,8 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
 
       - name: Set up Python
         uses: actions/setup-python@v4

@@ -17,6 +17,7 @@ RUST_WORKSPACE = REPO_ROOT / "rrq-rs"
 TARGET_DIR = RUST_WORKSPACE / "target"
 PACKAGE_BIN_DIR = PY_ROOT / "rrq" / "bin"
 PRODUCER_LIB_NAME = "rrq_producer"
+RUST_TOOLCHAIN = "1.94.0"
 
 
 def _run(cmd: list[str], *, env: dict[str, str] | None = None) -> None:
@@ -35,16 +36,28 @@ def _cargo_bin_dir() -> Path:
 
 def _ensure_rust() -> None:
     if shutil.which("cargo"):
+        _run(["rustup", "toolchain", "install", RUST_TOOLCHAIN, "--profile", "minimal"])
         return
 
-    print("cargo not found; installing Rust toolchain via rustup")
+    print(f"cargo not found; installing Rust {RUST_TOOLCHAIN} via rustup")
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
         url = "https://sh.rustup.rs"
         script = tmp_path / "rustup-init.sh"
         urllib.request.urlretrieve(url, script)
         script.chmod(0o755)
-        _run(["sh", str(script), "-y", "--profile", "minimal", "--no-modify-path"])
+        _run(
+            [
+                "sh",
+                str(script),
+                "-y",
+                "--profile",
+                "minimal",
+                "--default-toolchain",
+                RUST_TOOLCHAIN,
+                "--no-modify-path",
+            ]
+        )
 
     cargo_bin = _cargo_bin_dir()
     os.environ["PATH"] = f"{cargo_bin}{os.pathsep}{os.environ.get('PATH', '')}"
@@ -76,10 +89,11 @@ def _build_binary(target: str) -> Path:
     env = os.environ.copy()
     env["CARGO_TARGET_DIR"] = str(TARGET_DIR)
 
-    _run(["rustup", "target", "add", target], env=env)
+    _run(["rustup", "target", "add", "--toolchain", RUST_TOOLCHAIN, target], env=env)
     _run(
         [
             "cargo",
+            f"+{RUST_TOOLCHAIN}",
             "build",
             "--release",
             "-p",
@@ -111,10 +125,11 @@ def _build_producer_lib(target: str) -> Path:
     env = os.environ.copy()
     env["CARGO_TARGET_DIR"] = str(TARGET_DIR)
 
-    _run(["rustup", "target", "add", target], env=env)
+    _run(["rustup", "target", "add", "--toolchain", RUST_TOOLCHAIN, target], env=env)
     _run(
         [
             "cargo",
+            f"+{RUST_TOOLCHAIN}",
             "build",
             "--release",
             "-p",
